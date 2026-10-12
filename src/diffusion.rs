@@ -144,6 +144,11 @@ fn inspect_diffusers(source:&Path)->io::Result<u64> {
         let name=name.to_string_lossy();
         if name.ends_with(".safetensors")||name=="diffusion_pytorch_model.bin"{
             if e.file_type()?.is_file(){
+                if name.ends_with(".safetensors"){
+                    // Reject malformed or already packed weights before scheduling
+                    // any memory-intensive external Python processing.
+                    inspect_source_safetensors(&e.path())?;
+                }
                 weights+=1;
                 total=total.checked_add(e.metadata()?.len()).ok_or_else(||bad("weight sizes overflow"))?;
             }
