@@ -25,6 +25,7 @@ pub struct BenchPlan {
     pub gen_tokens: u32,
     pub repetitions: u32,
     pub gpu_layers: i32,
+    pub device: Option<String>,
     pub model_bytes: u64,
     pub architecture: String,
 }
@@ -41,6 +42,7 @@ impl BenchPlan {
             "generation_tokens": self.gen_tokens,
             "repetitions": self.repetitions,
             "gpu_layers": self.gpu_layers,
+            "requested_device": self.device,
             "external_backend": "llama-bench",
             "weights_loaded": false,
             "memory_fit_verified": false,
@@ -59,6 +61,7 @@ impl BenchPlan {
             .arg("-r").arg(self.repetitions.to_string())
             .arg("-ngl").arg(self.gpu_layers.to_string())
             .arg("-o").arg("json");
+        if let Some(device) = &self.device { command.arg("-dev").arg(device); }
         command
     }
 }
@@ -67,19 +70,25 @@ impl BenchPlan {
 /// originals need not be loaded in order to measure a quantized candidate.
 pub fn prepare_bench(
     model: &Path, tool: &Path, prompt_tokens: u32, gen_tokens: u32,
-    repetitions: u32, gpu_layers: i32,
+    repetitions: u32, gpu_layers: i32, device: Option<&str>,
 ) -> io::Result<BenchPlan> {
     if !(16..=8192).contains(&prompt_tokens) { return Err(invalid("prompt tokens must be 16..=8192")); }
     if !(16..=2048).contains(&gen_tokens) { return Err(invalid("generation tokens must be 16..=2048")); }
     if !(1..=10).contains(&repetitions) { return Err(invalid("repetitions must be 1..=10")); }
     if !(-1..=512).contains(&gpu_layers) { return Err(invalid("GPU layers must be -1..=512")); }
     if tool.as_os_str().is_empty() { return Err(invalid("llama-bench executable must be specified")); }
+    if let Some(device) = device {
+        if device.is_empty() || device.len() > 120 || !device.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'/' || b == b'-') {
+            return Err(invalid("device must be a bounded llama-bench device list such as SYCL0 or Vulkan0/Vulkan2"));
+        }
+    }
     let model = model.canonicalize()?;
     let meta = inspect_gguf(&model)?;
     if meta.tensor_count == 0 { return Err(invalid("GGUF has no tensor catalog")); }
     Ok(BenchPlan {
         model, tool: tool.to_path_buf(), prompt_tokens, gen_tokens,
-        repetitions, gpu_layers, model_bytes: meta.file_bytes,
+        repetitions, gpu_layers, device: device.map(str::to_owned), model_bytes: meta.file_bytes,
         architecture: meta.architecture.unwrap_or_else(|| "unknown".into()),
     })
 }
@@ -257,7 +266,7 @@ pub fn compare_bench_files(reference: &Path, candidate: &Path) -> io::Result<Val
             differences.push(item.into());
         }
     }
-    for item in ["prompt_tokens", "generation_tokens", "repetitions", "gpu_layers"] {
+    for item in ["prompt_tokens", "generation_tokens", "repetitions", "gpu_layers", "requested_device"] {
         if base["requested"][item] != next["requested"][item] {
             differences.push(item.into());
         }
@@ -293,7 +302,7 @@ mod tests {
     use super::*;
     fn plan() -> BenchPlan {
         BenchPlan {model:"test.gguf".into(), tool:"llama-bench".into(),
-            prompt_tokens:512,gen_tokens:128,repetitions:3,gpu_layers:0,
+            prompt_tokens:512,gen_tokens:128,repetitions:3,gpu_layers:0,device:None,
             model_bytes:2400000000,architecture:"qwen3".into()}
     }
     fn example() -> String {
