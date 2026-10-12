@@ -335,8 +335,10 @@ pub fn unpack(input:&Path,output:&Path)->io::Result<PathBuf>{
     let mut h=vec![0;hlen as usize];src.read_exact(&mut h)?;
     let root:Value=serde_json::from_slice(&h).map_err(|e|bad(format!("bad packed JSON: {e}")))?;
     if root["format"].as_str()!=Some("ojon-packed-v1"){return Err(bad("unknown container version"));}
-    let bits=root["bits"].as_u64().ok_or_else(||bad("missing bits"))? as u8;
-    let group=root["group"].as_u64().ok_or_else(||bad("missing group"))? as usize;
+    let bits=u8::try_from(root["bits"].as_u64().ok_or_else(||bad("missing bits"))?)
+        .map_err(|_|bad("unsupported bitwidth"))?;
+    let group=usize::try_from(root["group"].as_u64().ok_or_else(||bad("missing group"))?)
+        .map_err(|_|bad("invalid group size"))?;
     if !matches!(bits,2|3|4)||!(32..=256).contains(&group)||!group.is_power_of_two(){
         return Err(bad("unsupported packed bitwidth or grouping"));
     }
@@ -394,7 +396,9 @@ pub fn unpack(input:&Path,output:&Path)->io::Result<PathBuf>{
             let bo=item["bias_offset"].as_u64().ok_or_else(||bad("missing biases"))?;
             let clen=(rows as u64).checked_mul(rb as u64).ok_or_else(||bad("size overflow"))?;
             let flen=(rows as u64).checked_mul(groups as u64).and_then(|v|v.checked_mul(4)).ok_or_else(||bad("size overflow"))?;
-            if from+clen>size-base||so+flen>size-base||bo+flen>size-base{
+            if from.checked_add(clen).is_none_or(|end|end>size-base)
+                ||so.checked_add(flen).is_none_or(|end|end>size-base)
+                ||bo.checked_add(flen).is_none_or(|end|end>size-base){
                 return Err(bad("packed tensor outside container"));
             }
             let mut q=vec![0;rb];let mut sc=vec![0;groups*4];let mut bi=vec![0;groups*4];
