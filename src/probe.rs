@@ -136,10 +136,60 @@ fn inspect_safetensors(path: &Path) -> io::Result<ModelProbe> {
         identification: if tensor_names.is_empty() { "unknown".into() } else {
             format!("{} tensors; first keys: {}", count, tensor_names.iter().take(3).copied().collect::<Vec<_>>().join(", "))
         }, confidence, bytes:file_size, tensor_count:Some(count as u64),
-        conversion_route:"none", conversion_status:"not_implemented_for_standalone_safetensors",
+        conversion_route:if category==ModelCategory::Diffusion{"public_rebelui_codebook_optional"}else{"none"},
+        conversion_status:if category==ModelCategory::Diffusion{"experimental_no_verified_loader"}else{"not_implemented_for_this_standalone_safetensors"},
         notes:vec![
-            "No general-purpose standalone safetensors converter is connected.".into(),
+            "Standalone diffusion safetensors may be eligible for external W4/W3/W2A8 codebook conversion; full loader compatibility is NOT verified.".into(),
             "Classification from tensor names is advisory; preserve architecture-specific metadata and sensitive tensors.".into(),
+        ],
+    })
+}
+
+/// Diffusers pipelines use model_index.json instead of HF language config.json.
+/// Probe only shallow component folders and local weight-file metadata.
+fn inspect_diffusers_pipeline(directory:&Path)->io::Result<ModelProbe>{
+    let index=load_json(&directory.join("model_index.json"),2*1024*1024)?;
+    let map=index.as_object().ok_or_else(||invalid("Diffusers model_index.json must be an object"))?;
+    let class=index.get("_class_name").and_then(Value::as_str).unwrap_or("unknown");
+    let mut total=0u64;
+    let mut files=0usize;
+    let mut components=Vec::new();
+    for (name, value) in map.iter().filter(|(key,_)|!key.starts_with('_')).take(32) {
+        if !value.is_array(){continue;}
+        components.push(name.clone());
+        let path=directory.join(name);
+        if !path.is_dir(){continue;}
+        for entry in fs::read_dir(path)?.take(4096){
+            let entry=entry?;
+            if !entry.file_type()?.is_file(){continue;}
+            let file=entry.file_name();
+            let file=file.to_string_lossy();
+            if file.ends_with(".safetensors") || file.ends_with(".bin"){
+                total=total.checked_add(entry.metadata()?.len()).ok_or_else(||invalid("weight sizes overflow"))?;
+                files+=1;
+            }
+        }
+    }
+    if files==0{return Err(invalid("Diffusers pipeline has no local component weights in expected shallow directories"));}
+    let is_video=["video","wan","ltx","hunyuanvideo","mochi","cogvideo"].iter()
+        .any(|word|class.to_ascii_lowercase().contains(word));
+    let supported=directory.join("transformer").is_dir()&&map.contains_key("transformer");
+    Ok(ModelProbe {
+        path:directory.to_path_buf(),
+        format:"diffusers_pipeline_directory",
+        category:ModelCategory::Diffusion,
+        identification:format!("{class} ({} components)",components.len()),
+        confidence:"metadata_pipeline_class",
+        bytes:total,tensor_count:None,
+        conversion_route:if supported{"public_diffuse_compressor_optional_svdq_int4"}else{"none"},
+        conversion_status:if supported{"experimental_requires_external_cuda_checkout_and_loader_test"}else{"no_diffusion_adapter_for_this_component_layout"},
+        notes:vec![
+            format!("Diffusers class: {class}; inferred category: {}",
+                if is_video{"video"}else{"image_or_unspecified"}),
+            format!("{} local component weight files found; total size excludes cache/intermediate files",files),
+            format!("model components: {}",components.join(", ")),
+            "SVDQ quantizes eligible transformer weights, not every text encoder, VAE or full pipeline component.".into(),
+            "Compatible target kernel, GPU memory and visual fidelity have not been checked.".into(),
         ],
     })
 }
@@ -148,6 +198,9 @@ pub fn probe_model(input: &Path) -> io::Result<ModelProbe> {
     let path = input.canonicalize()?;
     let metadata = fs::metadata(&path)?;
     if metadata.is_dir() {
+        if path.join("model_index.json").is_file(){
+            return inspect_diffusers_pipeline(&path);
+        }
         let conf = path.join("config.json");
         let value = load_json(&conf, 2 * 1024 * 1024)?;
         let model_type = value.get("model_type").and_then(Value::as_str).unwrap_or("");
