@@ -11,7 +11,7 @@ def main():
     parser = argparse.ArgumentParser(description="Ojon local HQQ conversion bridge")
     parser.add_argument("--source", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--bits", type=int, choices=[2, 3, 4]
+    parser.add_argument("--bits", type=int, choices=[2, 3, 4])
     parser.add_argument("--group", type=int, choices=[32, 64, 128])
     parser.add_argument("--device", choices=["cpu", "cuda", "xpu"])
     args = parser.parse_args()
