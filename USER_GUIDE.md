@@ -8,6 +8,19 @@ Ojon is designed to be **one place to inspect, quantize, and test models** using
 
 Intended path: **Import → Inspect → Choose supported conversion → Preflight → Quantize → Test → Export**.
 
+## AutoRound GGUF recipes (Intel implementation)
+
+Plan a genuine AutoRound GGUF export with `gguf:q4_k_m` (default) or `--bits 5 --format gguf:q5_k_m`. These are experimental upstream formats; the output remains subject to loader and quality validation.
+
+For calibrated tuning, provide an existing local JSON dataset and nonzero iteration count. Without an explicit dataset, Ojon uses 0-iteration RTN and blocks automatic model/dataset downloads when running.
+
+```powershell
+ojon autoround-plan "C:\Models\hf-original" "C:\Models\out\q4-rtn" --bits 4 --iters 0 --device cpu --json
+ojon autoround-plan "C:\Models\hf-original" "C:\Models\out\q5-calibrated" --bits 5 --format gguf:q5_k_m --iters 200 --dataset "C:\Datasets\calibration.json" --device xpu --json
+```
+
+To execute, use `autoround-run` with the same options and `--confirm`. Ojon checks that GGUF output metadata exists, not that the model runs or meets a quality threshold. Compare against existing llama.cpp K/IQ conversions using held-out data and a verified target loader. See Intel's upstream AutoRound step-by-step guide.
+
 ## Plan several quantization options before choosing
 
 ```powershell
