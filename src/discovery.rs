@@ -27,6 +27,7 @@ pub enum BackendId {
     StableDiffusionCpp,
     WhisperCpp,
     IntelAutoRound,
+    IntelSyclCli,
 }
 
 #[derive(Clone, Copy, Debug)]
