@@ -41,7 +41,7 @@ Commands:
   ojon pack-plan <original.safetensors> <output.ojonq> [--bits 4] [--group 64]
   ojon pack-run  <original.safetensors> <output.ojonq> [options] --confirm
   ojon unpack    <packed.ojonq> <restored.safetensors> --confirm
-  ojon autoround-plan <model-dir> <output-dir> [--bits 4] [--device xpu|cuda|cpu] [--python python] [--nsamples 128] [--seqlen 2048] [--json]
+  ojon autoround-plan <model-dir> <output-dir> [--bits 4] [--format gguf:q4_k_m|gguf:q5_k_m] [--iters 0|200] [--dataset local.json] [--device xpu|cuda|cpu] [--python python] [--nsamples 128] [--seqlen 2048] [--json]
   ojon autoround-run  <model-dir> <output-dir> [options] --confirm
   ojon diffusion-inspect <local-source> <output.safetensors> [options] --confirm
   ojon diffusion-run <local-source> <output.safetensors> [options] --confirm
@@ -568,6 +568,9 @@ fn run() -> io::Result<()> {
             let model_dir = PathBuf::from(next_argument(&mut args, "local HF model directory")?);
             let output_dir = PathBuf::from(next_argument(&mut args, "new output directory")?);
             let mut bits = 4u32;
+            let mut format: Option<String> = None;
+            let mut iters = 0u32;
+            let mut dataset: Option<PathBuf> = None;
             let mut device = String::from("xpu");
             let mut python = PathBuf::from("python");
             let mut nsamples = 128u32;
@@ -577,9 +580,21 @@ fn run() -> io::Result<()> {
             while let Some(arg) = args.next() {
                 match arg.to_str() {
                     Some("--bits") => {
-                        bits = next_argument(&mut args, "bits (2, 3, 4, 8)")?
+                        bits = next_argument(&mut args, "bits (2, 3, 4, 5, 6, 8)")?
                             .to_str().ok_or_else(|| invalid("bits require integer"))?
                             .parse().map_err(|_| invalid("invalid bit width"))?;
+                    }
+                    Some("--format") => {
+                        format = Some(next_argument(&mut args, "GGUF export format")?
+                            .to_str().ok_or_else(|| invalid("format requires UTF-8"))?.to_owned());
+                    }
+                    Some("--iters") => {
+                        iters = next_argument(&mut args, "AutoRound iterations")?
+                            .to_str().ok_or_else(|| invalid("iterations require integer"))?
+                            .parse().map_err(|_| invalid("invalid iterations"))?;
+                    }
+                    Some("--dataset") => {
+                        dataset = Some(PathBuf::from(next_argument(&mut args, "local calibration JSON")?));
                     }
                     Some("--device") => {
                         device = next_argument(&mut args, "device (xpu, cuda, cpu)")?
@@ -603,7 +618,10 @@ fn run() -> io::Result<()> {
                     _ => return Err(invalid(format!("unknown autoround option: {}", arg.to_string_lossy()))),
                 }
             }
-            let plan = prepare_autoround_plan(&model_dir, &output_dir, bits, &device, &python, nsamples, seqlen)?;
+            let plan = ojon_backend::autoround::prepare_autoround_recipe_plan(
+                &model_dir, &output_dir, bits, &device, &python, nsamples, seqlen,
+                format.as_deref(), iters, dataset.as_deref()
+            )?;
             if !execute {
                 if json {
                     println!("{}", plan.json());
@@ -614,6 +632,9 @@ fn run() -> io::Result<()> {
                     println!("bits: {}", plan.bits);
                     println!("device: {}", plan.device.as_str());
                     println!("format: {}", plan.format);
+                    println!("method: {}", if plan.iters == 0 { "optimized_rtn" } else { "calibrated_auto_round" });
+                    println!("iterations: {}", plan.iters);
+                    println!("dataset: {}", plan.dataset.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "none (offline RTN)".into()));
                     println!("python: {}", plan.python.display());
                     println!("nsamples: {}", plan.nsamples);
                     println!("seqlen: {}", plan.seqlen);
