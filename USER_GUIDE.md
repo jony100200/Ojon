@@ -8,6 +8,22 @@ Ojon is designed to be **one place to inspect, quantize, and test models** using
 
 Intended path: **Import → Inspect → Choose supported conversion → Preflight → Quantize → Test → Export**.
 
+## Research backends: HQQ and OpenVINO/NNCF
+
+These commands work independently of the KS llama.cpp build. Install public `hqq` + PyTorch + Transformers for HQQ, or public `optimum-intel` / OpenVINO / NNCF for `optimum-cli`, in a trusted local environment. Use `--tool` to select the appropriate Python/CLI executable. Ojon does **not** install dependencies or download a model.
+
+```powershell
+# Dry-run plan, no model loaded
+ojon research-plan hqq "C:\Models\original-hf" "C:\Models\out-hqq" --device cpu --bits 4 --group 64 --json
+ojon research-plan openvino "C:\Models\original-hf" "C:\Models\out-ov-int4" --bits 4 --ratio 1.0 --json
+ojon research-plan openvino "C:\Models\original-hf" "C:\Models\out-ov-mixed" --bits 4 --ratio 0.8 --json
+
+# After validating available RAM, Python packages and target loader, authorize only the chosen experiment
+ojon research-run openvino "C:\Models\original-hf" "C:\Models\out-ov-int4" --bits 4 --ratio 1.0 --confirm
+```
+
+HQQ exports `qmodel.pt` and `config.json`, not GGUF; use `AutoHQQHFModel.from_quantized` for compatible inference. OpenVINO exports matching `.xml/.bin` IR artifacts, not GGUF; use OpenVINO/Optimum Intel loaders. Both conversions are staged to avoid publishing an incomplete final output and explicitly refuse to overwrite existing results. They block automatic Hugging Face network downloads. Their output checks do **not** run the loaders, measure memory or evaluate quality. Intel B60 acceleration is possible only where the exact installed device kernel, PyTorch and model architecture support it. Do not attempt a larger-than-RAM original checkpoint until streaming/offloading has been benchmarked.
+
 ## AutoRound GGUF recipes (Intel implementation)
 
 Plan a genuine AutoRound GGUF export with `gguf:q4_k_m` (default) or `--bits 5 --format gguf:q5_k_m`. These are experimental upstream formats; the output remains subject to loader and quality validation.
