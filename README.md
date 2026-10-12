@@ -131,6 +131,21 @@ ojon research-plan openvino "C:\Models\hf-original" "C:\Models\ov-int4-mixed" --
 
 Both routes stage conversion beside the destination and publish only after checking expected output files, without overwriting originals or downloading dependencies. They set Hugging Face offline flags during execution. **Successful export is not successful inference**: loader compatibility, model correctness, speed, VRAM, machine RAM and held-out quality still need measured tests. In particular, the original HF checkpoint is loaded into memory for HQQ quantization and may not fit a 32GB RAM workstation. Runtime performance on Intel B60 is unverified.
 
+## Resource preflight — measure capacity before quantization
+
+Ojon measures **available host RAM** and **free space on the actual destination volume**, plus per-physical-device NVIDIA free VRAM where `nvidia-smi` is installed. Intel Arc Pro B60 free VRAM is **unknown** until a verified Intel telemetry provider is added; its 24GB advertised total is never claimed to be free.
+
+```powershell
+ojon resource-plan "C:\Models\hf-source" "M:\OjonOutputs" --mode hqq --device xpu --json
+ojon resource-plan "C:\Models\hf-source" "M:\OjonOutputs" --mode openvino --device cpu --json
+ojon resource-plan "C:\Models\hf-source" "M:\OjonOutputs" --mode autoround --device xpu --json
+ojon resource-plan "M:\Models\original-f16.gguf" "M:\OjonOutputs" --mode gguf --device cpu --json
+```
+
+The three statuses are `passes_minimum_policy_only`, `budget_below_policy`, and `unverified`. Budgets are deliberately conservative **safety floors**, not predicted converter peak memory. Unknown measurements remain null, never zero. For GGUF streaming and native tensor packers, host-peak usage stays unknown.
+
+`research-run` and `autoround-run` use this resource check before launching their external tools. Insufficient or missing measurements stop execution by default; `--allow-resource-risk` with an explicitly confirmed run is an operator-only override, not proof of safety or device support. No model tensor payloads are loaded by preflight.
+
 ## Image and video quantization
 
 - **Native Ojon scalar packing:** Pack a local original F16/BF16/F32 safetensors model's eligible weight matrices into a small, independently specified Ojon `.ojonq` container, using only Rust. 2-, 3- and 4-bit groupwise affine precision; sensitive/unmatched tensors remain at original precision. The matching built-in `unpack` restores a **lossily reconstructed** standard safetensors file. A compatible GPU loader is **not yet implemented**; this is a storage/algorithm prototype, not a ready-to-run low-VRAM image model.
