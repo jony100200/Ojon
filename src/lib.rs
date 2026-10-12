@@ -12,6 +12,7 @@ pub mod train;
 pub mod quality;
 pub mod sweep;
 pub mod ppl;
+pub mod calibration;
 pub mod advanced;
 pub mod diffusion;
 pub mod packed;
@@ -39,3 +40,5 @@ pub use autoround::{prepare_autoround_plan, run_autoround, AutoRoundDevice, Auto
 pub use diffusion::{plan_diffusion, run_diffusion, inspect_diffusion_recipe, discover_diffusion, DiffusionPlan, DiffusionResult, DiffusionEngine, DiffusionKind, DiffusionFormat};
 
 pub use packed::{plan_pack,run_pack,unpack,PackPlan,PackResult};
+
+pub use calibration::{prepare_imatrix,run_imatrix,ImatrixPlan};
