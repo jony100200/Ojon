@@ -26,6 +26,7 @@ pub enum BackendId {
     LlamaFactory,
     StableDiffusionCpp,
     WhisperCpp,
+    IntelAutoRound,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -39,7 +40,7 @@ pub struct BackendSpec {
     pub role: &'static str,
 }
 
-const SPECS: [BackendSpec; 8] = [
+const SPECS: [BackendSpec; 9] = [
     BackendSpec {
         id: BackendId::LlamaQuantize,
         name: "llama.cpp quantizer",
@@ -112,6 +113,15 @@ const SPECS: [BackendSpec; 8] = [
         integration: Integration::DiscoveryOnly,
         role: "Speech support requires a separate compatible adapter",
     },
+    BackendSpec {
+        id: BackendId::IntelAutoRound,
+        name: "Intel AutoRound (Adaptive / Mixed-Bit Quantizer)",
+        executable_names: &["auto-round", "auto-round.exe"],
+        override_env: "OJON_AUTOROUND",
+        website: "https://github.com/intel/auto-round",
+        integration: Integration::Wired,
+        role: "Intel AutoRound adaptive / mixed-bit quantization for Intel XPU / CUDA",
+    },
 ];
 
 pub fn backend_specs() -> &'static [BackendSpec] { &SPECS }
@@ -178,8 +188,22 @@ fn search_dirs() -> Vec<(PathBuf, &'static str)> {
             "../llama.cpp/bin",
             "../llama.cpp/build/bin",
             "../KS-Kendro/bin",
+            "../tools/llama_cuda_b11575",
+            "../tools/llama_vulkan_b11575",
         ] {
             dirs.push((cwd.join(sub), "adjacent workspace folder"));
+        }
+    }
+    // Check known workstation environment script folders for Python engines
+    for env_path in [
+        r"M:\ComfyUI-Intel\venv-xpu\Scripts",
+        r"D:\KSAppDev\.venv\Scripts",
+        r"D:\KSAppDev\tools\llama_cuda_b11575",
+        r"D:\KSAppDev\tools\llama_vulkan_b11575",
+    ] {
+        let p = PathBuf::from(env_path);
+        if p.is_dir() {
+            dirs.push((p, "workstation environment folder"));
         }
     }
     dirs

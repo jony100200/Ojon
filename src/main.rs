@@ -9,6 +9,7 @@ use ojon_backend::{
     plan_diffusion, run_diffusion, inspect_diffusion_recipe, discover_diffusion,
     DiffusionEngine, DiffusionKind, DiffusionFormat,
     plan_pack, run_pack, unpack, prepare_imatrix, run_imatrix,
+    prepare_autoround_plan, run_autoround,
 };
 use std::env;
 use std::ffi::OsString;
@@ -39,6 +40,8 @@ Commands:
   ojon pack-plan <original.safetensors> <output.ojonq> [--bits 4] [--group 64]
   ojon pack-run  <original.safetensors> <output.ojonq> [options] --confirm
   ojon unpack    <packed.ojonq> <restored.safetensors> --confirm
+  ojon autoround-plan <model-dir> <output-dir> [--bits 4] [--device xpu|cuda|cpu] [--python python] [--nsamples 128] [--seqlen 2048] [--json]
+  ojon autoround-run  <model-dir> <output-dir> [options] --confirm
   ojon diffusion-inspect <local-source> <output.safetensors> [options] --confirm
   ojon diffusion-run <local-source> <output.safetensors> [options] --confirm
   ojon gsq-plan <checkout> <config.yaml> [--python python] [--layers 1 | --all-layers]
@@ -557,6 +560,71 @@ fn run() -> io::Result<()> {
                     println!("{}: {} bytes, eligible={}", candidate["label"].as_str().unwrap_or("?"),
                         candidate["bytes"], candidate["eligible"]);
                 }
+            }
+        }
+        Some("autoround-plan") | Some("autoround-run") => {
+            let execute = cmd == "autoround-run";
+            let model_dir = PathBuf::from(next_argument(&mut args, "local HF model directory")?);
+            let output_dir = PathBuf::from(next_argument(&mut args, "new output directory")?);
+            let mut bits = 4u32;
+            let mut device = String::from("xpu");
+            let mut python = PathBuf::from("python");
+            let mut nsamples = 128u32;
+            let mut seqlen = 2048u32;
+            let mut json = false;
+            let mut confirm = false;
+            while let Some(arg) = args.next() {
+                match arg.to_str() {
+                    Some("--bits") => {
+                        bits = next_argument(&mut args, "bits (2, 3, 4, 8)")?
+                            .to_str().ok_or_else(|| invalid("bits require integer"))?
+                            .parse().map_err(|_| invalid("invalid bit width"))?;
+                    }
+                    Some("--device") => {
+                        device = next_argument(&mut args, "device (xpu, cuda, cpu)")?
+                            .to_string_lossy().to_string();
+                    }
+                    Some("--python") => {
+                        python = PathBuf::from(next_argument(&mut args, "Python executable")?);
+                    }
+                    Some("--nsamples") => {
+                        nsamples = next_argument(&mut args, "calibration samples")?
+                            .to_str().ok_or_else(|| invalid("nsamples require integer"))?
+                            .parse().map_err(|_| invalid("invalid nsamples"))?;
+                    }
+                    Some("--seqlen") => {
+                        seqlen = next_argument(&mut args, "sequence length")?
+                            .to_str().ok_or_else(|| invalid("seqlen requires integer"))?
+                            .parse().map_err(|_| invalid("invalid seqlen"))?;
+                    }
+                    Some("--json") => json = true,
+                    Some("--confirm") if execute => confirm = true,
+                    _ => return Err(invalid(format!("unknown autoround option: {}", arg.to_string_lossy()))),
+                }
+            }
+            let plan = prepare_autoround_plan(&model_dir, &output_dir, bits, &device, &python, nsamples, seqlen)?;
+            if !execute {
+                if json {
+                    println!("{}", plan.json());
+                } else {
+                    println!("backend: intel_autoround");
+                    println!("model_directory: {}", plan.model_dir.display());
+                    println!("output_directory: {}", plan.output_dir.display());
+                    println!("bits: {}", plan.bits);
+                    println!("device: {}", plan.device.as_str());
+                    println!("format: {}", plan.format);
+                    println!("python: {}", plan.python.display());
+                    println!("nsamples: {}", plan.nsamples);
+                    println!("seqlen: {}", plan.seqlen);
+                    println!("status: PLAN_ONLY");
+                }
+            } else {
+                if !confirm {
+                    return Err(invalid("autoround execution writes a quantized model; pass --confirm"));
+                }
+                println!("{}", plan.json());
+                run_autoround(&plan)?;
+                println!("autoround_status: COMPLETED");
             }
         }
         Some("probe") => {

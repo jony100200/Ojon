@@ -634,6 +634,7 @@ impl Workstation {
                                     BackendId::LlamaFactory => "LoRA / QLoRA trainer",
                                     BackendId::StableDiffusionCpp => "Image diffusion",
                                     BackendId::WhisperCpp => "Speech / Whisper",
+                                    BackendId::IntelAutoRound => "Intel AutoRound (XPU)",
                                 };
                                 panel.horizontal(22.0, |row| {
                                     row.label(&format!("{}:", label));
