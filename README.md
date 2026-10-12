@@ -115,6 +115,22 @@ ojon autoround-plan "C:\Models\Qwen3-4B-original" "C:\Models\out\q5-tuned" --bit
 
 Run real held-out quality, load and performance tests before comparing AutoRound candidates against llama.cpp's Q4_K_M, Q5_K_M and IQ/imatrix methods. The `--device xpu` selection is a requested target, not proof the Intel GPU or Python dependencies are available. The complete public method remains owned by Intel's separate tool; Ojon does not reimplement its quantization mathematics.
 
+## Compare HQQ and OpenVINO/NNCF against GGUF
+
+HQQ and OpenVINO/NNCF are **independent optional public implementations**. Ojon does not reimplement either quantizer, install Python packages, or use KS llama.cpp to produce the model. These experimental adapters currently accept locally stored, original Hugging Face checkpoints intended for **causal language models**. Do not treat their outputs as GGUF or automatically compatible with your existing GGUF inference engine.
+
+- [HQQ](https://github.com/dropbox/hqq) quantizes weights without calibration using an independently installed `hqq`/PyTorch/Transformers environment. The output is a native HQQ `qmodel.pt` archive for HQQ's own loader. XPU is only a *requested* target and requires a real compatible torch.xpu environment.
+- [OpenVINO/NNCF through Optimum Intel](https://github.com/huggingface/optimum-intel/blob/main/docs/source/openvino/export.mdx) exports INT4 weight-only OpenVINO IR `.xml/.bin` files via an independently installed `optimum-cli`. Setting `--ratio 0.8` keeps some backup INT8 layers, which may help quality at a larger final size. It is not a GGUF conversion.
+
+```powershell
+ojon research-plan hqq "C:\Models\hf-original" "C:\Models\hqq-q4" --bits 4 --group 64 --device xpu --json
+ojon research-plan openvino "C:\Models\hf-original" "C:\Models\ov-int4" --bits 4 --group 128 --ratio 1.0 --json
+ojon research-plan openvino "C:\Models\hf-original" "C:\Models\ov-int4-mixed" --bits 4 --group 128 --ratio 0.8 --json
+# After reviewing one plan, change research-plan to research-run and add --confirm.
+```
+
+Both routes stage conversion beside the destination and publish only after checking expected output files, without overwriting originals or downloading dependencies. They set Hugging Face offline flags during execution. **Successful export is not successful inference**: loader compatibility, model correctness, speed, VRAM, machine RAM and held-out quality still need measured tests. In particular, the original HF checkpoint is loaded into memory for HQQ quantization and may not fit a 32GB RAM workstation. Runtime performance on Intel B60 is unverified.
+
 ## Image and video quantization
 
 - **Native Ojon scalar packing:** Pack a local original F16/BF16/F32 safetensors model's eligible weight matrices into a small, independently specified Ojon `.ojonq` container, using only Rust. 2-, 3- and 4-bit groupwise affine precision; sensitive/unmatched tensors remain at original precision. The matching built-in `unpack` restores a **lossily reconstructed** standard safetensors file. A compatible GPU loader is **not yet implemented**; this is a storage/algorithm prototype, not a ready-to-run low-VRAM image model.
