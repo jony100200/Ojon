@@ -635,6 +635,7 @@ impl Workstation {
                                     BackendId::StableDiffusionCpp => "Image diffusion",
                                     BackendId::WhisperCpp => "Speech / Whisper",
                                     BackendId::IntelAutoRound => "Intel AutoRound (XPU)",
+                                    BackendId::IntelSyclCli => "Intel SYCL / oneAPI",
                                 };
                                 panel.horizontal(22.0, |row| {
                                     row.label(&format!("{}:", label));

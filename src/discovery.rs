@@ -41,7 +41,7 @@ pub struct BackendSpec {
     pub role: &'static str,
 }
 
-const SPECS: [BackendSpec; 9] = [
+const SPECS: [BackendSpec; 10] = [
     BackendSpec {
         id: BackendId::LlamaQuantize,
         name: "llama.cpp quantizer",
@@ -123,6 +123,15 @@ const SPECS: [BackendSpec; 9] = [
         integration: Integration::Wired,
         role: "Intel AutoRound adaptive / mixed-bit quantization for Intel XPU / CUDA",
     },
+    BackendSpec {
+        id: BackendId::IntelSyclCli,
+        name: "llama.cpp SYCL (Intel Arc XMX)",
+        executable_names: &["llama-cli", "llama-cli.exe"],
+        override_env: "OJON_LLAMA_SYCL",
+        website: "https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/SYCL.md",
+        integration: Integration::Wired,
+        role: "GGUF inference accelerated on Intel Arc GPU via native oneAPI SYCL and XMX engines",
+    },
 ];
 
 pub fn backend_specs() -> &'static [BackendSpec] { &SPECS }
@@ -191,6 +200,7 @@ fn search_dirs() -> Vec<(PathBuf, &'static str)> {
             "../KS-Kendro/bin",
             "../tools/llama_cuda_b11575",
             "../tools/llama_vulkan_b11575",
+            "../tools/llama_sycl_b11575",
         ] {
             dirs.push((cwd.join(sub), "adjacent workspace folder"));
         }
@@ -201,6 +211,7 @@ fn search_dirs() -> Vec<(PathBuf, &'static str)> {
         r"D:\KSAppDev\.venv\Scripts",
         r"D:\KSAppDev\tools\llama_cuda_b11575",
         r"D:\KSAppDev\tools\llama_vulkan_b11575",
+        r"D:\KSAppDev\tools\llama_sycl_b11575",
     ] {
         let p = PathBuf::from(env_path);
         if p.is_dir() {
@@ -227,6 +238,10 @@ fn discover_one(spec: BackendSpec, dirs: &[(PathBuf, &'static str)]) -> FoundBac
         for executable in spec.executable_names {
             let path = dir.join(executable);
             if binary_at(&path) {
+                // Ensure SYCL backend only selects a genuine SYCL-enabled build directory
+                if spec.id == BackendId::IntelSyclCli && !dir.join("ggml-sycl.dll").is_file() && !dir.join("sycl-ls.exe").is_file() {
+                    continue;
+                }
                 return FoundBackend { spec, executable: Some(path), found_via: Some(origin) };
             }
         }
