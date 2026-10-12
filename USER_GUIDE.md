@@ -32,7 +32,9 @@ Teacher–student distillation is a future **separate** workflow; it is **not cu
 For supported GGUF LLMs, a quality-aware converter may use an **importance matrix** made from representative text with the official `llama-imatrix` binary:
 
 ```bash
-llama-imatrix -m /models/source-f16.gguf -f /data/representative-text.txt -o /models/imatrix.gguf
+ojon imatrix-plan /models/source-f16.gguf /data/representative-text.txt /models/imatrix.gguf
+# Only after reviewing local calibration data, original weights, expected system RAM and target hardware:
+ojon imatrix-run /models/source-f16.gguf /data/representative-text.txt /models/imatrix.gguf --gpu-layers 0 --context 2048 --confirm
 ojon plan /models/source-f16.gguf /models/output-Q4_K_M.gguf --precision Q4_K_M --imatrix /models/imatrix.gguf
 ojon quantize /models/source-f16.gguf /models/output-Q4_K_M.gguf --precision Q4_K_M --imatrix /models/imatrix.gguf
 ```
