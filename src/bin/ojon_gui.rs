@@ -629,6 +629,7 @@ impl Workstation {
                                     BackendId::LlamaQuantize => "GGUF converter",
                                     BackendId::LlamaCli => "GGUF inference",
                                     BackendId::LlamaPerplexity => "GGUF quality / PPL",
+                                    BackendId::LlamaImatrix => "GGUF calibration",
                                     BackendId::HfConverter => "HF to GGUF script",
                                     BackendId::LlamaFactory => "LoRA / QLoRA trainer",
                                     BackendId::StableDiffusionCpp => "Image diffusion",
