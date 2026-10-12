@@ -160,6 +160,18 @@ fn search_dirs() -> Vec<(PathBuf, &'static str)> {
             }
         }
     }
+    // Check adjacent peer directories when repos are cloned side-by-side
+    if let Ok(cwd) = env::current_dir() {
+        for sub in [
+            "bin",
+            "../llama.cpp",
+            "../llama.cpp/bin",
+            "../llama.cpp/build/bin",
+            "../KS-Kendro/bin",
+        ] {
+            dirs.push((cwd.join(sub), "adjacent workspace folder"));
+        }
+    }
     dirs
 }
 

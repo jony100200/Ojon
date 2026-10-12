@@ -1,5 +1,12 @@
 //! Ojon backend CLI. The eventual Kathamo GUI imports ojon_backend directly.
-use ojon_backend::{inspect_gguf, prepare_gguf, quantize_gguf, smoke_gguf, discover_backends, Integration, BackendId, hf_python_path, discovered_path, inspect_hf_folder, prepare_hf, quantize_hf, probe_model, prepare_train, run_train, parse_quality_report, recommend, prepare_sweep, execute_sweep, parse_precisions, evaluate_sweep, PplSettings, Precision, GgufSummary, QuantizePlan, plan_gsq, plan_gsq_assemble, plan_rco_database, plan_rco_search, plan_rco_assemble, run_advanced, discover_advanced};
+use ojon_backend::{
+    audit_dataset_file, discover_advanced, discover_backends, discovered_path, evaluate_sweep,
+    execute_sweep, hf_python_path, inspect_gguf, inspect_hf_folder, parse_precisions,
+    parse_quality_report, plan_gsq, plan_gsq_assemble, plan_rco_assemble, plan_rco_database,
+    plan_rco_search, prepare_distill_plan, prepare_gguf, prepare_hf, prepare_sweep, prepare_train,
+    probe_model, quantize_gguf, quantize_hf, recommend, retrieve_recipes, run_advanced, run_train,
+    smoke_gguf, BackendId, GgufSummary, Integration, PplSettings, Precision, QuantizePlan,
+};
 use std::env;
 use std::ffi::OsString;
 use std::io::{self, ErrorKind};
@@ -14,6 +21,9 @@ Commands:
   ojon verify    <model.gguf>
   ojon backends [--json]     Detect installed engines and show official download links
   ojon probe <model-path> [--json]   Identify model format/family without loading weights
+  ojon dataset-audit <dataset.jsonl> [--json]   Audit external dataset for drift, dead paths, staleness
+  ojon distill-plan  <dataset.jsonl> <output-dir> [--min-score 0.5] [--json]  Curate SFT split
+  ojon retrieve      <dataset.jsonl> <query> [--limit 5] [--min-score 0.4] [--json] [--markdown]
   ojon train-plan <config.yaml> [--tool <llamafactory-cli>] [--json]
   ojon train-run  <config.yaml> [--tool <llamafactory-cli>] --confirm
   ojon recommend <quality-evidence.json> [--json]  Smallest verified model within tolerance
@@ -440,6 +450,117 @@ fn run() -> io::Result<()> {
                 run_train(&plan)?;
                 println!("trainer_exit: SUCCESS; output_dir: {}", plan.output_dir.display());
                 println!("quality_benchmark: NOT_RUN; distillation: NOT_IMPLEMENTED");
+            }
+        }
+        Some("dataset-audit") => {
+            let path = PathBuf::from(next_argument(&mut args, "dataset file (.jsonl or .json)")?);
+            let mut json = false;
+            while let Some(opt) = args.next() {
+                match opt.to_str() {
+                    Some("--json") => json = true,
+                    _ => return Err(invalid(format!("unknown dataset-audit option: {}", opt.to_string_lossy()))),
+                }
+            }
+            let report = audit_dataset_file(&path)?;
+            if json {
+                println!("{}", report.json());
+            } else {
+                println!("dataset: {}", report.source_path.display());
+                println!("total_records: {}", report.total_records);
+                println!("active_records: {}", report.active_records);
+                println!("superseded_records: {}", report.superseded_records);
+                println!("references_live: {}", report.total_live_refs);
+                println!("references_dead: {}", report.total_dead_refs);
+                println!("evergreen_records: {}", report.evergreen_count);
+                println!("operational_records: {}", report.operational_count);
+                println!("volatile_records: {}", report.volatile_count);
+                println!("ephemeral_records: {}", report.ephemeral_count);
+                println!("avg_decay_factor: {:.3}", report.avg_decay_factor);
+                println!("avg_composite_score: {:.3}", report.avg_composite_score);
+            }
+        }
+        Some("distill-plan") => {
+            let source = PathBuf::from(next_argument(&mut args, "source dataset file (.jsonl)")?);
+            let out_dir = PathBuf::from(next_argument(&mut args, "new output directory")?);
+            let mut min_score = 0.50f64;
+            let mut json = false;
+            while let Some(opt) = args.next() {
+                match opt.to_str() {
+                    Some("--min-score") => {
+                        let os = next_argument(&mut args, "minimum score threshold")?;
+                        let s = os.to_str().ok_or_else(|| invalid("min-score must be text"))?;
+                        min_score = s.parse::<f64>().map_err(|_| invalid("invalid min-score float"))?;
+                    }
+                    Some("--json") => json = true,
+                    _ => return Err(invalid(format!("unknown distill-plan option: {}", opt.to_string_lossy()))),
+                }
+            }
+            let plan = prepare_distill_plan(&source, &out_dir, min_score)?;
+            if json {
+                println!("{}", plan.json());
+            } else {
+                println!("source: {}", plan.source_dataset.display());
+                println!("output_directory: {}", plan.output_dir.display());
+                println!("total_input_rows: {}", plan.total_input_rows);
+                println!("curated_rows: {}", plan.curated_rows);
+                println!("curated_split: {}", plan.curated_split_path.display());
+                println!("min_score_threshold: {:.2}", plan.min_score_threshold);
+                println!("live_reference_ratio: {:.1}%", plan.live_reference_ratio * 100.0);
+                println!("status: CURATED_SPLIT_AND_PLAN_WRITTEN");
+            }
+        }
+        Some("retrieve") => {
+            let dataset = PathBuf::from(next_argument(&mut args, "dataset file (.jsonl)")?);
+            let query = next_argument(&mut args, "query search text")?
+                .to_str()
+                .ok_or_else(|| invalid("query must be valid Unicode"))?
+                .to_owned();
+            let mut limit = 5usize;
+            let mut min_score = 0.35f64;
+            let mut json = false;
+            let mut markdown = false;
+            while let Some(opt) = args.next() {
+                match opt.to_str() {
+                    Some("--limit") => {
+                        let os = next_argument(&mut args, "match limit")?;
+                        let s = os.to_str().ok_or_else(|| invalid("limit must be text"))?;
+                        limit = s.parse::<usize>().map_err(|_| invalid("invalid limit integer"))?;
+                    }
+                    Some("--min-score") => {
+                        let os = next_argument(&mut args, "minimum score threshold")?;
+                        let s = os.to_str().ok_or_else(|| invalid("min-score must be text"))?;
+                        min_score = s.parse::<f64>().map_err(|_| invalid("invalid min-score float"))?;
+                    }
+                    Some("--json") => json = true,
+                    Some("--markdown") => markdown = true,
+                    _ => return Err(invalid(format!("unknown retrieve option: {}", opt.to_string_lossy()))),
+                }
+            }
+            let matches = retrieve_recipes(&dataset, &query, limit, min_score)?;
+            if json {
+                let arr: Vec<_> = matches.iter().map(|m| m.json()).collect();
+                println!("{}", serde_json::json!({"query": query, "dataset": dataset.to_string_lossy(), "count": arr.len(), "matches": arr}));
+            } else if markdown {
+                println!("### Distilled Recipes: \"{}\" ({} matches)\n", query, matches.len());
+                for (idx, m) in matches.iter().enumerate() {
+                    println!("{}. **{}** `[{}]` (Score: {:.2}, Live: {:.0}%, Decay: {:.0}%)",
+                        idx + 1, m.title, m.tier, m.match_score, m.liveness_factor * 100.0, m.decay_factor * 100.0);
+                    println!("   - **Intent**: {}", m.instruction.lines().next().unwrap_or(""));
+                    let preview = m.summary_or_output.lines().take(3).collect::<Vec<_>>().join("\n     ");
+                    println!("   - **Recipe**:\n     {}\n", preview);
+                }
+            } else {
+                println!("Query: \"{}\" | Matches: {}", query, matches.len());
+                for (idx, m) in matches.iter().enumerate() {
+                    println!("[{}] {} (tier: {}, score: {:.2})", idx + 1, m.title, m.tier, m.match_score);
+                    println!("    Instruction: {}", m.instruction.lines().next().unwrap_or(""));
+                    let snippet = if m.summary_or_output.len() > 160 {
+                        format!("{}...", &m.summary_or_output[..160])
+                    } else {
+                        m.summary_or_output.clone()
+                    };
+                    println!("    Preview: {}\n", snippet.replace('\n', " "));
+                }
             }
         }
         Some("inspect") | Some("verify") => {

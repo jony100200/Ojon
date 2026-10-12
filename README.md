@@ -19,6 +19,9 @@ Ojon brings existing, independent model tools under one roof. Install only the p
 - Compare completed GGUF variants against an original via the optional public `llama-perplexity` executable. **Perplexity is only one quality proxy**, not a guarantee of retained task performance.
 - Run a basic inference smoke test with an installed `llama-cli`.
 - Preflight and explicitly launch an optional local LoRA/QLoRA fine-tune using installed LLaMA-Factory.
+- Curate and prepare high-signal distillation and SFT training splits from external datasets (`ojon distill-plan`), filtering decayed or superseded rows.
+- Audit external datasets for drift, dead file references, and knowledge decay (`ojon dataset-audit`).
+- Retrieve relevant distilled recipes with sub-millisecond native Rust lookup (`ojon retrieve`), weighted by disk liveness and knowledge half-life.
 - Plan and explicitly launch optional upstream [GSQ](https://github.com/IST-DASLab/GSQ) and [RCO](https://github.com/IST-DASLab/RCO) optimization stages, using user-installed Python environments. GSQ assembly and RCO compressed-tensors assembly remain separate explicit operations; their hardware compatibility and results are not yet tested.
 - Expose JSON model probes, backend discovery, candidate planning, and quality-report ranking for local agents.
 
@@ -59,6 +62,21 @@ ojon eval-sweep "C:\Models\outputs\ojon-sweep-ACTUAL-ID.json" "C:\Models\eval.tx
 ```
 
 The sweep writes real conversion measurements. The perplexity evaluator runs *only if you explicitly invoke it* with compatible public tools and a held-out corpus. It reports a **provisional PPL-only** comparison, not a complete model-quality verdict. For any important task, test actual generated outputs, tool usage, code, OCR/grounding or the model's other intended capability.
+
+### Distill, audit, and retrieve external recipes
+
+Ojon operates strictly on external paths specified by the caller and never touches files in the repository itself.
+
+```powershell
+# Audit an external dataset for drift, dead file references, and knowledge decay
+ojon dataset-audit "C:\Datasets\sft_train.jsonl"
+
+# Curate high-signal rows into a new output split directory
+ojon distill-plan "C:\Datasets\sft_train.jsonl" "C:\Datasets\distilled_split" --min-score 0.65
+
+# Sub-millisecond recipe lookup from an external dataset (supports --json and --markdown)
+ojon retrieve "C:\Datasets\sft_train.jsonl" "quantize q4_k_m" --limit 5
+```
 
 ## Optional advanced optimizers
 

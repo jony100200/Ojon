@@ -13,6 +13,7 @@ pub mod quality;
 pub mod sweep;
 pub mod ppl;
 pub mod advanced;
+pub mod distill;
 
 pub use discovery::{backend_specs, discover_backends, discovered_path, hf_python_path, open_official_download_page, BackendId, FoundBackend, Integration};
 pub use gguf::{inspect_gguf, GgufSummary};
@@ -26,3 +27,7 @@ pub use quality::{parse_quality_report, recommend, QualityReport};
 pub use sweep::{execute_sweep, parse_precisions, prepare_sweep, SweepPlan};
 pub use ppl::{evaluate_sweep, parse_final_perplexity, PplSettings};
 pub use advanced::{AdvancedPlan, plan_gsq, plan_gsq_assemble, plan_rco_database, plan_rco_search, plan_rco_assemble, run_advanced, discover_advanced};
+pub use distill::{
+    audit_dataset_file, prepare_distill_plan, retrieve_recipes, DatasetAuditReport, DatasetEntry,
+    DistillPlan, KnowledgeTier, RecipeMatch,
+};
