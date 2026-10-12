@@ -11,8 +11,8 @@ Intended path: **Import → Inspect → Choose supported conversion → Prefligh
 ## Plan several quantization options before choosing
 
 ```powershell
-ojon optimize-plan "C:\\Models\\qwen-original" --device xpu --json
-ojon optimize-plan "C:\\Models\\source-f16.gguf" --device cuda --json
+ojon optimize-plan "C:\Models\qwen-original" --device xpu --json
+ojon optimize-plan "C:\Models\source-f16.gguf" --device cuda --json
 ```
 
 `optimize-plan` is metadata-only and returns a versioned JSON comparison proposal. It keeps separate choices for size, balanced precision, calibration, or distinct available backends. A `missing_tool`, `experimental`, `blocked_source`, `storage_only`, or `requires_compatibility_test` state is not permission to execute or a claim of loadability. The device flag describes a requested target; no live free VRAM/RAM or driver support is measured yet. `recommendation: null` is intentional until real matched quality, memory and runtime measurements exist. To execute a supported route, use the existing guarded manual commands.
