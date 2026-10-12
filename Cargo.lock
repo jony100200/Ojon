@@ -2873,12 +2873,12 @@ dependencies = [
 [[package]]
 name = "ui-core"
 version = "0.1.0"
-source = "git+https://github.com/jony100200/Kathamo?rev=1813440087c04191e8ab0769e0ebd0483df14d2a#1813440087c04191e8ab0769e0ebd0483df14d2a"
+source = "git+https://github.com/jony100200/Kathamo?rev=f3bed97837edd2814c4b9e2ed345e9effab6f94d#f3bed97837edd2814c4b9e2ed345e9effab6f94d"
 
 [[package]]
 name = "ui-platform"
 version = "0.1.0"
-source = "git+https://github.com/jony100200/Kathamo?rev=1813440087c04191e8ab0769e0ebd0483df14d2a#1813440087c04191e8ab0769e0ebd0483df14d2a"
+source = "git+https://github.com/jony100200/Kathamo?rev=f3bed97837edd2814c4b9e2ed345e9effab6f94d#f3bed97837edd2814c4b9e2ed345e9effab6f94d"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -2889,7 +2889,7 @@ dependencies = [
 [[package]]
 name = "ui-render"
 version = "0.1.0"
-source = "git+https://github.com/jony100200/Kathamo?rev=1813440087c04191e8ab0769e0ebd0483df14d2a#1813440087c04191e8ab0769e0ebd0483df14d2a"
+source = "git+https://github.com/jony100200/Kathamo?rev=f3bed97837edd2814c4b9e2ed345e9effab6f94d#f3bed97837edd2814c4b9e2ed345e9effab6f94d"
 dependencies = [
  "ab_glyph",
  "bytemuck",
@@ -2905,7 +2905,7 @@ dependencies = [
 [[package]]
 name = "ui-text"
 version = "0.1.0"
-source = "git+https://github.com/jony100200/Kathamo?rev=1813440087c04191e8ab0769e0ebd0483df14d2a#1813440087c04191e8ab0769e0ebd0483df14d2a"
+source = "git+https://github.com/jony100200/Kathamo?rev=f3bed97837edd2814c4b9e2ed345e9effab6f94d#f3bed97837edd2814c4b9e2ed345e9effab6f94d"
 dependencies = [
  "ui-core",
  "ui-themes",
@@ -2914,7 +2914,7 @@ dependencies = [
 [[package]]
 name = "ui-themes"
 version = "0.1.0"
-source = "git+https://github.com/jony100200/Kathamo?rev=1813440087c04191e8ab0769e0ebd0483df14d2a#1813440087c04191e8ab0769e0ebd0483df14d2a"
+source = "git+https://github.com/jony100200/Kathamo?rev=f3bed97837edd2814c4b9e2ed345e9effab6f94d#f3bed97837edd2814c4b9e2ed345e9effab6f94d"
 dependencies = [
  "ui-core",
 ]
@@ -2922,7 +2922,7 @@ dependencies = [
 [[package]]
 name = "ui-widgets"
 version = "0.1.0"
-source = "git+https://github.com/jony100200/Kathamo?rev=1813440087c04191e8ab0769e0ebd0483df14d2a#1813440087c04191e8ab0769e0ebd0483df14d2a"
+source = "git+https://github.com/jony100200/Kathamo?rev=f3bed97837edd2814c4b9e2ed345e9effab6f94d#f3bed97837edd2814c4b9e2ed345e9effab6f94d"
 dependencies = [
  "ui-core",
  "ui-platform",
