@@ -73,6 +73,9 @@ impl ResearchPlan {
             "device_verified": false,
             "peak_ram_bytes": null,
             "peak_vram_bytes": null,
+            "host_memory_preflight_verified": false,
+            "source_weights_exceed_28_gib": self.source.source_weight_bytes > 28u64 * 1024 * 1024 * 1024,
+            "full_checkpoint_requires_memory_budget": true,
             "downloaded": false,
             "weights_loaded": false,
             "files_written": false,
@@ -96,6 +99,22 @@ pub fn prepare_research(
     bits: u32, group: u32, ratio: f64, device: &str
 ) -> io::Result<ResearchPlan> {
     let source = inspect_hf_folder(source)?;
+    // This first bridge is causal-LM only. Refuse to drop a VLM's processor
+    // or vision tower while exporting what looks like a complete model.
+    let config_file = source.directory.join("config.json");
+    if fs::metadata(&config_file)?.len() > 2_000_000 {
+        return Err(bad("config.json too large for bounded research capability check"));
+    }
+    let config: Value = serde_json::from_slice(&fs::read(config_file)?)
+        .map_err(|_| bad("invalid source config.json"))?;
+    let kind_hint = config["model_type"].as_str().unwrap_or("").to_ascii_lowercase();
+    if config["vision_config"].is_object()
+        || config["vision_tower"].is_string()
+        || config["mm_projector_type"].is_string()
+        || kind_hint.contains("_vl") || kind_hint.contains("vision")
+    {
+        return Err(bad("multimodal source requires vision/processor-preserving export; HQQ/OpenVINO causal-only research route refused"));
+    }
     if !output.is_absolute() {
         return Err(bad("output directory must be absolute"));
     }
