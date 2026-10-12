@@ -82,9 +82,10 @@ Important:
   - Agent probe/plan commands are read-only. Quantization sweeps and training need explicit --confirm.
   - Sweep conversion DOES NOT evaluate quality; it writes real results for later baseline comparison.
   - GSQ and RCO require user-installed trusted public Python checkouts; no local GPU compatibility is claimed.
-  - Diffusion backends run user-installed scripts: SVDQ INT4 for Diffusers pipelines (NVIDIA CUDA),
-    or RebelUI's streaming W4/W3/W2A8 for a single safetensors file (loader compatibility unverified).
-    Inspection and conversion require explicit --confirm. No image/video quality is assumed.
+  - Diffusion SVDQ INT4 uses a separate public diffuse-compressor CUDA checkout.
+    Built-in Ojon pack-plan/pack-run/unpack use native Rust, with no RebelUI or Python.
+    Ojon .ojonq output requires unpacking or a future Ojon-aware GPU loader.
+    Conversion and inspection require explicit --confirm. No image/video quality is implied.
   - RCO searches an EXISTING upstream per-bit GPTQ database; it does not create that database yet.
   - GSQ/RCO assembly must be explicitly requested. Their artifacts are NOT guaranteed GGUF or load-tested.
 "#);
@@ -355,7 +356,7 @@ fn run() -> io::Result<()> {
                     Some("--checkout")=>checkout=Some(PathBuf::from(next_argument(&mut args,"upstream Python repository checkout")?)),
                     Some("--python")=>python=PathBuf::from(next_argument(&mut args,"Python interpreter")?),
                     Some("--backend")=>{
-                        let name=next_argument(&mut args,"backend svdq|codebook")?;
+                        let name=next_argument(&mut args,"backend svdq")?;
                         engine=DiffusionEngine::from_name(name.to_str().ok_or_else(||invalid("invalid backend name"))?)?;
                     }
                     Some("--kind")=>{
@@ -363,7 +364,7 @@ fn run() -> io::Result<()> {
                         kind=DiffusionKind::from_name(name.to_str().ok_or_else(||invalid("invalid model kind"))?)?;
                     }
                     Some("--format")=>{
-                        let name=next_argument(&mut args,"int4|w4a8|w3a8|w2a8")?;
+                        let name=next_argument(&mut args,"int4")?;
                         precision=DiffusionFormat::from_name(name.to_str().ok_or_else(||invalid("invalid format"))?)?;
                     }
                     Some("--samples")=>{
@@ -375,10 +376,9 @@ fn run() -> io::Result<()> {
                     _=>return Err(invalid(format!("unknown diffusion option: {}",option.to_string_lossy()))),
                 }
             }
-            let checkout=checkout.or_else(||std::env::var_os(
-                if engine==DiffusionEngine::Svdq{"OJON_SVDQ_DIR"}else{"OJON_REBELUI_DIR"}
-            ).map(PathBuf::from)).ok_or_else(||invalid(
-                "set --checkout to the installed upstream repository or its OJON_SVDQ_DIR / OJON_REBELUI_DIR environment variable"
+            let checkout=checkout.or_else(||std::env::var_os("OJON_SVDQ_DIR")
+                .map(PathBuf::from)).ok_or_else(||invalid(
+                "set --checkout to diffuse-compressor or OJON_SVDQ_DIR"
             ))?;
             let plan=plan_diffusion(&source,&output,&checkout,&python,engine,kind,precision,samples)?;
             if stage=="diffusion-plan" {
@@ -802,6 +802,7 @@ fn run() -> io::Result<()> {
                 println!("  configure: {}",backend["environment_variable"].as_str().unwrap_or("?"));
                 println!("  publisher: {}",backend["upstream"].as_str().unwrap_or("?"));
             }
+            println!("Native Ojon 2/3/4-bit model pack/unpack: built in, no RebelUI, Python or GPU required; direct GPU loading not yet implemented.");
             println!("Supported GGUF: public llama-quantize via K/IQ precision methods; optional GSQ/RCO local Python stages require explicit user configuration.");
             println!("Detected means filename found; binary version, model compatibility and runtime must still be verified.");
             println!("Add custom tool directories via OJON_BACKENDS_DIR or explicit --tool path.");
