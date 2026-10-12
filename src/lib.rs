@@ -13,6 +13,7 @@ pub mod quality;
 pub mod sweep;
 pub mod ppl;
 pub mod advanced;
+pub mod diffusion;
 pub mod distill;
 
 pub use discovery::{backend_specs, discover_backends, discovered_path, hf_python_path, open_official_download_page, BackendId, FoundBackend, Integration};
@@ -31,3 +32,5 @@ pub use distill::{
     audit_dataset_file, prepare_distill_plan, retrieve_recipes, DatasetAuditReport, DatasetEntry,
     DistillPlan, KnowledgeTier, RecipeMatch,
 };
+
+pub use diffusion::{plan_diffusion, run_diffusion, inspect_diffusion_recipe, discover_diffusion, DiffusionPlan, DiffusionResult, DiffusionEngine, DiffusionKind, DiffusionFormat};
