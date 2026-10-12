@@ -51,6 +51,29 @@ Local agents may call the JSON commands. They cannot control your computer throu
 
 ---
 
+## Image and video quantization (experimental)
+
+Image/video diffusion quantization has different model components and loader requirements than llama.cpp language-model GGUF.
+
+**SVDQ / diffuse-compressor:** Clone the upstream [Apache-2.0 diffuse-compressor](https://github.com/rootonchair/diffuse-compressor) project independently. Install its Python and Diffusers dependencies in an isolated environment. Supply a fully downloaded local Diffusers model folder with model_index.json, transformer weights and applicable VAE/text-encoder components. Ojon initially supports the INT4 CUDA path and deliberately refuses NVFP4-native claims on RTX 40-series hardware. Use --kind image or --kind video to select the upstream example script. Low-memory offload is requested; it does **not** prove this specific model will fit 16 GB VRAM.
+
+**Standalone codebook:** Supply a user-installed [RebelUI](https://github.com/RealRebelAI/RebelUI) checkout and original single-file safetensors. Ojon calls its streaming tools/w4a8_convert.py with bounded chunks and conservative exclusions for sensitive layers. W4A8/W3A8/W2A8 are backend-specific *experimental* weight formats, not guaranteed ComfyUI/Diffusers drop-in replacements. RebelUI did not publish a LICENSE file in the version inspected: Ojon does not copy or redistribute its code.
+
+All pathways provide read-only planning first. They require --confirm before externally supplied Python runs. Provide --python pointing to the appropriate isolated environment if plain python is not configured.
+
+```powershell
+ojon backends --json
+ojon diffusion-plan "C:\Models\FluxKlein4B" "C:\Models\out\klein-int4.safetensors" --checkout "C:\Tools\diffuse-compressor" --backend svdq --kind image --format int4 --samples 32
+ojon diffusion-inspect "C:\Models\FluxKlein4B" "C:\Models\out\klein-int4.safetensors" --checkout "C:\Tools\diffuse-compressor" --backend svdq --kind image --format int4 --confirm
+ojon diffusion-run "C:\Models\FluxKlein4B" "C:\Models\out\klein-int4.safetensors" --checkout "C:\Tools\diffuse-compressor" --backend svdq --kind image --format int4 --confirm
+# For a single original .safetensors source, instead use --backend codebook --format w4a8
+```
+
+Substitute your real local paths; these examples have **not** been run on your hardware. Avoid remote model IDs: Ojon's initial diffusion adapter only accepts local files and directories. It requests Hugging Face offline mode, which is not a security sandbox. It does not install backend dependencies.
+
+After conversion, test the result with an independently confirmed compatible loader. For image/video quality, compare matched **prompts, seeds, schedulers, image dimensions, CFG, sampling steps, text encoders and VAE**; for video also compare number of frames, motion consistency and temporal structure. Ojon currently verifies only safetensors structure and actual output bytes, not full visual fidelity, GPU consumption or runtime loading. Unchanged original source files are never overwritten.
+
+---
 ## Advanced model optimization: GSQ and RCO (experimental)
 
 Ojon can also orchestrate two independent, public Apache-2.0 projects: [GSQ](https://github.com/IST-DASLab/GSQ) for learned low-bit scalar weights and [RCO](https://github.com/IST-DASLab/RCO) for layer-wise precision search under an average-bit budget. These are **separate optional Python programs**, not bundled Ojon quantizers. Their output still requires runtime and quality testing.
