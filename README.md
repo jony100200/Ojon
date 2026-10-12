@@ -23,6 +23,7 @@ Ojon brings existing, independent model tools under one roof. Install only the p
 - Audit external datasets for drift, dead file references, and knowledge decay (`ojon dataset-audit`).
 - Retrieve relevant distilled recipes with sub-millisecond native Rust lookup (`ojon retrieve`), weighted by disk liveness and knowledge half-life.
 - Plan and explicitly launch optional upstream [GSQ](https://github.com/IST-DASLab/GSQ) and [RCO](https://github.com/IST-DASLab/RCO) optimization stages, using user-installed Python environments. GSQ assembly and RCO compressed-tensors assembly remain separate explicit operations; their hardware compatibility and results are not yet tested.
+- **Experimental image/video:** plan and run public [diffuse-compressor](https://github.com/rootonchair/diffuse-compressor) SVDQ INT4 conversions, or a user-installed [RebelUI](https://github.com/RealRebelAI/RebelUI) single-file W4/W3/W2A8 codebook converter. Model loader compatibility and visual quality remain unverified.
 - Expose JSON model probes, backend discovery, candidate planning, and quality-report ranking for local agents.
 
 **Not yet universal:** image/video/speech/utility quantization adapters, full multimodal evaluation, automatic quality benchmarking across all model families, cancellation/resume, and trustworthy hardware-resource planning remain in development. Merely detecting a backend does not mean it is compatible.
@@ -78,6 +79,25 @@ ojon distill-plan "C:\Datasets\sft_train.jsonl" "C:\Datasets\distilled_split" --
 ojon retrieve "C:\Datasets\sft_train.jsonl" "quantize q4_k_m" --limit 5
 ```
 
+## Image and video quantization (experimental)
+
+Ojon accepts two independent, optionally installed backend checkouts, without bundling their Python or GPU dependencies:
+
+- **SVDQ:** INT4 for a complete local Diffusers pipeline directory (model_index.json and transformer weights) via [diffuse-compressor](https://github.com/rootonchair/diffuse-compressor). Select image or video and test CUDA compatibility before claiming the result runnable.
+- **Codebook:** W4A8, W3A8, W2A8 from a single original high-precision safetensors file using RebelUI's separately installed streaming conversion script. It requires an appropriate model-specific loader.
+
+```powershell
+# Read-only plan
+ojon diffusion-plan "C:\Models\DiffusersModel" "C:\Models\outputs\denoiser-int4.safetensors" --checkout "C:\Tools\diffuse-compressor" --backend svdq --kind image --format int4
+# Optional inspection can load a model: always explicit
+ojon diffusion-inspect "C:\Models\DiffusersModel" "C:\Models\outputs\denoiser-int4.safetensors" --checkout "C:\Tools\diffuse-compressor" --backend svdq --kind image --format int4 --confirm
+# Start actual conversion, preserving originals
+ojon diffusion-run "C:\Models\DiffusersModel" "C:\Models\outputs\denoiser-int4.safetensors" --checkout "C:\Tools\diffuse-compressor" --backend svdq --kind image --format int4 --confirm
+# For a standalone diffusion safetensors source
+ojon diffusion-plan "C:\Models\original.safetensors" "C:\Models\outputs\model-w4a8.safetensors" --checkout "C:\Tools\RebelUI" --backend codebook --kind video --format w4a8
+```
+
+The output is staged and safetensors metadata validated before safe publication. Actual file bytes are recorded. A successful conversion is **not** a verified running image/video pipeline or a quality-preserved quantization. A CUDA GPU is required for the SVDQ recipe; Intel Arc support is not claimed. See the User Guide for limitations.
 ## Optional advanced optimizers
 
 These require **separate public upstream repository checkouts** and a compatible Python environment. They do not install CUDA, PyTorch or models. GPU/RAM requirements are unknown until local verification.
