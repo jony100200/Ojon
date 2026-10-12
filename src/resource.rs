@@ -1,7 +1,7 @@
 //! Conservative hardware preflight for quantization jobs.
 //! These are current host observations and safety budgets, NOT peak-use estimates.
-//! No model weights are loaded; Intel VRAM is unknown until a verified
-//! vendor-specific free-memory probe is integrated.
+//! No model weights are loaded; Intel VRAM is measured via optional xpu-smi
+//! only when the returned telemetry is valid, otherwise UNKNOWN.
 use crate::probe::probe_model;
 use serde_json::{json, Value};
 use std::fs;
