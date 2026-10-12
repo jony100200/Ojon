@@ -101,6 +101,20 @@ ojon optimize-plan "C:\Models\original-f16.gguf" --device cpu --json
 
 The planner lists up to three existing or experimental routes for relevant source families: GGUF Q5/Q4/IQ precision candidates; HF-to-GGUF and Intel AutoRound; diffusion SVDQuant, native Ojon storage packing, and an explicitly unwired GGUF research route. It does not convert, download, run Python, test GPU availability, or pick a winner. Missing backend executables, unsupported sources, experimental loaders and unmeasured resource requirements remain visible in JSON. **Detected is not verified.** Preserve alternatives until matched runtime and held-out task benchmarks permit a meaningful comparison.
 
+## AutoRound research recipes: executable GGUF candidates
+
+Intel AutoRound's [documented GGUF export](https://github.com/intel/auto-round/blob/main/docs/step_by_step.md) is **experimental**. Ojon exposes its actual `gguf:q4_k_m` / `gguf:q5_k_m` formats, never the older invalid `auto_round:gguf`. Only an independently installed AutoRound Python environment is used. Source stays unchanged; output must be a new directory outside the source. Command execution blocks Hugging Face automatic downloads and checks GGUF metadata after conversion, but **does not prove model loadability, GPU acceleration or task accuracy**.
+
+```powershell
+# Fast initial alternative: optimized RTN, no tuning iterations
+ojon autoround-plan "C:\Models\Qwen3-4B-original" "C:\Models\out\q4-rtn" --bits 4 --format gguf:q4_k_m --iters 0 --device cpu --json
+# Calibration-aware alternative: explicit LOCAL calibration JSON (must already exist)
+ojon autoround-plan "C:\Models\Qwen3-4B-original" "C:\Models\out\q5-tuned" --bits 5 --format gguf:q5_k_m --iters 200 --dataset "C:\Datasets\calibration.json" --device xpu --json
+# Only after reviewing resource needs and backend compatibility, use autoround-run with same arguments and --confirm.
+```
+
+Run real held-out quality, load and performance tests before comparing AutoRound candidates against llama.cpp's Q4_K_M, Q5_K_M and IQ/imatrix methods. The `--device xpu` selection is a requested target, not proof the Intel GPU or Python dependencies are available. The complete public method remains owned by Intel's separate tool; Ojon does not reimplement its quantization mathematics.
+
 ## Image and video quantization
 
 - **Native Ojon scalar packing:** Pack a local original F16/BF16/F32 safetensors model's eligible weight matrices into a small, independently specified Ojon `.ojonq` container, using only Rust. 2-, 3- and 4-bit groupwise affine precision; sensitive/unmatched tensors remain at original precision. The matching built-in `unpack` restores a **lossily reconstructed** standard safetensors file. A compatible GPU loader is **not yet implemented**; this is a storage/algorithm prototype, not a ready-to-run low-VRAM image model.
