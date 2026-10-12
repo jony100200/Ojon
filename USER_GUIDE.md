@@ -51,27 +51,27 @@ Local agents may call the JSON commands. They cannot control your computer throu
 
 ---
 
-## Image and video quantization (experimental)
+## Native image/video model weight compression (experimental)
 
-Image/video diffusion quantization has different model components and loader requirements than llama.cpp language-model GGUF.
-
-**SVDQ / diffuse-compressor:** Clone the upstream [Apache-2.0 diffuse-compressor](https://github.com/rootonchair/diffuse-compressor) project independently. Install its Python and Diffusers dependencies in an isolated environment. Supply a fully downloaded local Diffusers model folder with model_index.json, transformer weights and applicable VAE/text-encoder components. Ojon initially supports the INT4 CUDA path and deliberately refuses NVFP4-native claims on RTX 40-series hardware. Use --kind image or --kind video to select the upstream example script. Low-memory offload is requested; it does **not** prove this specific model will fit 16 GB VRAM.
-
-**Standalone codebook:** Supply a user-installed [RebelUI](https://github.com/RealRebelAI/RebelUI) checkout and original single-file safetensors. Ojon calls its streaming tools/w4a8_convert.py with bounded chunks and conservative exclusions for sensitive layers. W4A8/W3A8/W2A8 are backend-specific *experimental* weight formats, not guaranteed ComfyUI/Diffusers drop-in replacements. RebelUI did not publish a LICENSE file in the version inspected: Ojon does not copy or redistribute its code.
-
-All pathways provide read-only planning first. They require --confirm before externally supplied Python runs. Provide --python pointing to the appropriate isolated environment if plain python is not configured.
+Ojon ships its **own Rust quantizer** for eligible 2D weight matrices in original F16, BF16 or F32 safetensors checkpoints. It uses bounded-memory per-group affine uniform quantization (2/3/4-bit); unrecognized and sensitive tensors are preserved without modification. There is no dependency on RebelUI, PyTorch or GPU drivers for this converter.
 
 ```powershell
-ojon backends --json
-ojon diffusion-plan "C:\Models\FluxKlein4B" "C:\Models\out\klein-int4.safetensors" --checkout "C:\Tools\diffuse-compressor" --backend svdq --kind image --format int4 --samples 32
-ojon diffusion-inspect "C:\Models\FluxKlein4B" "C:\Models\out\klein-int4.safetensors" --checkout "C:\Tools\diffuse-compressor" --backend svdq --kind image --format int4 --confirm
-ojon diffusion-run "C:\Models\FluxKlein4B" "C:\Models\out\klein-int4.safetensors" --checkout "C:\Tools\diffuse-compressor" --backend svdq --kind image --format int4 --confirm
-# For a single original .safetensors source, instead use --backend codebook --format w4a8
+ojon pack-plan "C:\Models\original.safetensors" "C:\Models\packed\model-q4.ojonq" --bits 4 --group 64
+ojon pack-run "C:\Models\original.safetensors" "C:\Models\packed\model-q4.ojonq" --bits 4 --group 64 --confirm
+ojon unpack "C:\Models\packed\model-q4.ojonq" "C:\Models\packed\model-q4-restored.safetensors" --confirm
 ```
 
-Substitute your real local paths; these examples have **not** been run on your hardware. Avoid remote model IDs: Ojon's initial diffusion adapter only accepts local files and directories. It requests Hugging Face offline mode, which is not a security sandbox. It does not install backend dependencies.
+**Format boundary:** `.ojonq` is a documented Ojon-owned weight-storage format, **not** GGUF, ComfyUI W4A8, or directly loadable low-bit Diffusers weights. The built-in Rust unpacker reconstructs ordinary safetensors for portability, but its restored weights no longer save GPU VRAM and have quantization error. Task quality, image fidelity and compatible on-device kernels remain unverified.
 
-After conversion, test the result with an independently confirmed compatible loader. For image/video quality, compare matched **prompts, seeds, schedulers, image dimensions, CFG, sampling steps, text encoders and VAE**; for video also compare number of frames, motion consistency and temporal structure. Ojon currently verifies only safetensors structure and actual output bytes, not full visual fidelity, GPU consumption or runtime loading. Unchanged original source files are never overwritten.
+Optional SVDQuant INT4 image/video conversion is separately available via an independently installed public [diffuse-compressor](https://github.com/rootonchair/diffuse-compressor) checkout for compatible local Diffusers pipelines. The SVDQuant pipeline uses NVIDIA CUDA; neither installed Python dependencies nor 16 GB GPU feasibility can be inferred from source detection.
+
+```powershell
+ojon diffusion-plan "C:\Models\MyDiffusersPipeline" "C:\Models\packed\denoiser-int4.safetensors" --checkout "C:\Tools\diffuse-compressor" --backend svdq --kind image --format int4
+ojon diffusion-inspect "C:\Models\MyDiffusersPipeline" "C:\Models\packed\denoiser-int4.safetensors" --checkout "C:\Tools\diffuse-compressor" --backend svdq --kind image --format int4 --confirm
+ojon diffusion-run "C:\Models\MyDiffusersPipeline" "C:\Models\packed\denoiser-int4.safetensors" --checkout "C:\Tools\diffuse-compressor" --backend svdq --kind image --format int4 --confirm
+```
+
+All file-writing operations are explicit, outputs must not exist, and sources are never overwritten. Model-quality evaluation should compare matched prompts, seeds, schedulers, frames and all conditioning components.
 
 ---
 ## Advanced model optimization: GSQ and RCO (experimental)
