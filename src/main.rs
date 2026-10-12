@@ -25,6 +25,7 @@ Commands:
   ojon verify    <model.gguf>
   ojon backends [--json]     Detect installed engines and show official download links
   ojon probe <model-path> [--json]   Identify model format/family without loading weights
+  ojon optimize-plan <model-path> [--device auto|cpu|cuda|xpu] [--json]   Compare candidate routes without converting
   ojon dataset-audit <dataset.jsonl> [--json]   Audit external dataset for drift, dead paths, staleness
   ojon distill-plan  <dataset.jsonl> <output-dir> [--min-score 0.5] [--json]  Curate SFT split
   ojon retrieve      <dataset.jsonl> <query> [--limit 5] [--min-score 0.4] [--json] [--markdown]
@@ -625,6 +626,40 @@ fn run() -> io::Result<()> {
                 println!("{}", plan.json());
                 run_autoround(&plan)?;
                 println!("autoround_status: COMPLETED");
+            }
+        }
+        Some("optimize-plan") => {
+            let path = PathBuf::from(next_argument(&mut args, "local model file or directory")?);
+            let mut device = String::from("auto");
+            let mut json = false;
+            while let Some(option) = args.next() {
+                match option.to_str() {
+                    Some("--device") => {
+                        device = next_argument(&mut args, "device")?
+                            .to_str().ok_or_else(|| invalid("device must be UTF-8"))?.to_owned();
+                    }
+                    Some("--json") => json = true,
+                    _ => return Err(invalid(format!("unknown optimize-plan option: {}", option.to_string_lossy()))),
+                }
+            }
+            let probe = probe_model(&path)?;
+            let plan = ojon_backend::plan_options(&probe, &device, &discover_backends())?;
+            if json {
+                println!("{}", plan);
+            } else {
+                println!("source: {}", probe.path.display());
+                println!("requested_device: {}", device);
+                println!("mode: READ_ONLY / MULTIPLE ALTERNATIVES / NO WINNER");
+                println!("actual_free_ram_vram_scratch: NOT_PROBED");
+                for item in plan["options"].as_array().into_iter().flatten() {
+                    println!("{} [{}] {} / {}",
+                        item["id"].as_str().unwrap_or("?"),
+                        item["state"].as_str().unwrap_or("?"),
+                        item["backend"].as_str().unwrap_or("?"),
+                        item["output_format"].as_str().unwrap_or("?"));
+                    println!("  check: {}", item["reason"].as_str().unwrap_or("unknown"));
+                }
+                println!("warning: {}", plan["warning"].as_str().unwrap_or("not tested"));
             }
         }
         Some("probe") => {
