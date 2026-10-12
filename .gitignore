@@ -1,0 +1,75 @@
+# Rust build output
+/target/
+**/target/
+/dist/
+/build/
+/out/
+*.pdb
+*.ilk
+
+# Generated model weights and conversion artifacts (not source recipes)
+/models/
+/checkpoints/
+/weights/
+/downloads/
+/scratch/
+/cache/
+/converted/
+/outputs/
+/artifacts/
+*.safetensors
+*.gguf
+*.ggml
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.bin.tmp
+*.partial
+*.part
+*.tmp
+
+# Local/private development test and benchmark material
+/tests/
+/fixtures/
+/benchmarks/
+/reports/
+/test-results/
+/coverage/
+/logs/
+/screenshots/
+*.profraw
+*.profdata
+*.lcov
+*.log
+
+# Python converters / optional worker caches
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.pyc
+
+# Local machine state and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.token
+/.local/
+/.ojon/
+/settings.local.*
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*~
+
+# Cargo.lock for a reproducible binary application is intentionally tracked.
+# Do not broadly ignore *.json or *.toml; real recipe/adapter manifests use them.

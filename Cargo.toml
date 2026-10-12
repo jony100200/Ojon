@@ -1,0 +1,43 @@
+[package]
+name = "ojon"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/jony100200/Ojon"
+description = "Local-first orchestration for real AI model quantization backends"
+
+[lib]
+name = "ojon_backend"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ojon"
+path = "src/main.rs"
+
+# Deliberately no UI or Python dependency: Kathamo will use this library.
+# Conversion math is provided by installed upstream backends, not Ojon.
+[features]
+default = []
+gui = [
+    "dep:ui-core", "dep:ui-platform", "dep:ui-render",
+    "dep:ui-themes", "dep:ui-widgets", "dep:windows-sys",
+]
+
+[[bin]]
+name = "ojon-gui"
+path = "src/bin/ojon_gui.rs"
+required-features = ["gui"]
+
+[dependencies]
+# Small, bounded on-demand metadata inspection and machine-readable agent protocol.
+serde_json = "1"
+serde_yaml = "0.9"
+# Pinned public Kathamo framework; optional so the CLI stays lean and independent.
+ui-core     = { git = "https://github.com/jony100200/Kathamo", rev = "1813440087c04191e8ab0769e0ebd0483df14d2a", optional = true }
+ui-platform = { git = "https://github.com/jony100200/Kathamo", rev = "1813440087c04191e8ab0769e0ebd0483df14d2a", optional = true }
+ui-render   = { git = "https://github.com/jony100200/Kathamo", rev = "1813440087c04191e8ab0769e0ebd0483df14d2a", optional = true }
+ui-themes   = { git = "https://github.com/jony100200/Kathamo", rev = "1813440087c04191e8ab0769e0ebd0483df14d2a", optional = true }
+ui-widgets  = { git = "https://github.com/jony100200/Kathamo", rev = "1813440087c04191e8ab0769e0ebd0483df14d2a", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", optional = true, features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Memory"] }

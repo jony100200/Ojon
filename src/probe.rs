@@ -1,0 +1,218 @@
+//! Non-invasive model identification, deliberately distinct from format support.
+//!
+//! Reads GGUF headers, HF config.json or bounded safetensors headers. Never
+//! opens tensor payloads, runs Python, downloads files or executes a converter.
+//! "Likely" classifications are hints, NOT permission to claim compatibility.
+
+use crate::gguf::inspect_gguf;
+use serde_json::{json, Value};
+use std::fs::{self, File};
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
+
+fn invalid(s: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, s.into())
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelCategory {
+    Language, VisionLanguage, Diffusion, Speech, EmbeddingOrReranker, Unknown,
+}
+impl ModelCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Language => "llm",
+            Self::VisionLanguage => "vlm",
+            Self::Diffusion => "image_video_diffusion",
+            Self::Speech => "audio_speech",
+            Self::EmbeddingOrReranker => "embedding_reranker",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+#[derive(Debug)]
+pub struct ModelProbe {
+    pub path: PathBuf,
+    pub format: &'static str,
+    pub category: ModelCategory,
+    pub identification: String,
+    pub confidence: &'static str,
+    pub bytes: u64,
+    pub tensor_count: Option<u64>,
+    pub conversion_route: &'static str,
+    pub conversion_status: &'static str,
+    pub notes: Vec<String>,
+}
+impl ModelProbe {
+    pub fn as_json(&self) -> Value {
+        json!({
+            "schema": "ojon.probe.v1",
+            "source": self.path.to_string_lossy(),
+            "format": self.format,
+            "category": self.category.as_str(),
+            "model_identifier": self.identification,
+            "category_confidence": self.confidence,
+            "source_bytes": self.bytes,
+            "tensor_count": self.tensor_count,
+            "candidate_conversion_route": self.conversion_route,
+            "conversion_status": self.conversion_status,
+            "notes": self.notes,
+            "weights_loaded": false,
+            "compatibility_verified": false
+        })
+    }
+}
+fn category_from(text: &str, has_vision_config: bool) -> (ModelCategory, &'static str) {
+    let s = text.to_ascii_lowercase();
+    // These are only hints. Never authorize a conversion based on substring matching.
+    if has_vision_config || ["qwen2_vl", "qwen3_vl", "qwen2vl", "qwen3vl", "llava",
+        "internvl", "pixtral", "idefics", "molmo", "minicpmv", "vision2seq",
+        "paligemma", "gui-owl", "gui_owl", "florence", "smolvlm"]
+        .iter().any(|x| s.contains(x))
+    { return (ModelCategory::VisionLanguage, "heuristic"); }
+    if ["flux", "wan", "ltx", "diffusion", "dit", "unet", "stable_diffusion",
+        "hunyuanvideo", "hunyuan_video", "z_image", "qwen_image"]
+        .iter().any(|x| s.contains(x))
+    { return (ModelCategory::Diffusion, "heuristic"); }
+    if ["whisper", "encodec", "wav2vec", "speecht5", "parler_tts",
+        "vits", "bark", "f5_tts"].iter().any(|x| s.contains(x))
+    { return (ModelCategory::Speech, "heuristic"); }
+    if ["reranker", "embedding", "sentence_transformer", "bge_", "e5_", "gte_"]
+        .iter().any(|x| s.contains(x))
+    { return (ModelCategory::EmbeddingOrReranker, "heuristic"); }
+    if !s.is_empty() && s != "unknown" {
+        return (ModelCategory::Language, "weak_guess");
+    }
+    (ModelCategory::Unknown, "unknown")
+}
+fn load_json(path: &Path, max: u64) -> io::Result<Value> {
+    let size = fs::metadata(path)?.len();
+    if size == 0 || size > max { return Err(invalid("metadata header exceeds inspection bound")); }
+    let mut file = File::open(path)?;
+    let mut buf = Vec::with_capacity(size as usize);
+    file.read_to_end(&mut buf)?;
+    serde_json::from_slice(&buf).map_err(|e| invalid(format!("invalid JSON metadata: {e}")))
+}
+fn inspect_safetensors(path: &Path) -> io::Result<ModelProbe> {
+    const MAX_HEADER: u64 = 32 * 1024 * 1024;
+    let file_size = fs::metadata(path)?.len();
+    if file_size < 10 { return Err(invalid("short safetensors file")); }
+    let mut file = File::open(path)?;
+    let mut prefix = [0u8; 8];
+    file.read_exact(&mut prefix)?;
+    let n = u64::from_le_bytes(prefix);
+    if n == 0 || n > MAX_HEADER || n > file_size.saturating_sub(8) {
+        return Err(invalid("safetensors header length invalid or too large"));
+    }
+    let mut header = vec![0u8; n as usize];
+    file.read_exact(&mut header)?;
+    let fields: Value = serde_json::from_slice(&header)
+        .map_err(|e| invalid(format!("bad safetensors header: {e}")))?;
+    let map = fields.as_object().ok_or_else(|| invalid("safetensors header must be an object"))?;
+    let tensor_names: Vec<&str> = map.keys().filter(|k| k.as_str() != "__metadata__")
+        .take(32).map(String::as_str).collect();
+    let count = map.len().saturating_sub(usize::from(map.contains_key("__metadata__")));
+    if count == 0 { return Err(invalid("no tensor descriptors found")); }
+    // Bound and validate each tensor payload range; never load the payload itself.
+    let payload_size = file_size - 8 - n;
+    for (name, desc) in map.iter().filter(|(name,_)| name.as_str() != "__metadata__") {
+        let pair = desc.get("data_offsets").and_then(Value::as_array)
+            .ok_or_else(|| invalid(format!("tensor {name} lacks data_offsets")))?;
+        if pair.len() != 2 { return Err(invalid("malformed tensor offsets")); }
+        let from = pair[0].as_u64().ok_or_else(|| invalid("non-integer tensor offset"))?;
+        let to = pair[1].as_u64().ok_or_else(|| invalid("non-integer tensor offset"))?;
+        if from > to || to > payload_size { return Err(invalid("tensor offset outside source file")); }
+    }
+    let joined = tensor_names.join(" ").to_ascii_lowercase();
+    let (category, confidence) = if joined.contains("diffusion_model.") || joined.contains("transformer_blocks.")
+        || joined.contains("double_blocks.") || joined.contains("model.diffusion_model.") {
+        (ModelCategory::Diffusion, "heuristic")
+    } else if joined.contains("vision_tower.") || joined.contains("vision_model.") {
+        (ModelCategory::VisionLanguage, "heuristic")
+    } else {
+        (ModelCategory::Unknown, "unknown")
+    };
+    Ok(ModelProbe {
+        path: path.to_path_buf(), format:"safetensors_single_file", category,
+        identification: if tensor_names.is_empty() { "unknown".into() } else {
+            format!("{} tensors; first keys: {}", count, tensor_names.iter().take(3).copied().collect::<Vec<_>>().join(", "))
+        }, confidence, bytes:file_size, tensor_count:Some(count as u64),
+        conversion_route:"none", conversion_status:"not_implemented_for_standalone_safetensors",
+        notes:vec![
+            "No general-purpose standalone safetensors converter is connected.".into(),
+            "Classification from tensor names is advisory; preserve architecture-specific metadata and sensitive tensors.".into(),
+        ],
+    })
+}
+
+pub fn probe_model(input: &Path) -> io::Result<ModelProbe> {
+    let path = input.canonicalize()?;
+    let metadata = fs::metadata(&path)?;
+    if metadata.is_dir() {
+        let conf = path.join("config.json");
+        let value = load_json(&conf, 2 * 1024 * 1024)?;
+        let model_type = value.get("model_type").and_then(Value::as_str).unwrap_or("");
+        let architectures = value.get("architectures").and_then(Value::as_array)
+            .map(|list| list.iter().filter_map(Value::as_str).take(12).collect::<Vec<_>>().join(" "))
+            .unwrap_or_default();
+        let descriptor = format!("{model_type} {architectures}");
+        let (category, confidence) = category_from(&descriptor, value.get("vision_config").is_some());
+        let mut total = 0u64;
+        let mut count = 0usize;
+        for entry in fs::read_dir(&path)?.take(8192) {
+            let entry = entry?;
+            let n = entry.file_name();
+            let n = n.to_string_lossy();
+            if n.ends_with(".safetensors") || n.starts_with("pytorch_model") && n.ends_with(".bin") {
+                let meta = entry.metadata()?;
+                if meta.is_file() {
+                    total = total.checked_add(meta.len()).ok_or_else(|| invalid("source size overflow"))?;
+                    count += 1;
+                }
+            }
+        }
+        if count == 0 { return Err(invalid("no model weights found in checkpoint directory")); }
+        let candidate = matches!(category, ModelCategory::Language | ModelCategory::VisionLanguage);
+        Ok(ModelProbe {
+            path, format:"hf_checkpoint_directory", category,
+            identification: descriptor.trim().to_owned(), confidence,
+            bytes:total, tensor_count:None,
+            conversion_route: if candidate { "public_llama_cpp_hf_to_gguf_then_quantize" } else { "none" },
+            conversion_status: if candidate { "candidate_only_must_check_llama_cpp_architecture_support" } else { "no_wired_converter" },
+            notes:vec![
+                format!("{count} local model weight file(s) detected; shards/index completeness not fully validated"),
+                "Training requires a supported full checkpoint and compatible backend; quantized GGUF files are not assumed trainable.".into(),
+            ],
+        })
+    } else {
+        match path.extension().and_then(|s|s.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+            "gguf" => {
+                let gguf = inspect_gguf(&path)?;
+                let desc = gguf.architecture.clone().unwrap_or_else(||"unknown".to_owned());
+                let (category, confidence) = category_from(&desc, false);
+                Ok(ModelProbe {
+                    path,format:"gguf",category,identification:desc,confidence,
+                    bytes:gguf.file_bytes,tensor_count:Some(gguf.tensor_count),
+                    conversion_route:"public_llama_cpp_llama_quantize",
+                    conversion_status:"candidate_only_requires_installed_backend_compatibility",
+                    notes:vec![
+                        "GGUF header and tensor catalog inspected; tensor bytes and runtime compatibility not verified.".into(),
+                        "Quantizing an already heavily quantized source may not be beneficial; prefer F16/BF16 input.".into(),
+                    ],
+                })
+            }
+            "safetensors" => inspect_safetensors(&path),
+            _ => Err(invalid("unsupported model source; use GGUF, a safetensors file or HF checkpoint directory")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn categorize_without_promising_compatibility() {
+        assert_eq!(category_from("Qwen3VLForConditionalGeneration", true).0, ModelCategory::VisionLanguage);
+        assert_eq!(category_from("WanVideoModel", false).0, ModelCategory::Diffusion);
+        assert_eq!(category_from("unknown", false).0, ModelCategory::Unknown);
+    }
+}
