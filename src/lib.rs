@@ -18,6 +18,7 @@ pub mod diffusion;
 pub mod packed;
 pub mod distill;
 pub mod autoround;
+pub mod options;
 
 pub use discovery::{backend_specs, discover_backends, discovered_path, hf_python_path, open_official_download_page, BackendId, FoundBackend, Integration};
 pub use gguf::{inspect_gguf, GgufSummary};
@@ -42,3 +43,5 @@ pub use diffusion::{plan_diffusion, run_diffusion, inspect_diffusion_recipe, dis
 pub use packed::{plan_pack,run_pack,unpack,PackPlan,PackResult};
 
 pub use calibration::{prepare_imatrix,run_imatrix,ImatrixPlan};
+
+pub use options::plan_options;

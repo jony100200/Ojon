@@ -90,6 +90,17 @@ ojon distill-plan "C:\Datasets\sft_train.jsonl" "C:\Datasets\distilled_split" --
 ojon retrieve "C:\Datasets\sft_train.jsonl" "quantize q4_k_m" --limit 5
 ```
 
+## Compare quantization alternatives (read-only)
+
+Use the multi-route planner before choosing a precision or backend:
+
+```powershell
+ojon optimize-plan "C:\Models\original-hf-folder" --device xpu --json
+ojon optimize-plan "C:\Models\original-f16.gguf" --device cpu --json
+```
+
+The planner lists up to three existing or experimental routes for relevant source families: GGUF Q5/Q4/IQ precision candidates; HF-to-GGUF and Intel AutoRound; diffusion SVDQuant, native Ojon storage packing, and an explicitly unwired GGUF research route. It does not convert, download, run Python, test GPU availability, or pick a winner. Missing backend executables, unsupported sources, experimental loaders and unmeasured resource requirements remain visible in JSON. **Detected is not verified.** Preserve alternatives until matched runtime and held-out task benchmarks permit a meaningful comparison.
+
 ## Image and video quantization
 
 - **Native Ojon scalar packing:** Pack a local original F16/BF16/F32 safetensors model's eligible weight matrices into a small, independently specified Ojon `.ojonq` container, using only Rust. 2-, 3- and 4-bit groupwise affine precision; sensitive/unmatched tensors remain at original precision. The matching built-in `unpack` restores a **lossily reconstructed** standard safetensors file. A compatible GPU loader is **not yet implemented**; this is a storage/algorithm prototype, not a ready-to-run low-VRAM image model.

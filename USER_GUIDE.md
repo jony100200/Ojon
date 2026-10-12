@@ -8,6 +8,15 @@ Ojon is designed to be **one place to inspect, quantize, and test models** using
 
 Intended path: **Import → Inspect → Choose supported conversion → Preflight → Quantize → Test → Export**.
 
+## Plan several quantization options before choosing
+
+```powershell
+ojon optimize-plan "C:\Models\qwen-original" --device xpu --json
+ojon optimize-plan "C:\Models\source-f16.gguf" --device cuda --json
+```
+
+`optimize-plan` is metadata-only and returns a versioned JSON comparison proposal. It keeps separate choices for size, balanced precision, calibration, or distinct available backends. A `missing_tool`, `experimental`, `blocked_source`, `storage_only`, or `requires_compatibility_test` state is not permission to execute or a claim of loadability. The device flag describes a requested target; no live free VRAM/RAM or driver support is measured yet. `recommendation: null` is intentional until real matched quality, memory and runtime measurements exist. To execute a supported route, use the existing guarded manual commands.
+
 ## Model discovery, fine-tuning and best-variant recommendation (early backend features)
 
 Ojon aims to make one **local** workflow from existing public backends, not create another quantization or training algorithm. For new AI model families, Ojon should first identify the checkpoint and the target runtime, then connect only a compatible upstream tool. Classification is a suggestion, **not an automatic conversion permission**.
