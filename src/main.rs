@@ -11,7 +11,7 @@ use ojon_backend::{
     plan_pack, run_pack, unpack, prepare_imatrix, run_imatrix,
     prepare_autoround_plan, run_autoround,
     prepare_research, ResearchKind,
-    resource_plan, ResourceMode,
+    resource_plan, ResourceMode, prepare_bench, run_bench, compare_bench_files,
 };
 use std::env;
 use std::ffi::OsString;
@@ -35,6 +35,9 @@ Commands:
   ojon train-plan <config.yaml> [--tool <llamafactory-cli>] [--json]
   ojon train-run  <config.yaml> [--tool <llamafactory-cli>] --confirm
   ojon recommend <quality-evidence.json> [--json]  Smallest verified model within tolerance
+  ojon bench-plan <model.gguf> [--tool llama-bench] [--prompt-tokens 512] [--gen-tokens 128] [--repetitions 3] [--gpu-layers 0] [--device SYCL0|CUDA0|Vulkan0] [--json]
+  ojon bench-run <model.gguf> <new-receipt.json> [same options] --confirm
+  ojon bench-compare <reference-receipt.json> <candidate-receipt.json> [--json]
   ojon sweep-plan <source.gguf> <existing-output-dir> [--precisions Q5_K_M,Q4_K_M,IQ4_XS,IQ3_M] [--imatrix path] [--tool path] [--threads N]
   ojon sweep-run <source.gguf> <existing-output-dir> [options] --confirm
   ojon eval-sweep <sweep-manifest.json> <held-out-corpus.txt> [--tool llama-perplexity] [--gpu-layers N] [--context 2048] [--max-degradation 1.0] --confirm
@@ -167,6 +170,60 @@ fn run() -> io::Result<()> {
     let mut args = env::args_os().skip(1);
     let cmd = args.next().unwrap_or_else(|| OsString::from("--help"));
     match cmd.to_str() {
+        Some("bench-plan") | Some("bench-run") => {
+            let execute=cmd=="bench-run";
+            let model=PathBuf::from(next_argument(&mut args,"GGUF model for performance measurement")?);
+            let receipt=if execute {
+                Some(PathBuf::from(next_argument(&mut args,"new JSON receipt path")?))
+            } else { None };
+            let mut tool=discovered_path(BackendId::LlamaBench)
+                .unwrap_or_else(||PathBuf::from("llama-bench"));
+            let (mut prompt_tokens,mut gen_tokens,mut reps,mut gpu_layers)=(512u32,128u32,3u32,0i32);
+            let mut confirmed=false;
+            let mut device:Option<String>=None;
+            while let Some(arg)=args.next() {
+                match arg.to_str() {
+                    Some("--tool")=>tool=PathBuf::from(next_argument(&mut args,"llama-bench executable")?),
+                    Some("--prompt-tokens")=>prompt_tokens=next_argument(&mut args,"prompt token count")?
+                        .to_str().ok_or_else(||invalid("prompt count must be text"))?
+                        .parse().map_err(|_|invalid("prompt tokens require integer"))?,
+                    Some("--gen-tokens")=>gen_tokens=next_argument(&mut args,"generation token count")?
+                        .to_str().ok_or_else(||invalid("generation count must be text"))?
+                        .parse().map_err(|_|invalid("generation tokens require integer"))?,
+                    Some("--repetitions")=>reps=next_argument(&mut args,"repetitions")?
+                        .to_str().ok_or_else(||invalid("repetitions must be text"))?
+                        .parse().map_err(|_|invalid("repetitions require integer"))?,
+                    Some("--gpu-layers")=>gpu_layers=next_argument(&mut args,"GPU layer count")?
+                        .to_str().ok_or_else(||invalid("GPU layers must be text"))?
+                        .parse().map_err(|_|invalid("GPU layers require integer"))?,
+                    Some("--device")=>device=Some(next_argument(&mut args,"explicit llama-bench device")?
+                        .to_str().ok_or_else(||invalid("device must be text"))?.to_owned()),
+                    Some("--confirm") if execute=>confirmed=true,
+                    Some("--json")=>{},
+                    _=>return Err(invalid(format!("unknown benchmark option: {}",arg.to_string_lossy()))),
+                }
+            }
+            let plan=prepare_bench(&model,&tool,prompt_tokens,gen_tokens,reps,gpu_layers,device.as_deref())?;
+            if !execute {println!("{}",serde_json::to_string_pretty(&plan.as_json()).map_err(io::Error::other)?);}
+            else {
+                if !confirmed {return Err(invalid("real llama-bench execution loads weights; add --confirm after reviewing model, installed tool and available RAM/VRAM"));}
+                let path=receipt.expect("bench-run supplies a receipt");
+                let record=run_bench(&plan,&path)?;
+                println!("{}",serde_json::to_string_pretty(&serde_json::json!({
+                    "saved_receipt": path.to_string_lossy(),
+                    "benchmark":record
+                })).map_err(io::Error::other)?);
+            }
+        }
+        Some("bench-compare") => {
+            let reference=PathBuf::from(next_argument(&mut args,"baseline receipt JSON")?);
+            let candidate=PathBuf::from(next_argument(&mut args,"candidate receipt JSON")?);
+            for arg in args {
+                if arg != "--json" {return Err(invalid(format!("unknown benchmark comparison option: {}",arg.to_string_lossy())));}
+            }
+            let value=compare_bench_files(&reference,&candidate)?;
+            println!("{}",serde_json::to_string_pretty(&value).map_err(io::Error::other)?);
+        }
         Some("gsq-plan") | Some("gsq-run") => {
             let execute=cmd=="gsq-run";
             let checkout=PathBuf::from(next_argument(&mut args,"public GSQ repository checkout")?);

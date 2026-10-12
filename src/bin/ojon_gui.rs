@@ -3,7 +3,7 @@
 //! All model details displayed here come from inspected files. No demo benchmarks.
 
 use ojon_backend::{inspect_gguf, prepare_gguf, quantize_gguf_with_log, inspect_hf_folder, prepare_hf, quantize_hf_with_log, hf_python_path, smoke_gguf_capture, probe_model};
-use ojon_backend::{resource_plan, ResourceMode};
+use ojon_backend::{resource_plan, ResourceMode, prepare_bench, run_bench};
 use ojon_backend::{GgufSummary, HfFolderInfo, ModelProbe, HfQuantizeResult, SmokeCapture, Precision, QuantizeResult, FoundBackend, BackendId, discover_backends, open_official_download_page};
 use std::path::{Path, PathBuf};
 use std::collections::VecDeque;
@@ -61,7 +61,7 @@ fn clipboard_text() -> Option<String> {
 fn clipboard_text() -> Option<String> { None }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Focus { Model, Output, Quantizer, Converter, Runtime, Prompt, GpuLayers }
+enum Focus { Model, Output, Quantizer, Converter, Runtime, Benchmark, Prompt, GpuLayers }
 
 enum WorkerEvent {
     Inspected(Result<(GgufSummary, ModelProbe), String>),
@@ -71,6 +71,7 @@ enum WorkerEvent {
     Quantized(Result<QuantizeResult, String>),
     HfQuantized(Result<HfQuantizeResult, String>),
     Smoke(Result<SmokeCapture, String>),
+    Bench(Result<(PathBuf, serde_json::Value), String>),
     Log(String),
 }
 
@@ -80,6 +81,7 @@ struct Workstation {
     quantizer: String,
     converter: String,
     runtime: String,
+    benchmark: String,
     prompt: String,
     gpu_layers: String,
     recipe: usize,
@@ -89,6 +91,7 @@ struct Workstation {
     hf_folder: Option<HfFolderInfo>,
     probe: Option<ModelProbe>,
     last_inference: Option<String>,
+    last_benchmark: Option<(PathBuf, serde_json::Value)>,
     inspected_source: Option<String>,
     last_output: Option<(PathBuf, u64)>,
     started_at: Option<Instant>,
@@ -127,6 +130,11 @@ impl Workstation {
             .and_then(|b| b.executable.as_ref())
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "llama-cli".to_owned());
+        let benchmark = backends.iter()
+            .find(|b| b.spec.id == BackendId::LlamaBench)
+            .and_then(|b| b.executable.as_ref())
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "llama-bench".to_owned());
         let mut args = std::env::args_os().skip(1);
         while let Some(key) = args.next() {
             match key.to_str() {
@@ -139,7 +147,7 @@ impl Workstation {
         }
         let output = default_output(&source, Precision::default());
         Self {
-            source, output, quantizer, converter, runtime,
+            source, output, quantizer, converter, runtime, benchmark,
             prompt: "Explain in one sentence what a quantized language model is.".into(),
             gpu_layers: "0".into(),
             recipe: 0,
@@ -149,6 +157,7 @@ impl Workstation {
             hf_folder: None,
             probe: None,
             last_inference: None,
+            last_benchmark: None,
             inspected_source: None,
             last_output: None,
             started_at: None,
@@ -386,6 +395,40 @@ impl Workstation {
             let _ = tx.send(WorkerEvent::Smoke(result));
         });
     }
+    fn start_bench(&mut self) {
+        if self.busy { return; }
+        let gpu_layers = match self.gpu_layers.trim().parse::<i32>() {
+            Ok(v) if (0..=512).contains(&v) => v,
+            _ => {
+                self.status = "GPU layers must be an integer from 0 to 512.".into();
+                self.needs_redraw = true;
+                return;
+            }
+        };
+        let (model, benchmark) = (self.output.clone(), self.benchmark.clone());
+        let tx = self.tx.clone();
+        self.busy = true;
+        self.started_at = Some(Instant::now());
+        self.last_elapsed = None;
+        self.last_benchmark = None;
+        self.status = "Running installed llama-bench: real prefill and decoding, 3 repeats. Not a quality benchmark.".into();
+        self.needs_redraw = true;
+        std::thread::spawn(move || {
+            let result = (|| -> std::io::Result<(PathBuf, serde_json::Value)> {
+                let model = Path::new(model.trim());
+                let plan = prepare_bench(model, Path::new(benchmark.trim()), 512, 128, 3, gpu_layers, None)?;
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).map_err(std::io::Error::other)?
+                    .as_millis();
+                let name = model.file_stem().unwrap_or_default().to_string_lossy();
+                let parent = model.parent().unwrap_or_else(|| Path::new("."));
+                let receipt = parent.join(format!("{name}-ojon-bench-{stamp}.json"));
+                let metrics = run_bench(&plan, &receipt)?;
+                Ok((receipt, metrics))
+            })().map_err(|e| e.to_string());
+            let _ = tx.send(WorkerEvent::Bench(result));
+        });
+    }
     fn poll(&mut self) {
         while let Ok(message) = self.rx.try_recv() {
             self.needs_redraw = true;
@@ -458,6 +501,14 @@ impl Workstation {
                     self.status = "Real llama-cli output captured. Review the generated text; quality is NOT evaluated.".into();
                 }
                 WorkerEvent::Smoke(Err(e)) => self.status = format!("Inference smoke check failed: {e}"),
+                WorkerEvent::Bench(Ok((path, receipt))) => {
+                    let pp = receipt["prompt_processing"]["tokens_per_second"].as_f64().unwrap_or(0.0);
+                    let tg = receipt["token_generation"]["tokens_per_second"].as_f64().unwrap_or(0.0);
+                    self.status = format!("Real llama-bench: prefill {pp:.2} tok/s, decode {tg:.2} tok/s. Quality not tested. Receipt: {}",
+                        path.file_name().unwrap_or_default().to_string_lossy());
+                    self.last_benchmark = Some((path, receipt));
+                }
+                WorkerEvent::Bench(Err(e)) => self.status = format!("GGUF performance benchmark failed: {e}"),
                 WorkerEvent::Log(_) => unreachable!("log messages handled above"),
             }
         }
@@ -475,6 +526,7 @@ impl Workstation {
             Focus::Quantizer => &mut self.quantizer,
             Focus::Converter => &mut self.converter,
             Focus::Runtime => &mut self.runtime,
+            Focus::Benchmark => &mut self.benchmark,
             Focus::Prompt => &mut self.prompt,
             Focus::GpuLayers => &mut self.gpu_layers,
         };
@@ -524,6 +576,7 @@ impl Workstation {
         let quantizer = &mut self.quantizer;
         let converter = &mut self.converter;
         let runtime = &mut self.runtime;
+        let benchmark = &mut self.benchmark;
         let prompt = &mut self.prompt;
         let gpu_layers = &mut self.gpu_layers;
         let recipe = &mut self.recipe;
@@ -532,6 +585,7 @@ impl Workstation {
         let hf_folder = if source_is_current { self.hf_folder.as_ref() } else { None };
         let model_probe = if source_is_current { self.probe.as_ref() } else { None };
         let last_inference = &self.last_inference;
+        let last_benchmark = &self.last_benchmark;
         let status = &self.status;
         let busy = self.busy;
         let backends = &self.backends;
@@ -541,7 +595,7 @@ impl Workstation {
         let mut rescan = false;
         let mut download: Option<BackendId> = None;
         let mut new_focus = self.focus;
-        let (mut inspect, mut plan, mut convert, mut smoke) = (false, false, false, false);
+        let (mut inspect, mut plan, mut convert, mut smoke, mut bench) = (false, false, false, false, false);
         {
             let mut ui = KathamoUi::new(&mut cmds, &mut self.icons, &palette, viewport, click_pointer);
 
@@ -646,6 +700,7 @@ impl Workstation {
                                 let label = match backend.spec.id {
                                     BackendId::LlamaQuantize => "GGUF converter",
                                     BackendId::LlamaCli => "GGUF inference",
+                                    BackendId::LlamaBench => "GGUF performance benchmark",
                                     BackendId::LlamaPerplexity => "GGUF quality / PPL",
                                     BackendId::LlamaImatrix => "GGUF calibration",
                                     BackendId::HfConverter => "HF to GGUF script",
@@ -708,7 +763,7 @@ impl Workstation {
                             });
                         });
 
-                        col.glass_card(260.0, |card| {
+                        col.glass_card(330.0, |card| {
                             card.heading("03   TEST QUANTIZED MODEL");
                             card.label("Real llama-cli smoke check. 0 GPU layers runs on CPU.");
                             card.label("llama-cli runtime executable");
@@ -722,6 +777,16 @@ impl Workstation {
                                 new_focus = Some(Focus::Prompt);
                             }
                             if card.button_secondary("Test with llama-cli").clicked() { smoke = true; }
+                            card.label("llama-bench executable (real performance, optional)");
+                            if card.text_input(benchmark, "llama-bench executable...").clicked() { new_focus = Some(Focus::Benchmark); }
+                            if card.button_secondary("Benchmark Output (512/128, 3 runs)").clicked() { bench = true; }
+                            if let Some((receipt_path, values)) = last_benchmark {
+                                let pp = values["prompt_processing"]["tokens_per_second"].as_f64().unwrap_or(0.0);
+                                let tg = values["token_generation"]["tokens_per_second"].as_f64().unwrap_or(0.0);
+                                card.label(&format!("Measured: prefill {pp:.1} tok/s, decode {tg:.1} tok/s"));
+                                card.label(&format!("Receipt: {}", receipt_path.file_name().unwrap_or_default().to_string_lossy()));
+                                card.label("Speed only; quality, TTFT and VRAM are not measured.");
+                            }
                             if let Some(answer) = last_inference {
                                 card.horizontal(20.0, |hdr| {
                                     hdr.badge("llama-cli output captured", true);
@@ -781,6 +846,7 @@ impl Workstation {
         else if plan { self.start_plan(); }
         else if convert { self.start_quantize(); }
         else if smoke { self.start_smoke(); }
+        else if bench { self.start_bench(); }
         cmds
     }
 }

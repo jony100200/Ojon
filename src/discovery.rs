@@ -20,6 +20,7 @@ pub enum Integration {
 pub enum BackendId {
     LlamaQuantize,
     LlamaCli,
+    LlamaBench,
     LlamaPerplexity,
     LlamaImatrix,
     HfConverter,
@@ -41,7 +42,7 @@ pub struct BackendSpec {
     pub role: &'static str,
 }
 
-const SPECS: [BackendSpec; 10] = [
+const SPECS: [BackendSpec; 11] = [
     BackendSpec {
         id: BackendId::LlamaQuantize,
         name: "llama.cpp quantizer",
@@ -59,6 +60,15 @@ const SPECS: [BackendSpec; 10] = [
         website: "https://github.com/ggml-org/llama.cpp/releases",
         integration: Integration::Wired,
         role: "GGUF text-model inference smoke check",
+    },
+    BackendSpec {
+        id: BackendId::LlamaBench,
+        name: "llama.cpp performance benchmark",
+        executable_names: &["llama-bench", "llama-bench.exe"],
+        override_env: "OJON_LLAMA_BENCH",
+        website: "https://github.com/ggml-org/llama.cpp/blob/master/tools/llama-bench/README.md",
+        integration: Integration::Wired,
+        role: "Real GGUF prefill/decode benchmark with comparable JSON receipts",
     },
     BackendSpec {
         id: BackendId::LlamaPerplexity,

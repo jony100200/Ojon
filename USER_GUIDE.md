@@ -60,6 +60,26 @@ ojon optimize-plan "C:\Models\source-f16.gguf" --device cuda --json
 
 `optimize-plan` is metadata-only and returns a versioned JSON comparison proposal. It keeps separate choices for size, balanced precision, calibration, or distinct available backends. A `missing_tool`, `experimental`, `blocked_source`, `storage_only`, or `requires_compatibility_test` state is not permission to execute or a claim of loadability. The device flag describes a requested target; no live free VRAM/RAM or driver support is measured yet. `recommendation: null` is intentional until real matched quality, memory and runtime measurements exist. To execute a supported route, use the existing guarded manual commands.
 
+## GGUF performance testing with real llama-bench receipts
+
+Ojon's performance test works only for a **GGUF** accepted by a user-installed public `llama-bench`. HQQ artifacts, OpenVINO IR, image/video safetensors, audio models and Ojon's storage-only `.ojonq` files need different loaders and evaluation adapters.
+
+```powershell
+# Read-only, no tensor loads
+ojon bench-plan "C:\Models\Qwen3-Q4_K_M.gguf" --json
+
+# Loads quantized weights intentionally, writes a NEW receipt without overwriting
+ojon bench-run "C:\Models\Qwen3-Q4_K_M.gguf" "C:\Reports\qwen-q4.json" --tool "C:\Tools\llama.cpp\llama-bench.exe" --prompt-tokens 512 --gen-tokens 128 --repetitions 3 --gpu-layers 99 --confirm
+
+# Optional, only when the original really fits the machine and same settings
+ojon bench-run "C:\Models\Qwen3-BF16.gguf" "C:\Reports\qwen-bf16.json" --tool "C:\Tools\llama.cpp\llama-bench.exe" --prompt-tokens 512 --gen-tokens 128 --repetitions 3 --gpu-layers 99 --confirm
+ojon bench-compare "C:\Reports\qwen-bf16.json" "C:\Reports\qwen-q4.json" --json
+```
+
+The Kathamo GUI exposes **Benchmark Output (512/128, 3 runs)** in its existing Test pane. Supply an actual output GGUF and the installed `llama-bench` path. The process runs off the render thread, displays real prefill/decode tokens/s and writes its receipt beside the model.
+
+If BF16 is too large for your RAM/VRAM, **skip the BF16 run**. Ojon will not invent performance for an unloaded checkpoint. Ojon also does **not** measure held-out task accuracy, tool calls, OCR, grounding, peak GPU memory, or TTFT with this adapter. Benchmark speed is only one axis; continue to validate inference via `smoke` and quality via task-specific tests. A comparison across mismatched GPUs or runtime builds is explicitly flagged as non-comparable.
+
 ## Model discovery, fine-tuning and best-variant recommendation (early backend features)
 
 Ojon aims to make one **local** workflow from existing public backends, not create another quantization or training algorithm. For new AI model families, Ojon should first identify the checkpoint and the target runtime, then connect only a compatible upstream tool. Classification is a suggestion, **not an automatic conversion permission**.

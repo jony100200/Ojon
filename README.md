@@ -26,7 +26,7 @@ Ojon brings existing, independent model tools under one roof. Install only the p
 - **Native Rust image/video weight storage:** inspect, pack and restore original safetensors models into 2/3/4-bit Ojon-packed containers; experimental SVDQuant INT4 route remains available separately.
 - Expose JSON model probes, backend discovery, candidate planning, and quality-report ranking for local agents.
 
-**Not yet universal:** image/video/speech/utility quantization adapters, full multimodal evaluation, automatic quality benchmarking across all model families, cancellation/resume, and trustworthy hardware-resource planning remain in development. Merely detecting a backend does not mean it is compatible.
+**Not yet universal:** image/video/speech/utility quantization adapters, full multimodal evaluation, automatic quality benchmarking across all model families, cancellation/resume, universal family-specific tests, and real peak memory prediction remain in development. Merely detecting a backend does not mean it is compatible.
 
 ## Install
 
@@ -62,7 +62,26 @@ ojon imatrix-run "original-f16.gguf" "calibration.txt" "imatrix.gguf" --confirm
 
 The text must represent the model's real tasks. Use different data for subsequent held-out evaluation. Calibration loads the original model and may need substantial RAM/VRAM; the file alone does not verify task quality.
 
-### Compare several sizes
+### Benchmark GGUF outputs with real measurements
+
+Use the independently installed public [llama-bench](https://github.com/ggml-org/llama.cpp/blob/master/tools/llama-bench/README.md). Ojon runs actual, separate prompt-processing (pp) and token-generation (tg) benchmarks, and stores a reviewable JSON receipt. The original BF16 checkpoint is **optional**; if it exceeds available hardware capacity, benchmark the quantized variant by itself instead of claiming a fictional baseline.
+
+```powershell
+# Metadata-only preview
+ojon bench-plan "M:\Models\my-Q5_K_M.gguf" --gpu-layers 0 --json
+
+# Intentional REAL benchmark; parent folder must exist
+ojon bench-run "M:\Models\my-Q5_K_M.gguf" "M:\Reports\q5-bench.json" --tool "C:\Tools\llama.cpp\llama-bench.exe" --gpu-layers 99 --confirm
+
+# Compare two completed receipts only when machine, runtime and test settings match
+ojon bench-compare "M:\Reports\bf16-bench.json" "M:\Reports\q5-bench.json" --json
+```
+
+Kathamo's **Test Quantized Model** pane now includes an optional **Benchmark Output** button. It measures the current output GGUF on a worker thread (512 prompt / 128 generation tokens, three repetitions), shows both measured speeds, and creates a unique report next to the model. Conversion and inference smoke tests remain separate.
+
+Benchmark receipts capture real backend build, CPU/GPU, test configuration, architecture, output size and pp/tg throughput. Mismatched measured settings suppress comparisons. **This is not model-quality retention, first-token latency, VLM/OCR accuracy, or a direct measure of peak VRAM.** The official `llama-bench` excludes tokenization and sampling overhead. Use independent held-out task evidence before selecting the smallest acceptable quantization.
+
+## Compare several sizes
 
 ```powershell
 # Output directory must exist and source must be an original F32/F16/BF16 GGUF.
