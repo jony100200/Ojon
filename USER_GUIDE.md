@@ -10,7 +10,7 @@ Intended path: **Import → Inspect → Choose supported conversion → Prefligh
 
 ## Resource preflight and large model precautions
 
-Use Ojon's non-invasive resource checks before attempting a 50GB or 95GB original model. It reads actual free host RAM and destination drive capacity, and detects NVIDIA per-device free VRAM where `nvidia-smi` is installed. **Intel B60 free VRAM is not measured yet** and must remain unknown rather than assuming that 24GB is available.
+Use Ojon's non-invasive resource checks before attempting a 50GB or 95GB original model. It reads actual free host RAM and destination drive capacity, and detects NVIDIA per-device free VRAM where `nvidia-smi` is installed. **Intel B60 free VRAM is measured only when optional `xpu-smi` supports a valid single-shot memory query.** If it is missing, unsupported on the operating system or reports `N/A`, the free VRAM remains unknown; 24GB total is never assumed free.
 
 ```powershell
 ojon resource-plan "M:\Models\original-hf" "M:\OjonOutputs" --mode hqq --device xpu --json
