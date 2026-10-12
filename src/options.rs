@@ -94,6 +94,25 @@ fn plan_for(
             "compatible GGUF runtime, not yet verified",
             if autoround { "requires_compatibility_test" } else { "missing_tool" },
             ar_reason, "autoround-plan --bits 4|5 --format gguf:q4_k_m|gguf:q5_k_m"));
+        if !multi {
+            options.push(candidate("hf_hqq_q4", "dropbox_hqq",
+                "calibration-free half-quadratic weight quantization",
+                "HQQ native qmodel.pt (not GGUF)",
+                "HQQ AutoHQQHFModel loader only (unverified)",
+                "external_python_unverified",
+                "Needs installed torch, hqq and transformers; full HF checkpoint loaded; no GGUF converter or B60 kernel compatibility implied",
+                "research-plan hqq <source> <new-output> --bits 4 --group 64"));
+            for (id, ratio) in [("hf_openvino_int4", "1.0"), ("hf_openvino_mixed", "0.8")] {
+                options.push(candidate(id, "openvino_nncf",
+                    "OpenVINO/NNCF weight-only INT4 with optional INT8 backup layers",
+                    "OpenVINO IR .xml/.bin (not GGUF)",
+                    "OpenVINO / Optimum Intel (loader unverified)",
+                    "external_python_unverified",
+                    "Requires installed optimum-cli and model-specific OpenVINO support; quantization can use significant CPU RAM",
+                    if ratio == "1.0" { "research-plan openvino <source> <new-output> --ratio 1.0" }
+                    else { "research-plan openvino <source> <new-output> --ratio 0.8" }));
+            }
+        }
         if multi {
             for item in &mut options {
                 item["multimodal_requirement"] = json!("Preserve and verify vision encoder, processor, projector, and actual image-input inference");
@@ -186,10 +205,14 @@ mod tests {
         let value = plan_for(&fixture("hf_checkpoint_directory", ModelCategory::Language),
             "xpu", &[], None).unwrap();
         let rows = value["options"].as_array().unwrap();
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 6);
         assert_eq!(rows[0]["id"], "hf_gguf_q5");
         assert_eq!(rows[1]["id"], "hf_gguf_q4");
         assert_eq!(rows[2]["id"], "hf_autoround_4");
+        assert_eq!(rows[3]["id"], "hf_hqq_q4");
+        assert_eq!(rows[4]["id"], "hf_openvino_int4");
+        assert_eq!(rows[5]["id"], "hf_openvino_mixed");
+        assert_eq!(rows[3]["runtime_load_verified"], false);
         assert!(value["recommendation"].is_null());
         assert_eq!(value["weights_loaded"], false);
         assert_eq!(value["files_written"], false);

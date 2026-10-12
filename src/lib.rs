@@ -19,6 +19,7 @@ pub mod packed;
 pub mod distill;
 pub mod autoround;
 pub mod options;
+pub mod research_routes;
 
 pub use discovery::{backend_specs, discover_backends, discovered_path, hf_python_path, open_official_download_page, BackendId, FoundBackend, Integration};
 pub use gguf::{inspect_gguf, GgufSummary};
@@ -45,3 +46,5 @@ pub use packed::{plan_pack,run_pack,unpack,PackPlan,PackResult};
 pub use calibration::{prepare_imatrix,run_imatrix,ImatrixPlan};
 
 pub use options::plan_options;
+
+pub use research_routes::{prepare_research, run_research, ResearchKind, ResearchPlan};

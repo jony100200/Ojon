@@ -34,6 +34,9 @@ jobs:
       - name: Test Rust backend and CLI
         run: cargo test --locked --lib --bin ojon
 
+      - name: Syntax check bundled HQQ bridge
+        run: python -c "import ast, pathlib; ast.parse(pathlib.Path('src/hqq_bridge.py').read_text(encoding='utf-8'))"
+
       - name: Check Kathamo desktop GUI
         run: cargo check --locked --features gui --bin ojon-gui
 

@@ -10,6 +10,7 @@ use ojon_backend::{
     DiffusionEngine, DiffusionKind, DiffusionFormat,
     plan_pack, run_pack, unpack, prepare_imatrix, run_imatrix,
     prepare_autoround_plan, run_autoround,
+    prepare_research, run_research, ResearchKind,
 };
 use std::env;
 use std::ffi::OsString;
@@ -41,6 +42,8 @@ Commands:
   ojon pack-plan <original.safetensors> <output.ojonq> [--bits 4] [--group 64]
   ojon pack-run  <original.safetensors> <output.ojonq> [options] --confirm
   ojon unpack    <packed.ojonq> <restored.safetensors> --confirm
+  ojon research-plan <hqq|openvino> <original-hf-dir> <new-output-dir> [--bits 4] [--group 64|128] [--ratio 0.8|1.0] [--device cpu|cuda|xpu] [--tool python|optimum-cli] [--json]
+  ojon research-run  <hqq|openvino> <original-hf-dir> <new-output-dir> [options] --confirm
   ojon autoround-plan <model-dir> <output-dir> [--bits 4] [--format gguf:q4_k_m|gguf:q5_k_m] [--iters 0|200] [--dataset local.json] [--device xpu|cuda|cpu] [--python python] [--nsamples 128] [--seqlen 2048] [--json]
   ojon autoround-run  <model-dir> <output-dir> [options] --confirm
   ojon diffusion-inspect <local-source> <output.safetensors> [options] --confirm
@@ -561,6 +564,58 @@ fn run() -> io::Result<()> {
                     println!("{}: {} bytes, eligible={}", candidate["label"].as_str().unwrap_or("?"),
                         candidate["bytes"], candidate["eligible"]);
                 }
+            }
+        }
+        Some("research-plan") | Some("research-run") => {
+            let execute = cmd == "research-run";
+            let kind_str = next_argument(&mut args, "hqq or openvino backend")?;
+            let kind = ResearchKind::parse(kind_str.to_str().ok_or_else(|| invalid("backend must be text"))?)?;
+            let source = PathBuf::from(next_argument(&mut args, "local original HF checkpoint directory")?);
+            let output = PathBuf::from(next_argument(&mut args, "new absolute output directory")?);
+            let mut bits = 4u32;
+            let mut group = if kind == ResearchKind::Hqq { 64u32 } else { 128u32 };
+            let mut ratio = 1.0f64;
+            let mut device = String::from("cpu");
+            let mut tool = PathBuf::from(if kind == ResearchKind::Hqq { "python" } else { "optimum-cli" });
+            let mut confirm = false;
+            let mut json = false;
+            while let Some(arg) = args.next() {
+                match arg.to_str() {
+                    Some("--bits") => bits = next_argument(&mut args, "bit width")?
+                        .to_str().ok_or_else(|| invalid("bits must be text"))?
+                        .parse().map_err(|_| invalid("invalid bits"))?,
+                    Some("--group") => group = next_argument(&mut args, "group size")?
+                        .to_str().ok_or_else(|| invalid("group must be text"))?
+                        .parse().map_err(|_| invalid("invalid group size"))?,
+                    Some("--ratio") => ratio = next_argument(&mut args, "OpenVINO 4-bit layer ratio")?
+                        .to_str().ok_or_else(|| invalid("ratio must be text"))?
+                        .parse().map_err(|_| invalid("invalid ratio"))?,
+                    Some("--device") => device = next_argument(&mut args, "device")?
+                        .to_str().ok_or_else(|| invalid("device must be text"))?.to_owned(),
+                    Some("--tool") => tool = PathBuf::from(next_argument(&mut args, "backend executable")?),
+                    Some("--json") => json = true,
+                    Some("--confirm") if execute => confirm = true,
+                    _ => return Err(invalid(format!("unknown research option: {}", arg.to_string_lossy()))),
+                }
+            }
+            let plan = prepare_research(kind, &source, &output, &tool, bits, group, ratio, &device)?;
+            if !execute {
+                if json { println!("{}", plan.as_json()); }
+                else {
+                    println!("backend: {}", plan.as_json()["backend"]);
+                    println!("output_format: {}", plan.as_json()["output_format"]);
+                    println!("source: {}", plan.source.directory.display());
+                    println!("output: {}", plan.output.display());
+                    println!("status: PLAN_ONLY; no model weights loaded");
+                    println!("run: repeat the same options using research-run and --confirm");
+                }
+            } else {
+                if !confirm { return Err(invalid("research conversion writes output; pass --confirm")); }
+                println!("{}", plan.as_json());
+                run_research(&plan)?;
+                println!("research_status: EXPORTED_FORMAT_ONLY");
+                println!("runtime_load_test: NOT_RUN");
+                println!("held_out_task_quality: NOT_TESTED");
             }
         }
         Some("autoround-plan") | Some("autoround-run") => {
