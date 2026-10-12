@@ -66,6 +66,44 @@ impl BenchPlan {
     }
 }
 
+
+fn total_model_bytes(first: &Path, first_bytes: u64) -> io::Result<u64> {
+    // llama.cpp accepts split GGUF via part 00001-of-000NN. A misleading
+    // first-shard-only size would break Ojon's compression comparison.
+    let Some(stem) = first.file_stem().and_then(|s| s.to_str()) else {
+        return Ok(first_bytes);
+    };
+    let Some((before_total, total)) = stem.rsplit_once("-of-") else {
+        return Ok(first_bytes);
+    };
+    let Some((prefix, part)) = before_total.rsplit_once('-') else {
+        return Ok(first_bytes);
+    };
+    if part.len() != 5 || total.len() != 5
+        || !part.bytes().all(|b| b.is_ascii_digit())
+        || !total.bytes().all(|b| b.is_ascii_digit()) {
+        return Ok(first_bytes);
+    }
+    let count: usize = total.parse().map_err(|_| invalid("invalid split model shard count"))?;
+    if part != "00001" || count < 2 || count > 128 {
+        return Err(invalid("benchmark a split GGUF using its first -00001-of-XXXXX.gguf shard (max 128 shards)"));
+    }
+    let mut size = 0u64;
+    for index in 1..=count {
+        let shard = first.with_file_name(format!("{prefix}-{index:05}-of-{count:05}.gguf"));
+        let metadata = fs::metadata(&shard).map_err(|e| invalid(format!("missing GGUF shard {}: {e}", shard.display())))?;
+        if !metadata.is_file() || metadata.len() < 8 {
+            return Err(invalid(format!("GGUF split shard is empty or not a file: {}", shard.display())));
+        }
+        let mut magic = [0u8; 4];
+        use std::io::Read;
+        std::fs::File::open(&shard)?.read_exact(&mut magic)?;
+        if &magic != b"GGUF" { return Err(invalid(format!("invalid GGUF split shard: {}", shard.display()))); }
+        size = size.checked_add(metadata.len()).ok_or_else(|| invalid("split GGUF size overflow"))?;
+    }
+    Ok(size)
+}
+
 /// Reads GGUF catalog only. Bench execution is explicitly separate, and large
 /// originals need not be loaded in order to measure a quantized candidate.
 pub fn prepare_bench(
@@ -88,7 +126,8 @@ pub fn prepare_bench(
     if meta.tensor_count == 0 { return Err(invalid("GGUF has no tensor catalog")); }
     Ok(BenchPlan {
         model, tool: tool.to_path_buf(), prompt_tokens, gen_tokens,
-        repetitions, gpu_layers, device: device.map(str::to_owned), model_bytes: meta.file_bytes,
+        repetitions, gpu_layers, device: device.map(str::to_owned),
+        model_bytes: total_model_bytes(&model, meta.file_bytes)?,
         architecture: meta.architecture.unwrap_or_else(|| "unknown".into()),
     })
 }
@@ -322,6 +361,21 @@ mod tests {
         b["n_prompt"] = json!(0); b["n_gen"] = json!(128);
         b["avg_ts"] = json!(44.5);
         json!([a,b]).to_string()
+    }
+    #[test] fn multi_shard_size_requires_all_parts_and_first_part_only() {
+        let root = std::env::temp_dir().join(format!("ojon_bench_shards_{}_{}", std::process::id(),
+            std::thread::current().name().unwrap_or("t").replace(':', "_")));
+        fs::create_dir_all(&root).unwrap();
+        let a=root.join("Qwen-00001-of-00002.gguf");
+        let b=root.join("Qwen-00002-of-00002.gguf");
+        fs::write(&a,b"GGUF000000000").unwrap();
+        fs::write(&b,b"GGUF0000000").unwrap();
+        assert_eq!(total_model_bytes(&a,13).unwrap(),24);
+        assert!(total_model_bytes(&b,11).is_err());
+        fs::remove_file(&b).unwrap();
+        assert!(total_model_bytes(&a,13).is_err());
+        fs::remove_file(&a).unwrap();
+        fs::remove_dir(&root).unwrap();
     }
     #[test] fn reads_only_real_json_metrics_not_quality() {
         let receipt=parse_bench_json(&example(),&plan()).unwrap();
