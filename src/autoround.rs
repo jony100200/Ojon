@@ -81,7 +81,10 @@ impl AutoRoundPlan {
             "method": if self.iters == 0 { "optimized_rtn" } else { "calibrated_auto_round" },
             "iterations": self.iters,
             "local_dataset": self.dataset.as_ref().map(|p| p.to_string_lossy().to_string()),
-            "requires_download": false,
+            "network_downloads_blocked_at_execution": true,
+            "method_reference": "https://github.com/intel/auto-round/blob/main/docs/step_by_step.md",
+            "export_status": "experimental_upstream_gguf",
+            "loader_required": "compatible GGUF runtime; not verified by plan",
             "model_compatibility_verified": false,
             "runtime_load_verified": false,
             "task_quality_verified": false,
@@ -190,6 +193,9 @@ pub fn prepare_autoround_recipe_plan(
     let parent = output_dir.parent().ok_or_else(|| bad_input("output directory needs parent"))?;
     if !parent.is_dir() {
         return Err(bad_input("output parent directory does not exist"));
+    }
+    if parent.canonicalize()?.starts_with(&model_dir) {
+        return Err(bad_input("output must be outside the original model directory"));
     }
 
     let python = if python.is_absolute() {
@@ -331,7 +337,7 @@ mod tests {
         let rt = prepare_autoround_recipe_plan(&model, &out, 4, "cpu",
             Path::new("python"), 128, 2048, None, 0, None).unwrap();
         assert_eq!(rt.format, "gguf:q4_k_m");
-        assert!(rt.arguments.windows(2).any(|w| w == ["--iters", "0"]));
+        assert!(rt.arguments.windows(2).any(|w| w[0] == "--iters" && w[1] == "0"));
         let path = root.join("calibration.json");
         fs::write(&path, "[]").unwrap();
         let calibrated = prepare_autoround_recipe_plan(&model, &out, 5, "xpu",
