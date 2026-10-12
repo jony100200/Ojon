@@ -133,7 +133,7 @@ Both routes stage conversion beside the destination and publish only after check
 
 ## Resource preflight — measure capacity before quantization
 
-Ojon measures **available host RAM** and **free space on the actual destination volume**, plus per-physical-device NVIDIA free VRAM where `nvidia-smi` is installed. Intel Arc Pro B60 free VRAM is **unknown** until a verified Intel telemetry provider is added; its 24GB advertised total is never claimed to be free.
+Ojon measures **available host RAM** and **free space on the actual destination volume**, plus per-physical-device NVIDIA free VRAM where `nvidia-smi` is installed. Intel Arc Pro B60 free VRAM is read only from valid, optional Intel `xpu-smi` telemetry. When it is absent, unsupported on the host or returns `N/A`, capacity remains **unknown** rather than assuming the advertised 24 GB is free.
 
 ```powershell
 ojon resource-plan "C:\Models\hf-source" "M:\OjonOutputs" --mode hqq --device xpu --json
