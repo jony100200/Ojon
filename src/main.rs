@@ -8,7 +8,7 @@ use ojon_backend::{
     smoke_gguf, BackendId, GgufSummary, Integration, PplSettings, Precision, QuantizePlan,
     plan_diffusion, run_diffusion, inspect_diffusion_recipe, discover_diffusion,
     DiffusionEngine, DiffusionKind, DiffusionFormat,
-    plan_pack, run_pack, unpack,
+    plan_pack, run_pack, unpack, prepare_imatrix, run_imatrix,
 };
 use std::env;
 use std::ffi::OsString;
@@ -33,6 +33,8 @@ Commands:
   ojon sweep-plan <source.gguf> <existing-output-dir> [--precisions Q5_K_M,Q4_K_M,IQ4_XS,IQ3_M] [--imatrix path] [--tool path] [--threads N]
   ojon sweep-run <source.gguf> <existing-output-dir> [options] --confirm
   ojon eval-sweep <sweep-manifest.json> <held-out-corpus.txt> [--tool llama-perplexity] [--gpu-layers N] [--context 2048] [--max-degradation 1.0] --confirm
+  ojon imatrix-plan <original-f16.gguf> <calibration.txt> <new-imatrix.gguf> [--gpu-layers 0] [--context 2048] [--tool path]
+  ojon imatrix-run  <original-f16.gguf> <calibration.txt> <new-imatrix.gguf> [options] --confirm
   ojon diffusion-plan <local-source> <output.safetensors> --checkout <upstream> [--backend svdq] [--kind image|video] [--format int4] [--python python] [--samples 32]
   ojon pack-plan <original.safetensors> <output.ojonq> [--bits 4] [--group 64]
   ojon pack-run  <original.safetensors> <output.ojonq> [options] --confirm
@@ -401,6 +403,46 @@ fn run() -> io::Result<()> {
                     if let Some(config)=outcome.sidecar{println!("config: {}",config.display());}
                     if let Some(receipt)=outcome.receipt{println!("receipt: {}",receipt.display());}
                 }
+            }
+        }
+        Some("imatrix-plan") | Some("imatrix-run") => {
+            let execute = cmd=="imatrix-run";
+            let model=PathBuf::from(next_argument(&mut args,"original F16/BF16 GGUF model")?);
+            let corpus=PathBuf::from(next_argument(&mut args,"local UTF-8 calibration text")?);
+            let output=PathBuf::from(next_argument(&mut args,"new imatrix.gguf output")?);
+            let mut tool=discovered_path(BackendId::LlamaImatrix)
+                .unwrap_or_else(||PathBuf::from("llama-imatrix"));
+            let mut gpu_layers=0u32;
+            let mut context=2048u32;
+            let mut confirmed=false;
+            while let Some(option)=args.next(){
+                match option.to_str(){
+                    Some("--tool")=>tool=PathBuf::from(next_argument(&mut args,"public llama-imatrix executable")?),
+                    Some("--gpu-layers")=>{
+                        gpu_layers=next_argument(&mut args,"GPU layer offload count")?
+                            .to_str().ok_or_else(||invalid("GPU layer count must be numeric"))?
+                            .parse().map_err(|_|invalid("GPU layers must be integer"))?;
+                    }
+                    Some("--context")=>{
+                        context=next_argument(&mut args,"calibration context")?
+                            .to_str().ok_or_else(||invalid("context must be numeric"))?
+                            .parse().map_err(|_|invalid("context must be integer"))?;
+                    }
+                    Some("--confirm") if execute=>confirmed=true,
+                    _=>return Err(invalid(format!("unknown imatrix option: {}",option.to_string_lossy()))),
+                }
+            }
+            let plan=prepare_imatrix(&model,&corpus,&output,&tool,gpu_layers,context)?;
+            if !execute{println!("{}",plan.json());}
+            else{
+                if !confirmed{
+                    return Err(invalid("importance-matrix calibration loads the original model and can consume significant RAM/VRAM; pass --confirm"));
+                }
+                println!("{}",plan.json());
+                let saved=run_imatrix(&plan,|line|eprintln!("{line}"))?;
+                println!("imatrix: {}",saved.display());
+                println!("next_step: use --imatrix with ojon sweep-plan / sweep-run");
+                println!("quality: NOT_EVALUATED; held_out_task_tests_required");
             }
         }
         Some("eval-sweep") => {
