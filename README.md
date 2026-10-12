@@ -14,7 +14,7 @@ Ojon brings existing, independent model tools under one roof. Install only the p
 - Detect installed public conversion and inference executables, with links to their official projects.
 - Convert compatible original Hugging Face checkpoints to GGUF using public llama.cpp's Python script.
 - Quantize compatible GGUF models using an installed public llama.cpp `llama-quantize`.
-- Select Q5_K_M (default), Q4_K_M, Q3_K_M, Q6_K and additional supported IQ4/IQ3/IQ2 formats; calibration via an optional llama.cpp importance matrix.
+- Select Q5_K_M (default), Q4_K_M, Q3_K_M, Q6_K and supported IQ4/IQ3/IQ2 formats. Generate an optional GGUF importance matrix with a confirmed public `llama-imatrix` run.
 - Plan and run a *sequential* GGUF candidate sweep, recording actual output sizes, durations, status, and errors.
 - Compare completed GGUF variants against an original via the optional public `llama-perplexity` executable. **Perplexity is only one quality proxy**, not a guarantee of retained task performance.
 - Run a basic inference smoke test with an installed `llama-cli`.
@@ -50,6 +50,17 @@ ojon verify "model-Q5_K_M.gguf"
 ```
 
 Use a high-precision source where possible. The source is not overwritten.
+
+### Calibrate for better low-bit quality
+
+```powershell
+# Plan only, then explicitly run a calibrated importance matrix from original F16/BF16 GGUF
+ojon imatrix-plan "original-f16.gguf" "calibration.txt" "imatrix.gguf"
+ojon imatrix-run "original-f16.gguf" "calibration.txt" "imatrix.gguf" --confirm
+# Reuse imatrix.gguf for all compatible GGUF Q4/IQ3 candidate sweeps using --imatrix
+```
+
+The text must represent the model's real tasks. Use different data for subsequent held-out evaluation. Calibration loads the original model and may need substantial RAM/VRAM; the file alone does not verify task quality.
 
 ### Compare several sizes
 
