@@ -11,7 +11,6 @@
 
 use crate::jobs::run_with_log;
 use serde_json::{json, Value};
-use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -173,7 +172,7 @@ pub fn prepare_autoround_plan(
 }
 
 /// Execute AutoRound after explicit user confirmation.
-pub fn run_autoround(plan: &AutoRoundPlan) -> io::Result<PathBuf> {
+pub fn run_autoround(plan: &AutoRoundPlan) -> io::Result<()> {
     if plan.output_dir.exists() {
         return Err(io::Error::new(
             ErrorKind::AlreadyExists,
@@ -190,14 +189,7 @@ pub fn run_autoround(plan: &AutoRoundPlan) -> io::Result<PathBuf> {
     let mut cmd = Command::new(&plan.python);
     cmd.args(&plan.arguments);
 
-    let (status, log_path) = run_with_log(&mut cmd, "autoround")?;
-    if !status.success() {
-        return Err(io::Error::other(format!(
-            "AutoRound failed with exit status: {}; see log: {}",
-            status,
-            log_path.display()
-        )));
-    }
+    run_with_log(&mut cmd, |line| println!("{line}"))?;
 
     if !plan.output_dir.is_dir() {
         return Err(io::Error::other(format!(
@@ -206,7 +198,7 @@ pub fn run_autoround(plan: &AutoRoundPlan) -> io::Result<PathBuf> {
         )));
     }
 
-    Ok(log_path)
+    Ok(())
 }
 
 #[cfg(test)]
