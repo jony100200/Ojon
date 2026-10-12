@@ -1,4 +1,4 @@
-//! Ojon's independent Rust backend. Quantization math is delegated to real tools.
+//! Ojon's independent Rust backend: native scalar weight packing plus optional public ML engines.
 //! No GUI, Python, network access, or model weights are required for inspection.
 
 pub mod discovery;
