@@ -21,6 +21,7 @@ pub enum BackendId {
     LlamaQuantize,
     LlamaCli,
     LlamaPerplexity,
+    LlamaImatrix,
     HfConverter,
     LlamaFactory,
     StableDiffusionCpp,
@@ -38,7 +39,7 @@ pub struct BackendSpec {
     pub role: &'static str,
 }
 
-const SPECS: [BackendSpec; 7] = [
+const SPECS: [BackendSpec; 8] = [
     BackendSpec {
         id: BackendId::LlamaQuantize,
         name: "llama.cpp quantizer",
@@ -65,6 +66,15 @@ const SPECS: [BackendSpec; 7] = [
         website: "https://github.com/ggml-org/llama.cpp",
         integration: Integration::Wired,
         role: "Real held-out text perplexity comparison between original and candidate GGUF variants",
+    },
+    BackendSpec {
+        id: BackendId::LlamaImatrix,
+        name: "llama.cpp calibration imatrix",
+        executable_names: &["llama-imatrix", "llama-imatrix.exe"],
+        override_env: "OJON_LLAMA_IMATRIX",
+        website: "https://github.com/ggml-org/llama.cpp",
+        integration: Integration::Wired,
+        role: "GGUF importance-matrix calibration for quality-aware low-bit quantization",
     },
     BackendSpec {
         id: BackendId::HfConverter,
