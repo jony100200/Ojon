@@ -3,6 +3,7 @@
 //! Every run requires explicit user confirmation in the CLI.
 use crate::hf::{inspect_hf_folder, HfFolderInfo};
 use crate::jobs::run_with_log;
+use crate::resource::{assess_resources, ResourceMode};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, ErrorKind};
@@ -214,6 +215,22 @@ fn verified_output(kind: ResearchKind, root: &Path) -> io::Result<()> {
 /// Run exactly one backend. Ojon does NOT install Python packages or model weights.
 /// A successful export is only a format-artifact check, not loaded-runtime validation.
 pub fn run_research(plan: &ResearchPlan) -> io::Result<()> {
+    run_research_with_policy(plan, false)
+}
+
+/// Opt-in escape hatch for deliberately risky/unknown hardware telemetry.
+/// Never turns an unverified resource estimate into a compatibility claim.
+pub fn run_research_with_policy(plan: &ResearchPlan, allow_resource_risk: bool) -> io::Result<()> {
+    let mode = match plan.kind {
+        ResearchKind::Hqq => ResourceMode::Hqq,
+        ResearchKind::OpenVino => ResourceMode::OpenVino,
+    };
+    let parent = plan.output.parent().ok_or_else(|| bad("missing output parent"))?;
+    let preflight = assess_resources(
+        plan.source.source_weight_bytes, parent, mode, &plan.device
+    )?;
+    eprintln!("Ojon resource preflight: {}", preflight.as_json());
+    preflight.enforce(allow_resource_risk)?;
     if plan.output.symlink_metadata().is_ok() {
         return Err(io::Error::new(ErrorKind::AlreadyExists, "output already exists"));
     }
