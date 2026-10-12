@@ -205,10 +205,14 @@ mod tests {
         let value = plan_for(&fixture("hf_checkpoint_directory", ModelCategory::Language),
             "xpu", &[], None).unwrap();
         let rows = value["options"].as_array().unwrap();
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 6);
         assert_eq!(rows[0]["id"], "hf_gguf_q5");
         assert_eq!(rows[1]["id"], "hf_gguf_q4");
         assert_eq!(rows[2]["id"], "hf_autoround_4");
+        assert_eq!(rows[3]["id"], "hf_hqq_q4");
+        assert_eq!(rows[4]["id"], "hf_openvino_int4");
+        assert_eq!(rows[5]["id"], "hf_openvino_mixed");
+        assert_eq!(rows[3]["runtime_load_verified"], false);
         assert!(value["recommendation"].is_null());
         assert_eq!(value["weights_loaded"], false);
         assert_eq!(value["files_written"], false);
