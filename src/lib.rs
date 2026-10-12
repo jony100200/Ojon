@@ -21,6 +21,7 @@ pub mod autoround;
 pub mod options;
 pub mod research_routes;
 pub mod resource;
+pub mod benchmark;
 
 pub use discovery::{backend_specs, discover_backends, discovered_path, hf_python_path, open_official_download_page, BackendId, FoundBackend, Integration};
 pub use gguf::{inspect_gguf, GgufSummary};
@@ -51,3 +52,5 @@ pub use options::plan_options;
 pub use research_routes::{prepare_research, run_research, ResearchKind, ResearchPlan};
 
 pub use resource::{assess_resources, resource_plan, ResourceAssessment, ResourceMode};
+
+pub use benchmark::{prepare_bench, run_bench, compare_bench_files, BenchPlan};
