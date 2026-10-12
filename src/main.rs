@@ -10,7 +10,8 @@ use ojon_backend::{
     DiffusionEngine, DiffusionKind, DiffusionFormat,
     plan_pack, run_pack, unpack, prepare_imatrix, run_imatrix,
     prepare_autoround_plan, run_autoround,
-    prepare_research, run_research, ResearchKind,
+    prepare_research, ResearchKind,
+    resource_plan, ResourceMode,
 };
 use std::env;
 use std::ffi::OsString;
@@ -27,6 +28,7 @@ Commands:
   ojon backends [--json]     Detect installed engines and show official download links
   ojon probe <model-path> [--json]   Identify model format/family without loading weights
   ojon optimize-plan <model-path> [--device auto|cpu|cuda|xpu] [--json]   Compare candidate routes without converting
+  ojon resource-plan <model-path> <existing-output-parent> [--mode hqq|openvino|autoround|gguf|pack] [--device cpu|cuda|xpu|auto] [--json]
   ojon dataset-audit <dataset.jsonl> [--json]   Audit external dataset for drift, dead paths, staleness
   ojon distill-plan  <dataset.jsonl> <output-dir> [--min-score 0.5] [--json]  Curate SFT split
   ojon retrieve      <dataset.jsonl> <query> [--limit 5] [--min-score 0.4] [--json] [--markdown]
@@ -43,9 +45,9 @@ Commands:
   ojon pack-run  <original.safetensors> <output.ojonq> [options] --confirm
   ojon unpack    <packed.ojonq> <restored.safetensors> --confirm
   ojon research-plan <hqq|openvino> <original-hf-dir> <new-output-dir> [--bits 4] [--group 64|128] [--ratio 0.8|1.0] [--device cpu|cuda|xpu] [--tool python|optimum-cli] [--json]
-  ojon research-run  <hqq|openvino> <original-hf-dir> <new-output-dir> [options] --confirm
+  ojon research-run  <hqq|openvino> <original-hf-dir> <new-output-dir> [options] --confirm [--allow-resource-risk]
   ojon autoround-plan <model-dir> <output-dir> [--bits 4] [--format gguf:q4_k_m|gguf:q5_k_m] [--iters 0|200] [--dataset local.json] [--device xpu|cuda|cpu] [--python python] [--nsamples 128] [--seqlen 2048] [--json]
-  ojon autoround-run  <model-dir> <output-dir> [options] --confirm
+  ojon autoround-run  <model-dir> <output-dir> [options] --confirm [--allow-resource-risk]
   ojon diffusion-inspect <local-source> <output.safetensors> [options] --confirm
   ojon diffusion-run <local-source> <output.safetensors> [options] --confirm
   ojon gsq-plan <checkout> <config.yaml> [--python python] [--layers 1 | --all-layers]
@@ -566,6 +568,39 @@ fn run() -> io::Result<()> {
                 }
             }
         }
+        Some("resource-plan") => {
+            let source = PathBuf::from(next_argument(&mut args, "source model path")?);
+            let output_parent = PathBuf::from(next_argument(&mut args, "existing destination parent directory")?);
+            let mut mode = ResourceMode::Gguf;
+            let mut device = String::from("cpu");
+            let mut json = false;
+            while let Some(arg) = args.next() {
+                match arg.to_str() {
+                    Some("--mode") => {
+                        let value = next_argument(&mut args, "preflight mode")?;
+                        mode = ResourceMode::parse(value.to_str().ok_or_else(|| invalid("mode must be text"))?)?;
+                    }
+                    Some("--device") => device = next_argument(&mut args, "cpu|cuda|xpu|auto")?
+                        .to_str().ok_or_else(|| invalid("device must be text"))?.to_owned(),
+                    Some("--json") => json = true,
+                    _ => return Err(invalid(format!("unknown resource-plan option: {}", arg.to_string_lossy()))),
+                }
+            }
+            let result = resource_plan(&source, &output_parent, mode, &device)?;
+            if json {
+                println!("{result}");
+            } else {
+                println!("method: {}", result["mode"]);
+                println!("source_bytes: {}", result["source_weight_bytes"]);
+                println!("host_free_ram_bytes: {}", result["free_host_ram_bytes"]);
+                println!("scratch_free_bytes: {}", result["free_output_volume_bytes"]);
+                println!("host_safety_budget_bytes: {}", result["host_ram_safety_budget_bytes"]);
+                println!("disk_safety_budget_bytes: {}", result["output_volume_safety_budget_bytes"]);
+                println!("status: {}", result["status"]);
+                println!("note: budget is a conservative policy floor, not converter peak-memory prediction");
+                println!("note: Intel GPU free VRAM is measured only when installed xpu-smi returns a valid sample; otherwise UNKNOWN");
+            }
+        }
         Some("research-plan") | Some("research-run") => {
             let execute = cmd == "research-run";
             let kind_str = next_argument(&mut args, "hqq or openvino backend")?;
@@ -578,6 +613,7 @@ fn run() -> io::Result<()> {
             let mut device = String::from("cpu");
             let mut tool = PathBuf::from(if kind == ResearchKind::Hqq { "python" } else { "optimum-cli" });
             let mut confirm = false;
+            let mut allow_resource_risk = false;
             let mut json = false;
             while let Some(arg) = args.next() {
                 match arg.to_str() {
@@ -595,6 +631,7 @@ fn run() -> io::Result<()> {
                     Some("--tool") => tool = PathBuf::from(next_argument(&mut args, "backend executable")?),
                     Some("--json") => json = true,
                     Some("--confirm") if execute => confirm = true,
+                    Some("--allow-resource-risk") if execute => allow_resource_risk = true,
                     _ => return Err(invalid(format!("unknown research option: {}", arg.to_string_lossy()))),
                 }
             }
@@ -612,7 +649,7 @@ fn run() -> io::Result<()> {
             } else {
                 if !confirm { return Err(invalid("research conversion writes output; pass --confirm")); }
                 println!("{}", plan.as_json());
-                run_research(&plan)?;
+                ojon_backend::research_routes::run_research_with_policy(&plan, allow_resource_risk)?;
                 println!("research_status: EXPORTED_FORMAT_ONLY");
                 println!("runtime_load_test: NOT_RUN");
                 println!("held_out_task_quality: NOT_TESTED");
@@ -632,6 +669,7 @@ fn run() -> io::Result<()> {
             let mut seqlen = 2048u32;
             let mut json = false;
             let mut confirm = false;
+            let mut allow_resource_risk = false;
             while let Some(arg) = args.next() {
                 match arg.to_str() {
                     Some("--bits") => {
@@ -670,6 +708,7 @@ fn run() -> io::Result<()> {
                     }
                     Some("--json") => json = true,
                     Some("--confirm") if execute => confirm = true,
+                    Some("--allow-resource-risk") if execute => allow_resource_risk = true,
                     _ => return Err(invalid(format!("unknown autoround option: {}", arg.to_string_lossy()))),
                 }
             }
@@ -700,7 +739,7 @@ fn run() -> io::Result<()> {
                     return Err(invalid("autoround execution writes a quantized model; pass --confirm"));
                 }
                 println!("{}", plan.json());
-                run_autoround(&plan)?;
+                ojon_backend::autoround::run_autoround_with_policy(&plan, allow_resource_risk)?;
                 println!("autoround_status: COMPLETED");
             }
         }

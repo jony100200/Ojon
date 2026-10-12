@@ -8,6 +8,20 @@ Ojon is designed to be **one place to inspect, quantize, and test models** using
 
 Intended path: **Import → Inspect → Choose supported conversion → Preflight → Quantize → Test → Export**.
 
+## Resource preflight and large model precautions
+
+Use Ojon's non-invasive resource checks before attempting a 50GB or 95GB original model. It reads actual free host RAM and destination drive capacity, and detects NVIDIA per-device free VRAM where `nvidia-smi` is installed. **Intel B60 free VRAM is measured only when optional `xpu-smi` supports a valid single-shot memory query.** If it is missing, unsupported on the operating system or reports `N/A`, the free VRAM remains unknown; 24GB total is never assumed free.
+
+```powershell
+ojon resource-plan "M:\Models\original-hf" "M:\OjonOutputs" --mode hqq --device xpu --json
+ojon resource-plan "M:\Models\original-hf" "M:\OjonOutputs" --mode openvino --device cpu --json
+ojon resource-plan "M:\Models\original-hf" "M:\OjonOutputs" --mode autoround --device xpu --json
+```
+
+The HQQ, OpenVINO and AutoRound *operator safety budget* requires at least original source weight bytes plus a **4 GiB RAM reserve**; destination capacity requires original weight bytes plus **2 GiB disk reserve** (or twice source weights for AutoRound/GGUF). These are policy floors, **not** estimates of actual peak memory. Backend activation, GPU driver support and runtime compatibility are separate tests. Streamed GGUF/native packers are not assigned imaginary peak RAM.
+
+Both `research-run` and `autoround-run` enforce resource policy before conversion. If the capacity is below the policy floor or a required measurement is unknown, they reject the run. `--allow-resource-risk` is an explicit opt-in on an already confirmed run; it does not make a full 95GB checkpoint fit in 32GB RAM. No model weights or datasets are downloaded by this preflight.
+
 ## Research backends: HQQ and OpenVINO/NNCF
 
 These commands work independently of the KS llama.cpp build. Install public `hqq` + PyTorch + Transformers for HQQ, or public `optimum-intel` / OpenVINO / NNCF for `optimum-cli`, in a trusted local environment. Use `--tool` to select the appropriate Python/CLI executable. Ojon does **not** install dependencies or download a model.
