@@ -103,10 +103,11 @@ impl ResourceAssessment {
             "predicted_peak_ram_bytes": null,
             "predicted_peak_gpu_bytes": null,
             "model_compatibility_verified": false,
+            "intel_telemetry_reference": "https://intel.github.io/xpumanager/2.0/xpu-smi/overview.html",
             "notes": [
                 "Safety budgets are explicit conservative policy floors (multiples of source weight bytes), NOT predictions of converter peak usage.",
                 "Source weight bytes may exclude auxiliary files. Some methods need more than budget. Filesystem capacity can change between check and write.",
-                "Intel GPU free VRAM is not inferred from its advertised total; unavailable vendor telemetry stays UNKNOWN.",
+                "Intel GPU free VRAM is measured only from a valid xpu-smi single-shot result; missing, N/A or incoherent telemetry stays UNKNOWN.",
                 "Passing the policy does not mean this model, converter, quantization kernel or loader will work."
             ]
         })
@@ -228,6 +229,55 @@ fn nvidia_devices() -> Vec<Value> {
     result
 }
 
+/// Optional Intel Level Zero telemetry. Missing xpu-smi, N/A and malformed data
+/// are UNKNOWN; we never infer free VRAM from the card's rated capacity.
+/// API: Intel XPU Manager 2.0 --query-gpu and --format=csv,noheader,nounits.
+fn xpu_devices() -> Vec<Value> {
+    let output = match Command::new("xpu-smi")
+        .args([
+            "--query-gpu=index,name,memory.total,memory.free",
+            "--format=csv,noheader,nounits",
+        ])
+        .output() {
+            Ok(v) if v.status.success() => v,
+            _ => return vec![],
+        };
+    let response = match String::from_utf8(output.stdout) {
+        Ok(s) => s,
+        Err(_) => return vec![],
+    };
+    parse_xpu_csv(&response)
+}
+
+/// Used as an isolated fixture test, not a claim that the owner's driver works.
+fn parse_xpu_csv(text: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for line in text.lines().take(32) {
+        let cells: Vec<&str> = line.trim().splitn(4, ',').map(str::trim).collect();
+        if cells.len() != 4 { continue; }
+        let index: u32 = match cells[0].parse() { Ok(v) => v, Err(_) => continue };
+        let to_bytes = |s: &str| -> Option<u64> {
+            let mb: f64 = s.parse().ok()?;
+            if !mb.is_finite() || mb < 0.0 { return None; }
+            let bytes = mb * (1024.0 * 1024.0);
+            if bytes > u64::MAX as f64 { return None; }
+            Some(bytes.floor() as u64)
+        };
+        let (Some(total), Some(free)) = (to_bytes(cells[2]), to_bytes(cells[3]))
+            else { continue };
+        // Incoherent samples (N/A, free > total) are rejected, not trusted.
+        if total == 0 || free > total { continue; }
+        out.push(json!({
+            "vendor": "intel", "device_index": index,
+            "device_name": cells[1],
+            "total_vram_bytes": total,
+            "free_vram_bytes": free,
+            "telemetry_source": "xpu-smi --query-gpu",
+        }));
+    }
+    out
+}
+
 fn budget(source_bytes: u64, mode: ResourceMode) -> io::Result<(Option<u64>, u64)> {
     if source_bytes == 0 { return Err(invalid("no source weight bytes found")); }
     let ram = mode.memory_budget_multiplier().map(|m|
@@ -253,13 +303,14 @@ pub fn assess_resources(
     let (ram, disk) = budget(source_bytes, mode)?;
     let free_ram = available_ram();
     let free_volume = free_disk(&parent);
-    let gpu_devices = nvidia_devices();
+    let mut gpu_devices = nvidia_devices();
+    gpu_devices.extend(xpu_devices());
     let device_measured = match device {
         "cpu" => true,
-        "cuda" => gpu_devices.iter().any(|d| d["free_vram_bytes"].as_u64().is_some()),
-        // No reliable per-physical-device Intel Arc free VRAM probe is
-        // included. The device may be installed but is not verified here.
-        "xpu" | "auto" => false,
+        "cuda" => gpu_devices.iter().any(|d| d["vendor"] == "nvidia" && d["free_vram_bytes"].as_u64().is_some()),
+        "xpu" => gpu_devices.iter().any(|d| d["vendor"] == "intel" && d["free_vram_bytes"].as_u64().is_some()),
+        // Auto-routing requires a selected physical device; enumeration alone is insufficient.
+        "auto" => false,
         _ => false,
     };
     Ok(ResourceAssessment {
@@ -309,6 +360,17 @@ mod tests {
         assert_eq!(ram, None); // streamed/bounded paths are not guessed
         assert_eq!(disk, 16 * GIB);
         assert!(budget(u64::MAX, ResourceMode::AutoRound).is_err());
+    }
+    #[test]
+    fn intel_xpu_csv_requires_measured_free_memory() {
+        let valid = "0, Intel Arc Pro B60, 24576, 20118.5\n1, Intel Arc Pro B70, N/A, 1000\n2, Intel GPU, 100, 101\n";
+        let rows = parse_xpu_csv(valid);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["vendor"], "intel");
+        assert_eq!(rows[0]["device_index"], 0);
+        assert_eq!(rows[0]["free_vram_bytes"], (20118.5 * 1024.0 * 1024.0) as u64);
+        assert!(parse_xpu_csv("0, Intel Arc, N/A, N/A\n").is_empty());
+        assert!(parse_xpu_csv("0, Intel Arc, 24000, NaN\n").is_empty());
     }
     #[test]
     fn insufficient_and_unknown_resources_do_not_pass() {
