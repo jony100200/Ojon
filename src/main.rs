@@ -598,7 +598,7 @@ fn run() -> io::Result<()> {
                 println!("disk_safety_budget_bytes: {}", result["output_volume_safety_budget_bytes"]);
                 println!("status: {}", result["status"]);
                 println!("note: budget is a conservative policy floor, not converter peak-memory prediction");
-                println!("note: Intel GPU free VRAM is UNKNOWN unless verified telemetry is added");
+                println!("note: Intel GPU free VRAM is measured only when installed xpu-smi returns a valid sample; otherwise UNKNOWN");
             }
         }
         Some("research-plan") | Some("research-run") => {
