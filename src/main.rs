@@ -6,6 +6,8 @@ use ojon_backend::{
     plan_rco_search, prepare_distill_plan, prepare_gguf, prepare_hf, prepare_sweep, prepare_train,
     probe_model, quantize_gguf, quantize_hf, recommend, retrieve_recipes, run_advanced, run_train,
     smoke_gguf, BackendId, GgufSummary, Integration, PplSettings, Precision, QuantizePlan,
+    plan_diffusion, run_diffusion, inspect_diffusion_recipe, discover_diffusion,
+    DiffusionEngine, DiffusionKind, DiffusionFormat,
 };
 use std::env;
 use std::ffi::OsString;
@@ -30,6 +32,9 @@ Commands:
   ojon sweep-plan <source.gguf> <existing-output-dir> [--precisions Q5_K_M,Q4_K_M,IQ4_XS,IQ3_M] [--imatrix path] [--tool path] [--threads N]
   ojon sweep-run <source.gguf> <existing-output-dir> [options] --confirm
   ojon eval-sweep <sweep-manifest.json> <held-out-corpus.txt> [--tool llama-perplexity] [--gpu-layers N] [--context 2048] [--max-degradation 1.0] --confirm
+  ojon diffusion-plan <local-source> <output.safetensors> --checkout <upstream> [--backend svdq|codebook] [--kind image|video] [--format int4|w4a8|w3a8|w2a8] [--python python] [--samples 32]
+  ojon diffusion-inspect <local-source> <output.safetensors> [options] --confirm
+  ojon diffusion-run <local-source> <output.safetensors> [options] --confirm
   ojon gsq-plan <checkout> <config.yaml> [--python python] [--layers 1 | --all-layers]
   ojon gsq-run <checkout> <config.yaml> [options] --confirm
   ojon gsq-assemble-plan <checkout> <config.yaml> <new-output-dir> [--python python]
@@ -73,6 +78,9 @@ Important:
   - Agent probe/plan commands are read-only. Quantization sweeps and training need explicit --confirm.
   - Sweep conversion DOES NOT evaluate quality; it writes real results for later baseline comparison.
   - GSQ and RCO require user-installed trusted public Python checkouts; no local GPU compatibility is claimed.
+  - Diffusion backends run user-installed scripts: SVDQ INT4 for Diffusers pipelines (NVIDIA CUDA),
+    or RebelUI's streaming W4/W3/W2A8 for a single safetensors file (loader compatibility unverified).
+    Inspection and conversion require explicit --confirm. No image/video quality is assumed.
   - RCO searches an EXISTING upstream per-bit GPTQ database; it does not create that database yet.
   - GSQ/RCO assembly must be explicitly requested. Their artifacts are NOT guaranteed GGUF or load-tested.
 "#);
@@ -276,6 +284,70 @@ fn run() -> io::Result<()> {
                 run_advanced(&plan,|line|eprintln!("{line}"))?;
                 println!("rco_output: {}",output.display());
                 println!("format: HF_COMPRESSED_TENSORS; GGUF_NOT_IMPLIED; quality: NOT_TESTED");
+            }
+        }
+        Some("diffusion-plan") | Some("diffusion-inspect") | Some("diffusion-run") => {
+            let stage = cmd.to_string_lossy().to_string();
+            let source=PathBuf::from(next_argument(&mut args,"local source model or Diffusers pipeline")?);
+            let output=PathBuf::from(next_argument(&mut args,"new quantized safetensors output")?);
+            let mut engine=DiffusionEngine::Svdq;
+            let mut kind=DiffusionKind::Image;
+            let mut precision=DiffusionFormat::Int4;
+            let mut checkout:Option<PathBuf>=None;
+            let mut python=PathBuf::from("python");
+            let mut samples=32u32;
+            let mut confirm=false;
+            while let Some(option)=args.next(){
+                match option.to_str(){
+                    Some("--checkout")=>checkout=Some(PathBuf::from(next_argument(&mut args,"upstream Python repository checkout")?)),
+                    Some("--python")=>python=PathBuf::from(next_argument(&mut args,"Python interpreter")?),
+                    Some("--backend")=>{
+                        let name=next_argument(&mut args,"backend svdq|codebook")?;
+                        engine=DiffusionEngine::from_name(name.to_str().ok_or_else(||invalid("invalid backend name"))?)?;
+                    }
+                    Some("--kind")=>{
+                        let name=next_argument(&mut args,"image|video")?;
+                        kind=DiffusionKind::from_name(name.to_str().ok_or_else(||invalid("invalid model kind"))?)?;
+                    }
+                    Some("--format")=>{
+                        let name=next_argument(&mut args,"int4|w4a8|w3a8|w2a8")?;
+                        precision=DiffusionFormat::from_name(name.to_str().ok_or_else(||invalid("invalid format"))?)?;
+                    }
+                    Some("--samples")=>{
+                        samples=next_argument(&mut args,"calibration sample count")?
+                            .to_str().ok_or_else(||invalid("samples must be a number"))?
+                            .parse().map_err(|_|invalid("samples must be an integer"))?;
+                    }
+                    Some("--confirm") if stage!="diffusion-plan"=>confirm=true,
+                    _=>return Err(invalid(format!("unknown diffusion option: {}",option.to_string_lossy()))),
+                }
+            }
+            let checkout=checkout.or_else(||std::env::var_os(
+                if engine==DiffusionEngine::Svdq{"OJON_SVDQ_DIR"}else{"OJON_REBELUI_DIR"}
+            ).map(PathBuf::from)).ok_or_else(||invalid(
+                "set --checkout to the installed upstream repository or its OJON_SVDQ_DIR / OJON_REBELUI_DIR environment variable"
+            ))?;
+            let plan=plan_diffusion(&source,&output,&checkout,&python,engine,kind,precision,samples)?;
+            if stage=="diffusion-plan" {
+                println!("{}",plan.json());
+            } else {
+                if !confirm {
+                    return Err(invalid("diffusion inspection/conversion may load large models and run third-party Python; explicitly pass --confirm"));
+                }
+                println!("{}",plan.json());
+                if stage=="diffusion-inspect" {
+                    inspect_diffusion_recipe(&plan,|line|eprintln!("{line}"))?;
+                    println!("diffusion_recipe: INSPECTED_BY_UPSTREAM; model_conversion: NOT_STARTED");
+                } else {
+                    let outcome=run_diffusion(&plan,|line|eprintln!("{line}"))?;
+                    println!("output: {}",outcome.output.display());
+                    println!("output_bytes: {}",outcome.output_bytes);
+                    println!("conversion_seconds: {:.2}",outcome.elapsed_seconds);
+                    println!("runtime_load: NOT_TESTED");
+                    println!("image_video_quality: NOT_EVALUATED");
+                    if let Some(config)=outcome.sidecar{println!("config: {}",config.display());}
+                    if let Some(receipt)=outcome.receipt{println!("receipt: {}",receipt.display());}
+                }
             }
         }
         Some("eval-sweep") => {
@@ -646,7 +718,7 @@ fn run() -> io::Result<()> {
                     "official_url": item.spec.website,
                     "override_environment": item.spec.override_env,
                 })).collect();
-                println!("{}", serde_json::json!({"schema":"ojon.backends.v1","backends":arr,"optional_optimizers":discover_advanced()["optimizers"]}));
+                println!("{}", serde_json::json!({"schema":"ojon.backends.v1","backends":arr,"optional_optimizers":discover_advanced()["optimizers"],"diffusion_backends":discover_diffusion()["backends"]}));
                 return Ok(());
             }
             for item in detected {
@@ -669,6 +741,13 @@ fn run() -> io::Result<()> {
                     if opt["source_code_present"].as_bool()==Some(true){"DETECTED"}else{"NOT FOUND"});
                 println!("  publisher: {}",opt["official_repository"].as_str().unwrap_or("?"));
                 println!("  configure: {}",opt["environment_variable"].as_str().unwrap_or("?"));
+            }
+            for backend in discover_diffusion()["backends"].as_array().into_iter().flatten() {
+                println!("diffusion backend {}: {}, image/video loader and quality NOT VERIFIED",
+                    backend["backend"].as_str().unwrap_or("?"),
+                    if backend["source_present"].as_bool()==Some(true){"CHECKOUT DETECTED"}else{"NOT FOUND"});
+                println!("  configure: {}",backend["environment_variable"].as_str().unwrap_or("?"));
+                println!("  publisher: {}",backend["upstream"].as_str().unwrap_or("?"));
             }
             println!("Supported GGUF: public llama-quantize via K/IQ precision methods; optional GSQ/RCO local Python stages require explicit user configuration.");
             println!("Detected means filename found; binary version, model compatibility and runtime must still be verified.");
