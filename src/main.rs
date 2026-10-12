@@ -35,7 +35,7 @@ Commands:
   ojon train-plan <config.yaml> [--tool <llamafactory-cli>] [--json]
   ojon train-run  <config.yaml> [--tool <llamafactory-cli>] --confirm
   ojon recommend <quality-evidence.json> [--json]  Smallest verified model within tolerance
-  ojon bench-plan <model.gguf> [--tool llama-bench] [--prompt-tokens 512] [--gen-tokens 128] [--repetitions 3] [--gpu-layers 0] [--json]
+  ojon bench-plan <model.gguf> [--tool llama-bench] [--prompt-tokens 512] [--gen-tokens 128] [--repetitions 3] [--gpu-layers 0] [--device SYCL0|CUDA0|Vulkan0] [--json]
   ojon bench-run <model.gguf> <new-receipt.json> [same options] --confirm
   ojon bench-compare <reference-receipt.json> <candidate-receipt.json> [--json]
   ojon sweep-plan <source.gguf> <existing-output-dir> [--precisions Q5_K_M,Q4_K_M,IQ4_XS,IQ3_M] [--imatrix path] [--tool path] [--threads N]
@@ -180,6 +180,7 @@ fn run() -> io::Result<()> {
                 .unwrap_or_else(||PathBuf::from("llama-bench"));
             let (mut prompt_tokens,mut gen_tokens,mut reps,mut gpu_layers)=(512u32,128u32,3u32,0i32);
             let mut confirmed=false;
+            let mut device:Option<String>=None;
             while let Some(arg)=args.next() {
                 match arg.to_str() {
                     Some("--tool")=>tool=PathBuf::from(next_argument(&mut args,"llama-bench executable")?),
@@ -195,12 +196,14 @@ fn run() -> io::Result<()> {
                     Some("--gpu-layers")=>gpu_layers=next_argument(&mut args,"GPU layer count")?
                         .to_str().ok_or_else(||invalid("GPU layers must be text"))?
                         .parse().map_err(|_|invalid("GPU layers require integer"))?,
+                    Some("--device")=>device=Some(next_argument(&mut args,"explicit llama-bench device")?
+                        .to_str().ok_or_else(||invalid("device must be text"))?.to_owned()),
                     Some("--confirm") if execute=>confirmed=true,
                     Some("--json")=>{},
                     _=>return Err(invalid(format!("unknown benchmark option: {}",arg.to_string_lossy()))),
                 }
             }
-            let plan=prepare_bench(&model,&tool,prompt_tokens,gen_tokens,reps,gpu_layers)?;
+            let plan=prepare_bench(&model,&tool,prompt_tokens,gen_tokens,reps,gpu_layers,device.as_deref())?;
             if !execute {println!("{}",serde_json::to_string_pretty(&plan.as_json()).map_err(io::Error::other)?);}
             else {
                 if !confirmed {return Err(invalid("real llama-bench execution loads weights; add --confirm after reviewing model, installed tool and available RAM/VRAM"));}
