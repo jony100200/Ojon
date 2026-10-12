@@ -89,9 +89,11 @@ fn plan_for(
             "AutoRound CLI not detected; Python module, device kernels, output and inference loader must be checked separately"
         };
         options.push(candidate("hf_autoround_4", "intel_auto_round",
-            "adaptive quantization", "AutoRound GGUF 4-bit (claimed target, unverified)",
-            "requires a compatible GGUF loader", if autoround { "requires_compatibility_test" } else { "missing_tool" },
-            ar_reason, "autoround-plan"));
+            "optimized RTN or calibrated AutoRound (select --iters and local --dataset)",
+            "GGUF Q4_K_M or Q5_K_M (experimental upstream export)",
+            "compatible GGUF runtime, not yet verified",
+            if autoround { "requires_compatibility_test" } else { "missing_tool" },
+            ar_reason, "autoround-plan --bits 4|5 --format gguf:q4_k_m|gguf:q5_k_m"));
         if multi {
             for item in &mut options {
                 item["multimodal_requirement"] = json!("Preserve and verify vision encoder, processor, projector, and actual image-input inference");
