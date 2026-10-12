@@ -97,7 +97,7 @@ fn plan_for(
                 item["multimodal_requirement"] = json!("Preserve and verify vision encoder, processor, projector, and actual image-input inference");
             }
         }
-    } else if probe.category == ModelCategory::Diffusion {
+    } else if probe.category == ModelCategory::Diffusion && probe.format != "ojonq_packed_weights" {
         let is_pipeline = probe.format == "diffusers_pipeline_directory";
         let is_weights = probe.format == "safetensors";
         options.push(candidate("diffusion_svdq", "diffuse-compressor",
@@ -213,6 +213,15 @@ mod tests {
         assert_eq!(planned["options"][1]["state"], "storage_only");
         assert_eq!(planned["options"][1]["runtime_load_verified"], false);
         assert_eq!(planned["options"][2]["state"], "not_wired");
+    }
+
+    #[test]
+    fn packed_diffusion_weights_only_offer_unpack_not_fake_loaders() {
+        let v = plan_for(&fixture("ojonq_packed_weights", ModelCategory::Diffusion),
+            "cpu", &[], None).unwrap();
+        assert_eq!(v["options"].as_array().unwrap().len(), 1);
+        assert_eq!(v["options"][0]["id"], "ojon_unpack");
+        assert_eq!(v["options"][0]["state"], "storage_only");
     }
 
     #[test]
