@@ -370,6 +370,63 @@ mod tests{
         assert!(DiffusionFormat::from_name("nvfp4").is_err());
         assert!(DiffusionKind::from_name("audio").is_err());
     }
+    fn sample_weights(path:&Path) {
+        let metadata=json!({"transformer_blocks.0.attn.weight":{
+            "dtype":"F16","shape":[2,2],"data_offsets":[0,8]
+        }}).to_string();
+        let mut output=File::create(path).unwrap();
+        output.write_all(&(metadata.len() as u64).to_le_bytes()).unwrap();
+        output.write_all(metadata.as_bytes()).unwrap();
+        output.write_all(&[0u8;8]).unwrap();
+    }
+    struct Scratch(PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self){let _=fs::remove_dir_all(&self.0);}
+    }
+    fn scratch() -> Scratch {
+        let t=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir=std::env::temp_dir().join(format!("ojon-diffusion-test-{}-{t}",std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        Scratch(dir)
+    }
+    #[test]
+    fn plans_codebook_from_real_safetensors_without_writing(){
+        let dir=scratch();
+        let source=dir.0.join("original.safetensors");
+        sample_weights(&source);
+        let checkout=dir.0.join("rebel");
+        fs::create_dir(&checkout).unwrap();
+        fs::create_dir(checkout.join("tools")).unwrap();
+        fs::write(checkout.join("tools/w4a8_convert.py"),"").unwrap();
+        let output=dir.0.join("output.safetensors");
+        let p=plan_diffusion(&source,&output,&checkout,Path::new("python"),
+            DiffusionEngine::Codebook,DiffusionKind::Video,DiffusionFormat::W4A8,32).unwrap();
+        assert_eq!(p.source_bytes,fs::metadata(&source).unwrap().len());
+        assert_eq!(p.json()["status"],"PLAN_ONLY");
+        assert!(!output.exists(),"planning must never write an artifact");
+        fs::write(&output,b"occupied").unwrap();
+        assert!(plan_diffusion(&source,&output,&checkout,Path::new("python"),
+            DiffusionEngine::Codebook,DiffusionKind::Video,DiffusionFormat::W4A8,32).is_err());
+    }
+    #[test]
+    fn plans_real_diffusers_folder_with_local_transformer_weights(){
+        let dir=scratch();
+        let source=dir.0.join("pipeline");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("model_index.json"),r#"{"_class_name":"FluxPipeline","transformer":["diffusers","FluxTransformer2DModel"]}"#).unwrap();
+        fs::create_dir(source.join("transformer")).unwrap();
+        sample_weights(&source.join("transformer/diffusion_pytorch_model.safetensors"));
+        let checkout=dir.0.join("compressor");
+        fs::create_dir_all(checkout.join("examples/text_to_image")).unwrap();
+        fs::write(checkout.join("examples/text_to_image/quantize_hf.py"),"").unwrap();
+        let output=dir.0.join("denoiser-int4.safetensors");
+        let plan=plan_diffusion(&source,&output,&checkout,Path::new("python"),
+            DiffusionEngine::Svdq,DiffusionKind::Image,DiffusionFormat::Int4,16).unwrap();
+        assert_eq!(plan.format,DiffusionFormat::Int4);
+        assert!(!output.exists());
+        assert!(plan_diffusion(&source,&output,&checkout,Path::new("python"),
+            DiffusionEngine::Svdq,DiffusionKind::Image,DiffusionFormat::W4A8,16).is_err());
+    }
     #[test]
     fn invalid_samples_rejected_before_any_external_commands(){
         let result=plan_diffusion(Path::new("missing"),Path::new("bad.safetensors"),
