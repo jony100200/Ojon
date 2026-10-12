@@ -416,7 +416,7 @@ impl Workstation {
         std::thread::spawn(move || {
             let result = (|| -> std::io::Result<(PathBuf, serde_json::Value)> {
                 let model = Path::new(model.trim());
-                let plan = prepare_bench(model, Path::new(benchmark.trim()), 512, 128, 3, gpu_layers)?;
+                let plan = prepare_bench(model, Path::new(benchmark.trim()), 512, 128, 3, gpu_layers, None)?;
                 let stamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH).map_err(std::io::Error::other)?
                     .as_millis();
