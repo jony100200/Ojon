@@ -8,6 +8,7 @@ use ojon_backend::{
     smoke_gguf, BackendId, GgufSummary, Integration, PplSettings, Precision, QuantizePlan,
     plan_diffusion, run_diffusion, inspect_diffusion_recipe, discover_diffusion,
     DiffusionEngine, DiffusionKind, DiffusionFormat,
+    plan_pack, run_pack, unpack,
 };
 use std::env;
 use std::ffi::OsString;
@@ -32,7 +33,10 @@ Commands:
   ojon sweep-plan <source.gguf> <existing-output-dir> [--precisions Q5_K_M,Q4_K_M,IQ4_XS,IQ3_M] [--imatrix path] [--tool path] [--threads N]
   ojon sweep-run <source.gguf> <existing-output-dir> [options] --confirm
   ojon eval-sweep <sweep-manifest.json> <held-out-corpus.txt> [--tool llama-perplexity] [--gpu-layers N] [--context 2048] [--max-degradation 1.0] --confirm
-  ojon diffusion-plan <local-source> <output.safetensors> --checkout <upstream> [--backend svdq|codebook] [--kind image|video] [--format int4|w4a8|w3a8|w2a8] [--python python] [--samples 32]
+  ojon diffusion-plan <local-source> <output.safetensors> --checkout <upstream> [--backend svdq] [--kind image|video] [--format int4] [--python python] [--samples 32]
+  ojon pack-plan <original.safetensors> <output.ojonq> [--bits 4] [--group 64]
+  ojon pack-run  <original.safetensors> <output.ojonq> [options] --confirm
+  ojon unpack    <packed.ojonq> <restored.safetensors> --confirm
   ojon diffusion-inspect <local-source> <output.safetensors> [options] --confirm
   ojon diffusion-run <local-source> <output.safetensors> [options] --confirm
   ojon gsq-plan <checkout> <config.yaml> [--python python] [--layers 1 | --all-layers]
@@ -285,6 +289,55 @@ fn run() -> io::Result<()> {
                 println!("rco_output: {}",output.display());
                 println!("format: HF_COMPRESSED_TENSORS; GGUF_NOT_IMPLIED; quality: NOT_TESTED");
             }
+        }
+        Some("pack-plan") | Some("pack-run") => {
+            let execute=cmd=="pack-run";
+            let source=PathBuf::from(next_argument(&mut args,"original full-precision safetensors")?);
+            let output=PathBuf::from(next_argument(&mut args,"new Ojon .ojonq model file")?);
+            let mut bits=4u8;let mut group=64usize;let mut confirmed=false;
+            while let Some(option)=args.next(){
+                match option.to_str(){
+                    Some("--bits")=>{
+                        bits=next_argument(&mut args,"2,3,4 bit precision")?.to_str()
+                            .ok_or_else(||invalid("bits must be text"))?.parse()
+                            .map_err(|_|invalid("invalid bits"))?;
+                    }
+                    Some("--group")=>{
+                        group=next_argument(&mut args,"32,64,128,256 group size")?.to_str()
+                            .ok_or_else(||invalid("group must be text"))?.parse()
+                            .map_err(|_|invalid("invalid group size"))?;
+                    }
+                    Some("--confirm") if execute=>confirmed=true,
+                    _=>return Err(invalid(format!("unknown native pack option: {}",option.to_string_lossy())))
+                }
+            }
+            let plan=plan_pack(&source,&output,bits,group)?;
+            if !execute{println!("{}",plan.json());}
+            else {
+                if !confirmed{return Err(invalid("native pack-run writes a model file; pass --confirm"));}
+                let report=run_pack(&plan,|line|eprintln!("{line}"))?;
+                println!("{}",serde_json::json!({
+                    "output":report.output.to_string_lossy(),
+                    "original_bytes":report.original_bytes,
+                    "packed_bytes":report.output_bytes,
+                    "quantized_tensors":report.packed_tensors,
+                    "quantized_elements":report.elements,
+                    "quantization_mse":report.mse,
+                    "gpu_loader":"NOT_IMPLEMENTED",
+                    "task_quality":"NOT_EVALUATED"
+                }));
+            }
+        }
+        Some("unpack") => {
+            let src=PathBuf::from(next_argument(&mut args,"Ojon .ojonq packed model")?);
+            let out=PathBuf::from(next_argument(&mut args,"new ordinary .safetensors path")?);
+            let confirm=next_argument(&mut args,"--confirm")?;
+            if confirm!="--confirm"||args.next().is_some(){
+                return Err(invalid("unpack writes a restored checkpoint: --confirm is required"));
+            }
+            let saved=unpack(&src,&out)?;
+            println!("restored_safetensors: {}",saved.display());
+            println!("warning: model weights are lossily reconstructed; no full task-quality claim");
         }
         Some("diffusion-plan") | Some("diffusion-inspect") | Some("diffusion-run") => {
             let stage = cmd.to_string_lossy().to_string();
