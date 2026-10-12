@@ -194,6 +194,44 @@ fn inspect_diffusers_pipeline(directory:&Path)->io::Result<ModelProbe>{
     })
 }
 
+/// Read-only inspection of Ojon owned weight-only .ojonq files.
+fn inspect_ojonq(path:&Path)->io::Result<ModelProbe>{
+    let mut f=File::open(path)?;
+    let size=f.metadata()?.len();
+    if size<18{return Err(invalid("short Ojon packed file"));}
+    let mut prefix=[0u8;16];f.read_exact(&mut prefix)?;
+    if &prefix[..8]!=b"OJONQ001"{return Err(invalid("invalid Ojon packed container magic"));}
+    let n=u64::from_le_bytes(prefix[8..16].try_into().unwrap());
+    if n==0||n>32*1024*1024||n>size-16{return Err(invalid("invalid Ojon packed header"));}
+    let mut header=vec![0u8;n as usize];f.read_exact(&mut header)?;
+    let value:Value=serde_json::from_slice(&header).map_err(|e|invalid(format!("bad packed header: {e}")))?;
+    if value["format"].as_str()!=Some("ojon-packed-v1"){return Err(invalid("unsupported packed format version"));}
+    let tensors=value["tensors"].as_array().ok_or_else(||invalid("packed tensor manifest missing"))?;
+    if tensors.is_empty()||tensors.len()>100000{return Err(invalid("packed tensor count invalid"));}
+    let bits=value["bits"].as_u64().ok_or_else(||invalid("packed bit count missing"))?;
+    if !matches!(bits,2|3|4){return Err(invalid("unsupported packed bit count"));}
+    let mut count=0u64;
+    let mut names=String::new();
+    for item in tensors{
+        let name=item["name"].as_str().ok_or_else(||invalid("invalid packed tensor name"))?;
+        if names.len()<256 {names.push_str(name);names.push(' ');}
+        if item["quantized"].as_bool()==Some(true){count+=1;}
+    }
+    let (category,confidence)=category_from(&names,false);
+    Ok(ModelProbe{
+        path:path.to_path_buf(),format:"ojonq_packed_weights",category,
+        identification:format!("Ojon packed weights v1; {bits} bits; {count} packed tensors"),
+        confidence,bytes:size,tensor_count:Some(tensors.len() as u64),
+        conversion_route:"native_ojon_unpack",
+        conversion_status:"weight_storage_only_gpu_loader_not_implemented",
+        notes:vec![
+            "Ojon packed weights store 2/3/4-bit scalar matrices with group scales and biases.".into(),
+            "Native unpack restores ordinary safetensors, but restored weights still contain quantization error.".into(),
+            "No directly compatible ComfyUI or Diffusers GPU loading kernel has been implemented yet.".into(),
+        ],
+    })
+}
+
 pub fn probe_model(input: &Path) -> io::Result<ModelProbe> {
     let path = input.canonicalize()?;
     let metadata = fs::metadata(&path)?;
@@ -254,6 +292,7 @@ pub fn probe_model(input: &Path) -> io::Result<ModelProbe> {
                 })
             }
             "safetensors" => inspect_safetensors(&path),
+            "ojonq" => inspect_ojonq(&path),
             _ => Err(invalid("unsupported model source; use GGUF, a safetensors file or HF checkpoint directory")),
         }
     }
