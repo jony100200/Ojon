@@ -1,12 +1,10 @@
-//! Image / video diffusion weight quantization, using independently installed
-//! public Python backends. Ojon never runs third-party code on inspection,
+//! Image / video SVDQuant weights using an independently installed
+//! public diffuse-compressor Python backend. Ojon never runs code on inspection,
 //! downloads models, overwrites source weights, or invents quality scores.
 //!
-//! Supported initial routes:
-//!   - diffuse-compressor: local Diffusers pipeline -> SVDQuant INT4 backbone
-//!   - RebelUI's streaming converter: single FP16/BF16 safetensors -> W4/3/2A8
-//! Both need compatible loaders and real image/video quality tests. RebelUI
-//! source is NOT vendored or sublicensed by this project.
+//! Route: local Diffusers pipeline -> SVDQuant INT4 backbone.
+//! Native Ojon weight-only compression lives separately in packed.rs.
+//! A converted diffusion model still needs real loader and image quality tests.
 
 use crate::jobs::run_with_log;
 use crate::probe::probe_model;
@@ -21,13 +19,13 @@ fn bad(s:impl Into<String>)->io::Error {
     io::Error::new(io::ErrorKind::InvalidInput,s.into())
 }
 #[derive(Debug,Clone,Copy,Eq,PartialEq)]
-pub enum DiffusionEngine { Svdq, Codebook }
+pub enum DiffusionEngine { Svdq }
 impl DiffusionEngine {
     pub fn from_name(name:&str)->io::Result<Self> {
-        match name { "svdq"=>Ok(Self::Svdq),"codebook"=>Ok(Self::Codebook),
-            _=>Err(bad("backend must be svdq or codebook")) }
+        match name { "svdq"=>Ok(Self::Svdq),
+            _=>Err(bad("diffusion backend must be svdq; use pack-plan for native weights")) }
     }
-    pub fn name(self)->&'static str { match self {Self::Svdq=>"svdq",Self::Codebook=>"codebook"} }
+    pub fn name(self)->&'static str { match self {Self::Svdq=>"svdq"} }
 }
 #[derive(Debug,Clone,Copy,Eq,PartialEq)]
 pub enum DiffusionKind { Image, Video }
@@ -39,19 +37,13 @@ impl DiffusionKind {
     pub fn name(self)->&'static str {match self{Self::Image=>"image",Self::Video=>"video"}}
 }
 #[derive(Debug,Clone,Copy,Eq,PartialEq)]
-pub enum DiffusionFormat { Int4, W4A8, W3A8, W2A8 }
+pub enum DiffusionFormat { Int4 }
 impl DiffusionFormat {
     pub fn from_name(name:&str)->io::Result<Self>{
-        match name {"int4"=>Ok(Self::Int4),"w4a8"=>Ok(Self::W4A8),
-            "w3a8"=>Ok(Self::W3A8),"w2a8"=>Ok(Self::W2A8),
-            _=>Err(bad("format must be int4, w4a8, w3a8 or w2a8"))}
+        match name {"int4"=>Ok(Self::Int4),
+            _=>Err(bad("diffusion SVDQ format must be int4; use pack-plan for native 2/3/4-bit files"))}
     }
-    pub fn name(self)->&'static str {match self{
-        Self::Int4=>"int4",Self::W4A8=>"w4a8",Self::W3A8=>"w3a8",Self::W2A8=>"w2a8"
-    }}
-    fn bits(self)->Option<u8>{match self{
-        Self::W4A8=>Some(4),Self::W3A8=>Some(3),Self::W2A8=>Some(2),Self::Int4=>None
-    }}
+    pub fn name(self)->&'static str {match self{Self::Int4=>"int4"}}
 }
 #[derive(Debug)]
 pub struct DiffusionPlan {
@@ -103,7 +95,7 @@ fn script_from_checkout(checkout:&Path,relative:&str)->io::Result<(PathBuf,PathB
 /// Read safetensors tensor descriptors only; do not materialize weights.
 fn inspect_source_safetensors(source:&Path)->io::Result<u64>{
     let found=probe_model(source)?;
-    if found.format!="safetensors_single_file"{return Err(bad("codebook needs single safetensors source"));}
+    if found.format!="safetensors_single_file"{return Err(bad("transformer weights must be original single-file safetensors shards"));}
     let mut f=File::open(source)?;
     let mut prefix=[0u8;8];
     f.read_exact(&mut prefix)?;
@@ -178,12 +170,6 @@ pub fn plan_diffusion(
             })?;
             (r,s,inspect_diffusers(&path)?)
         }
-        DiffusionEngine::Codebook=>{
-            if format==DiffusionFormat::Int4{return Err(bad("codebook requires w4a8, w3a8 or w2a8 format"));}
-            if !path.is_file(){return Err(bad("codebook needs a single local safetensors file, not a folder or remote checkpoint"));}
-            let (r,s)=script_from_checkout(checkout,"tools/w4a8_convert.py")?;
-            (r,s,inspect_source_safetensors(&path)?)
-        }
     };
     let name=output.file_name().ok_or_else(||bad("missing output filename"))?;
     let parent=output.parent().filter(|p|!p.as_os_str().is_empty()).unwrap_or(Path::new("."));
@@ -227,16 +213,6 @@ fn command(plan:&DiffusionPlan,target:Option<&Path>,inspect:bool)->Command{
             if inspect {cmd.arg("--inspect-config");}
             if let Some(out)=target{cmd.arg("--output").arg(out);}
         }
-        DiffusionEngine::Codebook=>{
-            cmd.arg(&plan.source);
-            if let Some(out)=target{cmd.arg(out);}
-            cmd.arg("--bits").arg(plan.format.bits().unwrap_or(4).to_string())
-                .arg("--group-size").arg("16")
-                .arg("--chunk-rows").arg("512")
-                .arg("--verify").arg("8")
-                .arg("--exclude")
-                .arg("(?i)(embed|text_|caption_|time_|patch_|proj_in|proj_out|final_layer|norm_out|rope|freqs|adaln|modulation)");
-        }
     }
     cmd.env("HF_HUB_OFFLINE","1")
         .env("HF_DATASETS_OFFLINE","1")
@@ -246,9 +222,6 @@ fn command(plan:&DiffusionPlan,target:Option<&Path>,inspect:bool)->Command{
     cmd
 }
 pub fn inspect_diffusion_recipe<F:FnMut(&str)>(plan:&DiffusionPlan,mut log:F)->io::Result<()> {
-    if plan.engine!=DiffusionEngine::Svdq {
-        return Err(bad("codebook has no non-converting architecture inspection; use diffusion-plan"));
-    }
     log("[ojon] SVDQ inspect-config invokes externally supplied Python and may load model weights");
     run_with_log(&mut command(plan,None,true),|line|log(line))?;
     log("[ojon] inspect completed; does not verify quantized output or GPU memory budget");
@@ -343,8 +316,6 @@ pub fn discover_diffusion()->Value {
     let checks=[
         ("svdq","OJON_SVDQ_DIR","https://github.com/rootonchair/diffuse-compressor",
          &["examples/text_to_image/quantize_hf.py","examples/text_to_video/quantize_hf.py"][..]),
-        ("codebook","OJON_REBELUI_DIR","https://github.com/RealRebelAI/RebelUI",
-         &["tools/w4a8_convert.py"][..]),
     ];
     let entries:Vec<Value>=checks.iter().map(|(name,env,url,scripts)|{
         let root=std::env::var_os(env).map(PathBuf::from);
@@ -369,6 +340,8 @@ mod tests{
         assert_eq!(DiffusionFormat::from_name("int4").unwrap(),DiffusionFormat::Int4);
         assert!(DiffusionFormat::from_name("nvfp4").is_err());
         assert!(DiffusionKind::from_name("audio").is_err());
+        assert!(DiffusionEngine::from_name("codebook").is_err());
+        assert!(DiffusionFormat::from_name("w4a8").is_err());
     }
     fn sample_weights(path:&Path) {
         let metadata=json!({"transformer_blocks.0.attn.weight":{
@@ -390,25 +363,6 @@ mod tests{
         Scratch(dir)
     }
     #[test]
-    fn plans_codebook_from_real_safetensors_without_writing(){
-        let dir=scratch();
-        let source=dir.0.join("original.safetensors");
-        sample_weights(&source);
-        let checkout=dir.0.join("rebel");
-        fs::create_dir(&checkout).unwrap();
-        fs::create_dir(checkout.join("tools")).unwrap();
-        fs::write(checkout.join("tools/w4a8_convert.py"),"").unwrap();
-        let output=dir.0.join("output.safetensors");
-        let p=plan_diffusion(&source,&output,&checkout,Path::new("python"),
-            DiffusionEngine::Codebook,DiffusionKind::Video,DiffusionFormat::W4A8,32).unwrap();
-        assert_eq!(p.source_bytes,fs::metadata(&source).unwrap().len());
-        assert_eq!(p.json()["status"],"PLAN_ONLY");
-        assert!(!output.exists(),"planning must never write an artifact");
-        fs::write(&output,b"occupied").unwrap();
-        assert!(plan_diffusion(&source,&output,&checkout,Path::new("python"),
-            DiffusionEngine::Codebook,DiffusionKind::Video,DiffusionFormat::W4A8,32).is_err());
-    }
-    #[test]
     fn plans_real_diffusers_folder_with_local_transformer_weights(){
         let dir=scratch();
         let source=dir.0.join("pipeline");
@@ -425,7 +379,7 @@ mod tests{
         assert_eq!(plan.format,DiffusionFormat::Int4);
         assert!(!output.exists());
         assert!(plan_diffusion(&source,&output,&checkout,Path::new("python"),
-            DiffusionEngine::Svdq,DiffusionKind::Image,DiffusionFormat::W4A8,16).is_err());
+            DiffusionEngine::Svdq,DiffusionKind::Image,DiffusionFormat::Int4,0).is_err());
     }
     #[test]
     fn invalid_samples_rejected_before_any_external_commands(){
