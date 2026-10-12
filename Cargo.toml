@@ -15,7 +15,7 @@ name = "ojon"
 path = "src/main.rs"
 
 # Deliberately no UI or Python dependency: Kathamo will use this library.
-# Conversion math is provided by installed upstream backends, not Ojon.
+# Existing CUDA/SVDQ/LLM optimizers are optional; native scalar weight packing is built into Rust.
 [features]
 default = []
 gui = [
