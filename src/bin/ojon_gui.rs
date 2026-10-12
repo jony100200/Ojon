@@ -526,6 +526,7 @@ impl Workstation {
             Focus::Quantizer => &mut self.quantizer,
             Focus::Converter => &mut self.converter,
             Focus::Runtime => &mut self.runtime,
+            Focus::Benchmark => &mut self.benchmark,
             Focus::Prompt => &mut self.prompt,
             Focus::GpuLayers => &mut self.gpu_layers,
         };
