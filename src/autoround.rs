@@ -11,6 +11,8 @@
 
 use crate::jobs::run_with_log;
 use crate::gguf::inspect_gguf;
+use crate::hf::inspect_hf_folder;
+use crate::resource::{assess_resources, ResourceMode};
 use std::fs;
 use serde_json::{json, Value};
 use std::io::{self, ErrorKind};
@@ -253,6 +255,18 @@ pub fn prepare_autoround_recipe_plan(
 
 /// Execute AutoRound after explicit user confirmation.
 pub fn run_autoround(plan: &AutoRoundPlan) -> io::Result<()> {
+    run_autoround_with_policy(plan, false)
+}
+
+/// Like run_autoround but permits explicitly accepted resource uncertainty.
+pub fn run_autoround_with_policy(plan: &AutoRoundPlan, allow_resource_risk: bool) -> io::Result<()> {
+    let source = inspect_hf_folder(&plan.model_dir)?;
+    let parent = plan.output_dir.parent().ok_or_else(|| bad_input("output has no parent"))?;
+    let preflight = assess_resources(
+        source.source_weight_bytes, parent, ResourceMode::AutoRound, plan.device.as_str()
+    )?;
+    eprintln!("Ojon resource preflight: {}", preflight.as_json());
+    preflight.enforce(allow_resource_risk)?;
     if plan.output_dir.exists() {
         return Err(io::Error::new(
             ErrorKind::AlreadyExists,
