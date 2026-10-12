@@ -3,6 +3,7 @@
 //! All model details displayed here come from inspected files. No demo benchmarks.
 
 use ojon_backend::{inspect_gguf, prepare_gguf, quantize_gguf_with_log, inspect_hf_folder, prepare_hf, quantize_hf_with_log, hf_python_path, smoke_gguf_capture, probe_model};
+use ojon_backend::{resource_plan, ResourceMode};
 use ojon_backend::{GgufSummary, HfFolderInfo, ModelProbe, HfQuantizeResult, SmokeCapture, Precision, QuantizeResult, FoundBackend, BackendId, discover_backends, open_official_download_page};
 use std::path::{Path, PathBuf};
 use std::collections::VecDeque;
@@ -291,7 +292,24 @@ impl Workstation {
                     "GGUF conversion to {} prepared. Source: {} bytes. RAM/scratch unknown.",
                     p.precision, p.source_info.file_bytes
                 ))
-            }.map_err(|e| e.to_string());
+            }.and_then(|summary| {
+                let output_path = Path::new(output.trim());
+                let parent = output_path.parent().filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(Path::new("."));
+                let capacity = resource_plan(
+                    Path::new(source.trim()), parent, ResourceMode::Gguf, "cpu"
+                )?;
+                let disk = capacity["free_output_volume_bytes"].as_u64()
+                    .map(|v| format!("{:.1} GiB", v as f64 / 1_073_741_824.0))
+                    .unwrap_or_else(|| "UNKNOWN".into());
+                let ram = capacity["free_host_ram_bytes"].as_u64()
+                    .map(|v| format!("{:.1} GiB", v as f64 / 1_073_741_824.0))
+                    .unwrap_or_else(|| "UNKNOWN".into());
+                let status = capacity["status"].as_str().unwrap_or("unverified");
+                Ok(format!(
+                    "{summary} Resource policy: {status}; available host RAM {ram}; free output volume {disk}. These are measured free capacities, NOT peak quantizer requirements."
+                ))
+            }).map_err(|e| e.to_string());
             let _ = tx.send(WorkerEvent::Planned(res));
         });
     }
