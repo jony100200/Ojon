@@ -1,0 +1,41 @@
+name: Windows Rust Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ojon-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: CLI and Kathamo GUI
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check CLI and backend
+        run: cargo check --locked --bin ojon
+
+      - name: Test Rust backend and CLI
+        run: cargo test --locked --lib --bin ojon
+
+      - name: Check Kathamo desktop GUI
+        run: cargo check --locked --features gui --bin ojon-gui
+
+      - name: Test GUI state and CPU rendering
+        run: cargo test --locked --features gui --bin ojon-gui
