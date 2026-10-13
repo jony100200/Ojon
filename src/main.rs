@@ -38,6 +38,8 @@ Commands:
   ojon train-plan <config.yaml> [--tool <llamafactory-cli>] [--json]
   ojon train-run  <config.yaml> [--tool <llamafactory-cli>] --confirm
   ojon recommend <quality-evidence.json> [--json]  Smallest verified model within tolerance
+  ojon model-build-plan <original-HF-dir> <directions.json> <new-output-folder> --converter <convert_hf_to_gguf.py> [--python python] [--quantizer llama-quantize] [--precision Q4_K_M] [--threads N] [--json]
+  ojon model-build-run <original-HF-dir> <directions.json> <new-output-folder> [options] --confirm
   ojon activation-compile <trace.jsonl> <new-directions.json> [--strength 0.7] [--no-preserve] [--json] --confirm
   ojon abliterate-model-plan <original-HF-folder> <direction-recipe.json> <new-model-folder> [--json]
   ojon abliterate-model-run <original-HF-folder> <direction-recipe.json> <new-model-folder> --confirm [--json]
@@ -185,6 +187,57 @@ fn run() -> io::Result<()> {
     let mut args = env::args_os().skip(1);
     let cmd = args.next().unwrap_or_else(|| OsString::from("--help"));
     match cmd.to_str() {
+        Some("model-build-plan") | Some("model-build-run") => {
+            let execute=cmd=="model-build-run";
+            let source=PathBuf::from(next_argument(&mut args,"original Hugging Face model folder")?);
+            let recipe=PathBuf::from(next_argument(&mut args,"direction recipe JSON file")?);
+            let output=PathBuf::from(next_argument(&mut args,"new output folder")?);
+            let mut converter=None::<PathBuf>;
+            let mut python=PathBuf::from("python");
+            let mut quantizer=ojon_backend::discovered_path(BackendId::LlamaQuantize)
+                .unwrap_or_else(||PathBuf::from("llama-quantize"));
+            let mut precision=Precision::default();
+            let mut threads=std::thread::available_parallelism().map(|x|x.get()).unwrap_or(4);
+            let(mut confirmed,mut json)=(false,false);
+            while let Some(option)=args.next(){
+                match option.to_str() {
+                    Some("--converter") => converter=Some(PathBuf::from(next_argument(&mut args,"converter path")?)),
+                    Some("--python") => python=PathBuf::from(next_argument(&mut args,"python executable")?),
+                    Some("--quantizer") => quantizer=PathBuf::from(next_argument(&mut args,"llama-quantize executable")?),
+                    Some("--precision") => {
+                        let raw=next_argument(&mut args,"precision")?;
+                        precision=raw.to_str().ok_or_else(||invalid("precision must be text"))?
+                            .parse::<Precision>().map_err(invalid)?;
+                    }
+                    Some("--threads") => {
+                        threads=next_argument(&mut args,"threads")?.to_string_lossy()
+                            .parse().map_err(|_|invalid("threads must be a positive integer"))?;
+                    }
+                    Some("--json") => json=true,
+                    Some("--confirm") => confirmed=true,
+                    _=>return Err(invalid(format!("unknown build option: {}",option.to_string_lossy())))
+                }
+            }
+            let converter=converter.ok_or_else(||invalid("model build requires --converter <installed llama.cpp convert_hf_to_gguf.py>"))?;
+            let plan=ojon_backend::prepare_model_build(&source,&recipe,&output,
+                &converter,&python,&quantizer,precision,threads)?;
+            if execute {
+                if !confirmed{return Err(invalid("model-build-run requires --confirm"));}
+                let result=ojon_backend::run_model_build(&plan,|msg|eprintln!("{msg}"))?;
+                if json{println!("{}",result.as_json());}
+                else{
+                    println!("output_folder: {}",result.directory.display());
+                    println!("language_gguf: {}",result.directory.join("model.gguf").display());
+                    if result.has_mmproj{
+                        println!("mmproj_gguf: {}",result.directory.join("mmproj.gguf").display());
+                    }
+                    println!("model_load: NOT_TESTED");
+                    println!("image_quality: NOT_TESTED");
+                    println!("refusal_quality: NOT_TESTED");
+                }
+            }else if json{println!("{}",plan.as_json());}
+            else{println!("{}",plan.as_json());}
+        }
         Some("activation-compile") => {
             let source = PathBuf::from(next_argument(&mut args, "activation trace JSONL file")?);
             let dest = PathBuf::from(next_argument(&mut args, "output directions recipe JSON")?);
