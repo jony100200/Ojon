@@ -30,8 +30,8 @@ struct VisionTask {
     contains:bool,
 }
 #[derive(Clone, Debug)]
-struct VisionSuite {tasks:Vec<VisionTask>}
-fn vision_suite(path:&Path)->io::Result<VisionSuite>{
+pub(crate) struct VisionSuite {tasks:Vec<VisionTask>}
+pub(crate) fn vision_suite(path:&Path)->io::Result<VisionSuite>{
     let path=path.canonicalize()?;
     let len=fs::metadata(&path)?.len();
     if len==0||len>MAX_VISION_SUITE{return Err(invalid("vision suite must be 1 byte..2MiB"));}
@@ -267,24 +267,23 @@ fn matches_vision(task:&VisionTask,answer:&str)->bool {
         answer.trim().replace("\r\n","\n")==task.expected.trim().replace("\r\n","\n")
     }
 }
-fn vision_score(plan:&QuantParityPlan,model:&Path,log:&mut impl FnMut(&str))->io::Result<Value>{
-    let vision=plan.vision.as_ref().ok_or_else(||invalid("vision suite missing"))?;
-    let mm=plan.options.mmproj.as_ref().ok_or_else(||invalid("mmproj missing"))?;
+pub(crate) fn vision_score(options:&QuantParityOptions,vision:&VisionSuite,model:&Path,log:&mut impl FnMut(&str))->io::Result<Value>{
+    let mm=options.mmproj.as_ref().ok_or_else(||invalid("mmproj missing"))?;
     let mut passed=0usize;
     let mut details=Vec::new();
     for task in &vision.tasks {
         log(&format!("[ojon] vision test {} using {}",task.id,model.display()));
-        let mut cmd=Command::new(&plan.options.eval_tool);
+        let mut cmd=Command::new(&options.eval_tool);
         cmd.arg("-m").arg(model)
             .arg("--mmproj").arg(mm)
             .arg("--image").arg(&task.image)
             .arg("-p").arg(&task.prompt)
-            .arg("-n").arg(plan.options.tokens.to_string())
-            .arg("-ngl").arg(plan.options.gpu_layers.to_string())
+            .arg("-n").arg(options.tokens.to_string())
+            .arg("-ngl").arg(options.gpu_layers.to_string())
             .arg("--temp").arg("0").arg("-s").arg("42")
             .arg("--no-display-prompt").arg("--simple-io")
             .arg("--offline").stdin(Stdio::null());
-        if let Some(d)=&plan.options.device{cmd.arg("-dev").arg(d);}
+        if let Some(d)=&options.device{cmd.arg("-dev").arg(d);}
         let start=Instant::now();
         let output=cmd.output()?;
         if !output.status.success(){
@@ -306,7 +305,7 @@ fn vision_score(plan:&QuantParityPlan,model:&Path,log:&mut impl FnMut(&str))->io
     Ok(json!({"passed":passed,"total":vision.tasks.len(),
         "accuracy_pct":100.0*passed as f64/vision.tasks.len() as f64,"tests":details}))
 }
-fn task_parity(report:&Value,max_loss:f64)->(bool,Value){
+pub(crate) fn task_parity(report:&Value,max_loss:f64)->(bool,Value){
     let base=&report["baseline"]["metrics"];
     let current=&report["candidates"][0]["metrics"];
     let mut pass=true;
@@ -379,9 +378,9 @@ pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Res
         if task_pass && plan.vision.is_some(){
             let test=(||{
                 if base_vision.is_none(){
-                    base_vision=Some(vision_score(plan,&plan.baseline,&mut log)?);
+                    base_vision=Some(vision_score(&plan.options,plan.vision.as_ref().unwrap(),&plan.baseline,&mut log)?);
                 }
-                vision_score(plan,&output,&mut log)
+                vision_score(&plan.options,plan.vision.as_ref().unwrap(),&output,&mut log)
             })();
             match test{
                 Ok(candidate)=>{
