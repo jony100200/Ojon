@@ -12,8 +12,7 @@ use crate::quant_compare::prepare_existing_quant_comparison;
 use crate::quant_parity::{prepare_quant_parity, QuantParityOptions};
 use crate::task_eval::parse_eval_suite;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap,HashSet};
-use std::fs;
+use std::collections::HashSet;
 use std::io::{self, ErrorKind};
 use std::path::{Path,PathBuf};
 
@@ -292,6 +291,92 @@ pub fn plan_optimize_workflow(
 #[cfg(test)]
 mod tests{
     use super::*;
+    fn tiny_model(path:&Path,kind:u32){
+        use std::fs::{self,File};
+        use std::io::{Seek,Write};
+        fn s(f:&mut File,value:&str){
+            f.write_all(&(value.len() as u64).to_le_bytes()).unwrap();
+            f.write_all(value.as_bytes()).unwrap();
+        }
+        let mut f=File::create(path).unwrap();
+        f.write_all(b"GGUF").unwrap();
+        f.write_all(&3u32.to_le_bytes()).unwrap();
+        f.write_all(&1u64.to_le_bytes()).unwrap();
+        f.write_all(&2u64.to_le_bytes()).unwrap();
+        s(&mut f,"general.architecture");f.write_all(&8u32.to_le_bytes()).unwrap();
+        s(&mut f,"qwen3");
+        s(&mut f,"general.file_type");f.write_all(&4u32.to_le_bytes()).unwrap();
+        f.write_all(&kind.to_le_bytes()).unwrap();
+        s(&mut f,"blk.0.attn_output.weight");
+        f.write_all(&2u32.to_le_bytes()).unwrap();
+        f.write_all(&2u64.to_le_bytes()).unwrap();
+        f.write_all(&2u64.to_le_bytes()).unwrap();
+        f.write_all(&2u32.to_le_bytes()).unwrap();
+        f.write_all(&0u64.to_le_bytes()).unwrap();
+        let pos=f.stream_position().unwrap();
+        f.write_all(&vec![0;((32-pos%32)%32) as usize]).unwrap();
+        f.write_all(&[0;32]).unwrap();
+        drop(f);
+        assert!(fs::metadata(path).unwrap().len()>0);
+    }
+    #[test]
+    fn selects_compressed_reference_without_requantization(){
+        use std::fs;
+        use std::time::{SystemTime,UNIX_EPOCH};
+        let stamp=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir=std::env::temp_dir().join(format!("ojon-workflow-test-{}-{stamp}",std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let base=dir.join("model-Q4.gguf");
+        tiny_model(&base,15);
+        let request=OptimizeWorkflowRequest::new(base.clone());
+        let plan=plan_optimize_workflow(&request,&[]).unwrap();
+        assert_eq!(plan["route"],"download_or_select_candidate");
+        assert_eq!(plan["ready_for_user_approved_execution"],false);
+        assert_eq!(plan["downloads_or_writes_performed"],false);
+        assert_eq!(plan["weights_loaded"],false);
+        assert_eq!(plan["result"],"NOT_TESTED");
+        let orig=dir.join("original-f16.gguf");
+        tiny_model(&orig,1);
+        let plan=plan_optimize_workflow(&OptimizeWorkflowRequest::new(orig),&[]).unwrap();
+        assert_eq!(plan["route"],"build_baseline_first");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn prepares_valid_existing_comparison_and_never_runs_it(){
+        use std::fs;
+        use std::time::{SystemTime,UNIX_EPOCH};
+        let stamp=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir=std::env::temp_dir().join(format!("ojon-workflow-compare-{}-{stamp}",std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let base=dir.join("baseline.gguf");tiny_model(&base,15);
+        let smaller=dir.join("smaller.gguf");tiny_model(&smaller,27);
+        let suite=dir.join("suite.json");
+        let tasks=(0..6).map(|i|json!({
+            "id":format!("w-{i}"),
+            "category":if i<2{"coding"}else if i<4{"reasoning"}else{"tool_call"},
+            "prompt":"Return 42","expected":"42","match":"exact"
+        })).collect::<Vec<_>>();
+        fs::write(&suite,serde_json::to_vec(&json!({
+            "schema":"ojon.task_suite.v1","id":"workflow-fixture","tasks":tasks
+        })).unwrap()).unwrap();
+        let mut req=OptimizeWorkflowRequest::new(base);
+        req.candidates=vec![("smaller".into(),smaller)];
+        req.suite=Some(suite);
+        req.output_dir=Some(dir.clone());
+        let cli_spec=*crate::discovery::backend_specs().iter()
+            .find(|s|s.id==BackendId::LlamaCli).unwrap();
+        let result=plan_optimize_workflow(&req,&[FoundBackend{
+            spec:cli_spec,executable:Some(PathBuf::from("llama-cli")),
+            found_via:Some("test fixture")
+        }]).unwrap();
+        assert_eq!(result["route"],"existing_candidate_comparison");
+        assert_eq!(result["next_action"],"compare_existing_quants");
+        assert_eq!(result["ready_for_user_approved_execution"],true);
+        assert_eq!(result["recommended_command_argv"][1],"quant-compare-run");
+        assert_eq!(result["result"],"NOT_TESTED");
+        assert!(!dir.join("ojon-quant-comparison.json").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
     #[test]
     fn goals_and_limits_are_explicit(){
         assert_eq!(OptimizeGoal::parse("smallest").unwrap(),OptimizeGoal::Smallest);
