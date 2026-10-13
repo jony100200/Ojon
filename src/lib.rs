@@ -65,6 +65,8 @@ pub mod adaptive;
 pub mod abliteration;
 pub mod model_edit;
 pub mod activation_trace;
+pub mod model_build;
+pub use model_build::{prepare_model_build, run_model_build, ModelBuildPlan, ModelBuildResult};
 pub use activation_trace::{compile_activation_recipe, save_activation_recipe, ActivationRecipe};
 pub use model_edit::{prepare_model_abliteration, run_model_abliteration, ModelAblationPlan, ModelAblationResult};
 pub use abliteration::{direction_from_activations, prepare_abliteration, run_abliteration, AblationPlan, AblationResult};
