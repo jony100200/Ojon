@@ -4,6 +4,7 @@
 //! only when the returned telemetry is valid, otherwise UNKNOWN.
 use crate::probe::probe_model;
 use serde_json::{json, Value};
+#[cfg(target_os = "linux")]
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::Path;
@@ -47,7 +48,8 @@ impl ResourceMode {
     fn memory_budget_multiplier(self) -> Option<u64> {
         match self {
             Self::Hqq | Self::OpenVino | Self::AutoRound | Self::Exl3 => Some(1),
-            Self::Gguf | Self::Pack => None, // GGUF/packed pathways may stream tensors.
+            Self::Gguf => Some(0), // reserve host RAM only; tensor stream peak is unknown.
+            Self::Pack => None, // packed pathways may stream tensors.
         }
     }
     fn disk_budget_multiplier(self) -> u64 {
@@ -359,7 +361,7 @@ mod tests {
         assert_eq!(ram, Some(11 * GIB));
         assert_eq!(disk, 16 * GIB);
         let (ram, disk) = budget(base, ResourceMode::Gguf).unwrap();
-        assert_eq!(ram, None); // streamed/bounded paths are not guessed
+        assert_eq!(ram, Some(4 * GIB)); // reserve only; NOT predicted peak
         assert_eq!(disk, 16 * GIB);
         assert!(budget(u64::MAX, ResourceMode::AutoRound).is_err());
     }
