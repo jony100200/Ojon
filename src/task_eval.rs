@@ -177,11 +177,13 @@ pub fn run_eval(plan:&EvalPlan,mut log:impl FnMut(&str))->io::Result<Value>{
             "metrics":tests["metrics"],"runtime_measurements":null}));
         details.push(json!({"label":name,"model":path.to_string_lossy(),"tests":tests}));
     }
+    let requirements=["coding_accuracy","reasoning_accuracy","tool_call_accuracy"].iter()
+        .map(|name|json!({"name":name,"direction":"higher","max_relative_degradation_pct":1.0}))
+        .collect::<Vec<_>>();
     let result=json!({
         "schema":"ojon.quality_evidence.v1","evaluation_suite":plan.suite.id,
         "baseline":{"model":plan.baseline.to_string_lossy(),"metrics":baseline["metrics"],"tests":baseline},
-        "requirements":["coding_accuracy","reasoning_accuracy","tool_call_accuracy"].iter().map(|name|
-            json!({"name":name,"direction":"higher","max_relative_degradation_pct":1.0})).collect::<Vec<_>>(),
+        "requirements":requirements,
         "candidates":candidates,"detailed_candidate_results":details,
         "quality_scope":"strict functional tasks only; no statistical or full agentic parity claim",
         "hardware_fit_verified":false,"peak_vram_measured":false,"calibration_overlap_checked":false
