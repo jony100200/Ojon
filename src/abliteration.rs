@@ -32,6 +32,13 @@ struct Edit {
     width: usize,
     direction: Vec<f64>,
     strength: f64,
+    lora: Option<LowRank>,
+}
+
+#[derive(Clone,Debug)]
+struct LowRank {
+    a:Vec<Vec<f64>>,
+    b:Vec<Vec<f64>>,
 }
 
 #[derive(Debug)]
@@ -52,7 +59,8 @@ impl AblationPlan {
             "original_bytes": self.original_bytes,
             "edited_tensors": self.edits.iter().map(|e| json!({
                 "name": e.tensor, "rows": e.rows, "columns": e.cols,
-                "dtype": e.dtype, "strength": e.strength
+                "dtype": e.dtype, "strength": e.strength,
+                "method": if e.lora.is_some(){"LOW_RANK_DELTA"}else{"DIRECTIONAL_PROJECTION"}
             })).collect::<Vec<_>>(),
             "preserve_row_norms": self.preserve_row_norms,
             "model_inference": "NOT_RUN",
@@ -129,6 +137,32 @@ fn unit_direction(v: &Value, rows: usize) -> io::Result<Vec<f64>> {
     let norm = direction.iter().fold(0.0_f64, |sum, &x| sum.hypot(x));
     if !norm.is_finite() || norm < 1e-30 { return Err(invalid("zero, nearly zero or invalid refusal direction")); }
     Ok(direction.iter().map(|x| x / norm).collect())
+}
+
+/// A = rank x input columns, B = output rows x rank.
+fn parse_lora(value:&Value,rows:usize,cols:usize)->io::Result<LowRank>{
+    let a=value.get("a").and_then(Value::as_array)
+        .ok_or_else(||invalid("LoRA A must be an array of rank rows"))?;
+    let b=value.get("b").and_then(Value::as_array)
+        .ok_or_else(||invalid("LoRA B must be an array of output rows"))?;
+    let rank=a.len();
+    if rank==0||rank>64||b.len()!=rows {return Err(invalid("invalid LoRA rank or B output shape"));}
+    if (rows+cols).checked_mul(rank).ok_or_else(||invalid("LoRA dimensions overflow"))?>1_000_000 {
+        return Err(invalid("LoRA adapter exceeds 1 million element limit"));
+    }
+    let parse_row=|v:&Value,n:usize|->io::Result<Vec<f64>>{
+        let array=v.as_array().ok_or_else(||invalid("LoRA entries must be vectors"))?;
+        if array.len()!=n {return Err(invalid("LoRA matrix dimension mismatch"));}
+        array.iter().map(|x|{
+            let n=x.as_f64().ok_or_else(||invalid("LoRA element is not numeric"))?;
+            if !n.is_finite(){return Err(invalid("LoRA element not finite"));}
+            Ok(n)
+        }).collect()
+    };
+    Ok(LowRank{
+        a:a.iter().map(|v|parse_row(v,cols)).collect::<io::Result<Vec<_>>>()?,
+        b:b.iter().map(|v|parse_row(v,rank)).collect::<io::Result<Vec<_>>>()?
+    })
 }
 
 fn weight_width(dtype: &str) -> io::Result<usize> {
@@ -242,9 +276,16 @@ pub(crate) fn prepare_abliteration_with_recipe(
         if !strength.is_finite() || !(0.0..=1.0).contains(&strength) || strength == 0.0 {
             return Err(invalid("strength must be > 0 and <= 1"));
         }
-        let direction = unit_direction(entry, rows)?;
+        let lora = if let Some(value)=entry.get("lora"){
+            if entry.get("direction").is_some() || entry.get("good_activations").is_some()
+                || entry.get("bad_activations").is_some() {
+                return Err(invalid("cannot combine LoRA with a directional projection"));
+            }
+            Some(parse_lora(value,rows,cols)?)
+        }else{None};
+        let direction = if lora.is_some(){Vec::new()}else{unit_direction(entry,rows)?};
         edits.push(Edit { tensor: name.to_owned(), offset: start + 8 + header_len,
-            dtype: dtype.to_owned(), rows, cols, width, direction, strength });
+            dtype: dtype.to_owned(), rows, cols, width, direction, strength, lora });
     }
     Ok(AblationPlan { source, destination, original_bytes, edits, preserve_row_norms })
 }
@@ -286,15 +327,29 @@ fn apply_edit(file: &mut File, edit: &Edit, preserve: bool) -> io::Result<()> {
     let mut bytes = vec![0u8; row_bytes];
     let mut row = vec![0f64; edit.cols];
     let mut projection = vec![0f64; edit.cols];
-    for i in 0..edit.rows {
-        read_row(file, edit, i, &mut bytes, &mut row)?;
-        for (p, &v) in projection.iter_mut().zip(&row) { *p += edit.direction[i] * v; }
+    if edit.lora.is_none(){
+        for i in 0..edit.rows {
+            read_row(file, edit, i, &mut bytes, &mut row)?;
+            for (p, &v) in projection.iter_mut().zip(&row) { *p += edit.direction[i] * v; }
+        }
+        if projection.iter().any(|v| !v.is_finite()) { return Err(invalid("projection overflow")); }
     }
-    if projection.iter().any(|v| !v.is_finite()) { return Err(invalid("projection overflow")); }
     for i in 0..edit.rows {
         read_row(file, edit, i, &mut bytes, &mut row)?;
         let original_norm = if preserve { row.iter().fold(0f64, |s,&v|s.hypot(v)) } else { 0.0 };
-        for (v, &p) in row.iter_mut().zip(&projection) { *v -= edit.strength * edit.direction[i] * p; }
+        if let Some(lora)=&edit.lora {
+            for (column,v) in row.iter_mut().enumerate() {
+                let mut delta=0.0_f64;
+                for rank in 0..lora.a.len() {
+                    delta+=lora.b[i][rank]*lora.a[rank][column];
+                }
+                *v+=edit.strength*delta;
+            }
+        } else {
+            for (v, &p) in row.iter_mut().zip(&projection) {
+                *v -= edit.strength * edit.direction[i] * p;
+            }
+        }
         if preserve {
             let new_norm = row.iter().fold(0f64, |s,&v|s.hypot(v));
             if original_norm == 0.0 {
@@ -472,6 +527,26 @@ mod tests {
         assert!(run_abliteration(&plan, |_| {}).is_err());
         assert!(!dest.exists(), "failed edit must not publish a partial model");
         assert_eq!(tensor_bytes(&src), before, "original weights must remain unchanged");
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn low_rank_delta_edits_only_named_tensor() {
+        let dir=scratch();
+        let src=fixture(&dir,"F32",&[2.0,0.0,0.0,2.0],&[0x41,0x42]);
+        let config=recipe(&dir,json!({
+            "tensor":"model.layers.0.self_attn.o_proj.weight",
+            "lora":{"a":[[1.0,0.0]],"b":[[1.0],[0.0]]},
+            "strength":1.0
+        }),false);
+        let out=dir.join("lowrank.safetensors");
+        let plan=prepare_abliteration(&src,&config,&out).unwrap();
+        let receipt=plan.as_json();
+        assert_eq!(receipt["edited_tensors"][0]["method"],"LOW_RANK_DELTA");
+        run_abliteration(&plan, |_| {}).unwrap();
+        let bytes=fs::read(&out).unwrap();
+        let pos=8+u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+        assert_eq!(f32::from_le_bytes(bytes[pos..pos+4].try_into().unwrap()),3.0);
+        assert_eq!(&bytes[pos+16..], &[0x41,0x42]);
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
