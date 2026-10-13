@@ -13,6 +13,7 @@ use ojon_backend::{
     prepare_research, ResearchKind,
     resource_plan, ResourceMode, prepare_bench, run_bench, compare_bench_files,
     prepare_exl3, run_exl3, prepare_eval, run_eval, prepare_adaptive, run_adaptive,
+    extract_sensitivity_from_imatrix,
 };
 use std::env;
 use std::ffi::OsString;
@@ -36,6 +37,7 @@ Commands:
   ojon train-plan <config.yaml> [--tool <llamafactory-cli>] [--json]
   ojon train-run  <config.yaml> [--tool <llamafactory-cli>] --confirm
   ojon recommend <quality-evidence.json> [--json]  Smallest verified model within tolerance
+  ojon sensitivity-extract <original.gguf> <calibration.imatrix> <new-tensor-sensitivity.json> --confirm
   ojon adaptive-plan <original.gguf> <tensor-sensitivity.json> <existing-output-dir> <suite.json> [--targets 3.0,3.5,4.0] [--quantizer llama-quantize] [--eval-tool llama-cli] [--imatrix path] [--device Vulkan2] [--gpu-layers 99] [--max-loss 1.0] [--json]
   ojon adaptive-run <original.gguf> <tensor-sensitivity.json> <existing-output-dir> <suite.json> [options] --confirm
   ojon task-eval-plan <suite.json> <new-report.json> --baseline <original.gguf> --candidate <label=variant.gguf> [--candidate ...] [--tool llama-cli] [--gpu-layers 0] [--device Vulkan2] [--tokens 128]
@@ -606,6 +608,23 @@ fn run() -> io::Result<()> {
                 println!("quantization_task_quality: NOT_EVALUATED");
                 println!("recommended_variant: NONE_UNTIL_REAL_BENCHMARKS");
             }
+        }
+        Some("sensitivity-extract") => {
+            let source=PathBuf::from(next_argument(&mut args,"original GGUF")?);
+            let imatrix=PathBuf::from(next_argument(&mut args,"GGUF calibration imatrix")?);
+            let output=PathBuf::from(next_argument(&mut args,"new sensitivity JSON")?);
+            let mut confirm=false;
+            while let Some(arg)=args.next() {
+                match arg.to_str(){
+                    Some("--confirm")=>confirm=true,
+                    _=>return Err(invalid("sensitivity-extract supports only --confirm")),
+                }
+            }
+            if !confirm{return Err(invalid("sensitivity-extract creates new output; pass --confirm"));}
+            let result=extract_sensitivity_from_imatrix(&source,&imatrix,&output)?;
+            println!("sensitivity_entries: {}",result["tensors"].as_array().map(|v|v.len()).unwrap_or(0));
+            println!("output: {}",output.display());
+            println!("status: ACTIVATION_ENERGY_PROXY_NOT_TASK_SENSITIVITY");
         }
         Some("adaptive-plan") | Some("adaptive-run") => {
             let execute=cmd=="adaptive-run";
