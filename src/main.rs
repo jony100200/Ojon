@@ -54,7 +54,7 @@ Commands:
   ojon abliterate-plan <original-shard.safetensors> <direction-recipe.json> <new-shard.safetensors> [--json]
   ojon abliterate-run <original-shard.safetensors> <direction-recipe.json> <new-shard.safetensors> --confirm [--json]
   ojon sensitivity-extract <original.gguf> <calibration.imatrix> <new-tensor-sensitivity.json> --confirm
-  ojon quant-parity-plan <original-F16.gguf> <current-Q4_K_M.gguf> <suite.json> <output-dir> [--precisions IQ4_XS,IQ3_M,Q3_K_M] [--imatrix path] [--max-buffer-mib 512] [--gpu-layers 0] [--vision-suite vision.json --mmproj vision.gguf] [--json]
+  ojon quant-parity-plan <original-F16.gguf> <current-Q4_K_M.gguf> <suite.json> <output-dir> [--precisions IQ4_XS,IQ3_M,Q3_K_M] [--imatrix path] [--max-buffer-mib 512] [--gpu-layers 0] [--vision-suite vision.json --mmproj vision.gguf] [--ppl-corpus heldout.txt --max-ppl-regression-pct 0] [--json]
   ojon quant-parity-run  <original-F16.gguf> <current-Q4_K_M.gguf> <suite.json> <output-dir> [same options] --confirm
   ojon adaptive-plan <original.gguf> <tensor-sensitivity.json> <existing-output-dir> <suite.json> [--targets 3.0,3.5,4.0] [--quantizer llama-quantize] [--eval-tool llama-cli] [--imatrix path] [--device Vulkan2] [--gpu-layers 99] [--max-loss 1.0] [--json]
   ojon adaptive-run <original.gguf> <tensor-sensitivity.json> <existing-output-dir> <suite.json> [options] --confirm
@@ -1000,6 +1000,20 @@ fn run() -> io::Result<()> {
                     Some("--min-saving-percent")=>{
                         options.min_saving_percent=next_argument(&mut args,"minimum saving percent")?
                             .to_string_lossy().parse().map_err(|_|invalid("saving must be numeric"))?;
+                    }
+                    Some("--ppl-corpus")=>{
+                        options.ppl_corpus=Some(PathBuf::from(next_argument(&mut args,"held-out perplexity corpus")?));
+                    }
+                    Some("--ppl-tool")=>{
+                        options.ppl_tool=PathBuf::from(next_argument(&mut args,"llama-perplexity tool")?);
+                    }
+                    Some("--ppl-context")=>{
+                        options.ppl_context=next_argument(&mut args,"perplexity context tokens")?
+                            .to_string_lossy().parse().map_err(|_|invalid("PPL context must be integer"))?;
+                    }
+                    Some("--max-ppl-regression-pct")=>{
+                        options.max_ppl_regression_pct=next_argument(&mut args,"max PPL regression percent")?
+                            .to_string_lossy().parse().map_err(|_|invalid("PPL regression must be numeric"))?;
                     }
                     Some("--vision-suite")=>{
                         options.vision_suite=Some(PathBuf::from(next_argument(&mut args,"vision suite JSON")?));
