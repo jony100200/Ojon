@@ -38,6 +38,7 @@ Commands:
   ojon train-plan <config.yaml> [--tool <llamafactory-cli>] [--json]
   ojon train-run  <config.yaml> [--tool <llamafactory-cli>] --confirm
   ojon recommend <quality-evidence.json> [--json]  Smallest verified model within tolerance
+  ojon activation-compile <trace.jsonl> <new-directions.json> [--strength 0.7] [--no-preserve] [--json] --confirm
   ojon abliterate-model-plan <original-HF-folder> <direction-recipe.json> <new-model-folder> [--json]
   ojon abliterate-model-run <original-HF-folder> <direction-recipe.json> <new-model-folder> --confirm [--json]
   ojon abliterate-plan <original-shard.safetensors> <direction-recipe.json> <new-shard.safetensors> [--json]
@@ -184,6 +185,35 @@ fn run() -> io::Result<()> {
     let mut args = env::args_os().skip(1);
     let cmd = args.next().unwrap_or_else(|| OsString::from("--help"));
     match cmd.to_str() {
+        Some("activation-compile") => {
+            let source = PathBuf::from(next_argument(&mut args, "activation trace JSONL file")?);
+            let dest = PathBuf::from(next_argument(&mut args, "output directions recipe JSON")?);
+            let mut strength=0.7_f64;
+            let mut preserve=true;
+            let mut confirmed=false;
+            let mut json=false;
+            while let Some(arg)=args.next() {
+                match arg.to_str() {
+                    Some("--strength") => {
+                        strength=next_argument(&mut args,"strength")?.to_string_lossy()
+                            .parse().map_err(|_|invalid("strength must be decimal number"))?;
+                    }
+                    Some("--no-preserve") => preserve=false,
+                    Some("--confirm") => confirmed=true,
+                    Some("--json") => json=true,
+                    _ => return Err(invalid(format!("unknown activation option: {}",arg.to_string_lossy())))
+                }
+            }
+            let result=ojon_backend::compile_activation_recipe(&source,strength,preserve)?;
+            if !confirmed {
+                if json { println!("{}",result.as_json()); }
+                else { println!("plan: {} records across {} matrices; add --confirm to write {}",result.records,result.tensors,dest.display()); }
+            } else {
+                let path=ojon_backend::save_activation_recipe(&result,&dest)?;
+                if json { println!("{}",serde_json::json!({"recipe":path,"records":result.records,"tensors":result.tensors,"status":"RECIPE_WRITTEN"})); }
+                else { println!("recipe_written: {}",path.display()); }
+            }
+        }
         Some("abliterate-model-plan") | Some("abliterate-model-run") => {
             let execute = cmd == "abliterate-model-run";
             let source = PathBuf::from(next_argument(&mut args, "original Hugging Face model folder")?);
