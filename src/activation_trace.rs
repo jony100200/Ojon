@@ -71,6 +71,9 @@ pub fn compile_activation_recipe(path:&Path, strength:f64, preserve_row_norms:bo
             return Err(invalid("invalid activation width"));
         }
         let state=states.entry(tensor.to_owned()).or_default();
+        // Record opposite-class width before mutably borrowing the current
+        // class; this also avoids aliasing across Rust match branches.
+        let other_width=if class=="good"{state.bad_sum.len()}else{state.good_sum.len()};
         let (sum,count)=match class {
             "good"=>(&mut state.good_sum,&mut state.good_count),
             "bad"=>(&mut state.bad_sum,&mut state.bad_count),
@@ -81,8 +84,7 @@ pub fn compile_activation_recipe(path:&Path, strength:f64, preserve_row_norms:bo
         if sum.len()!=vals.len() { return Err(invalid("inconsistent feature width for class")); }
         // Cross-class feature dimensions must match, including if one class
         // was seen before the other.
-        let other=if class=="good" {&state.bad_sum} else {&state.good_sum};
-        if !other.is_empty() && other.len()!=vals.len() {
+        if other_width!=0 && other_width!=vals.len() {
             return Err(invalid("good and bad activation dimensions differ"));
         }
         for (acc,v) in sum.iter_mut().zip(vals) {
