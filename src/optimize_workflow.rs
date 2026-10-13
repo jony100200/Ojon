@@ -1,0 +1,320 @@
+//! Metadata-only, UX/agent-ready next-step selector for Ojon optimization.
+//!
+//! A single readable plan bridges model inspection, a user's current quantized
+//! reference, a held-out task suite, installed upstream backends and exact
+//! existing CLI routes. This does NOT run quantizers, load weights, benchmark
+//! models, allocate GPU memory, download dependencies or promise a winner.
+
+use crate::discovery::{BackendId, FoundBackend};
+use crate::gguf::{inspect_gguf, inspect_gguf_tensors};
+use crate::probe::{probe_model, ModelCategory};
+use crate::quant_compare::prepare_existing_quant_comparison;
+use crate::quant_parity::{prepare_quant_parity, QuantParityOptions};
+use crate::task_eval::parse_eval_suite;
+use serde_json::{json, Value};
+use std::collections::{BTreeMap,HashSet};
+use std::fs;
+use std::io::{self, ErrorKind};
+use std::path::{Path,PathBuf};
+
+fn invalid(s:impl Into<String>)->io::Error{io::Error::new(ErrorKind::InvalidInput,s.into())}
+
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub enum OptimizeGoal {
+    Smallest,
+    Balanced,
+    Fastest,
+}
+impl OptimizeGoal {
+    pub fn parse(s:&str)->io::Result<Self>{
+        match s{
+            "smallest"=>Ok(Self::Smallest),
+            "balanced"=>Ok(Self::Balanced),
+            "fastest"=>Ok(Self::Fastest),
+            _=>Err(invalid("goal must be smallest, balanced or fastest"))
+        }
+    }
+    pub fn label(self)->&'static str{
+        match self{Self::Smallest=>"smallest",Self::Balanced=>"balanced",Self::Fastest=>"fastest"}
+    }
+}
+#[derive(Debug,Clone)]
+pub struct OptimizeWorkflowRequest {
+    pub model:PathBuf,
+    pub current_baseline:Option<PathBuf>,
+    pub candidates:Vec<(String,PathBuf)>,
+    pub suite:Option<PathBuf>,
+    pub output_dir:Option<PathBuf>,
+    pub goal:OptimizeGoal,
+    pub device:String,
+    pub min_saving_percent:f64,
+    pub max_loss_points:f64,
+}
+impl OptimizeWorkflowRequest{
+    pub fn new(model:PathBuf)->Self{
+        Self{
+            model,current_baseline:None,candidates:Vec::new(),suite:None,
+            output_dir:None,goal:OptimizeGoal::Balanced,device:"auto".into(),
+            min_saving_percent:5.0,max_loss_points:0.0
+        }
+    }
+}
+fn path_text(p:&Path)->String{p.to_string_lossy().into_owned()}
+fn executable(backends:&[FoundBackend],id:BackendId)->Option<PathBuf>{
+    backends.iter().find(|x|x.spec.id==id && x.installed())
+        .and_then(|x|x.executable.clone())
+}
+fn stage(id:&str,title:&str,status:&str,reason:&str,command:Option<Vec<String>>)->Value{
+    json!({"id":id,"title":title,"status":status,"reason":reason,
+        "command_argv":command,"completed":false,"quality_verified":false})
+}
+fn types_for(goal:OptimizeGoal)->&'static str{
+    match goal {
+        OptimizeGoal::Smallest=>"IQ3_M,Q3_K_M,IQ4_XS",
+        OptimizeGoal::Balanced=>"IQ4_XS,IQ3_M,Q3_K_M",
+        OptimizeGoal::Fastest=>"Q3_K_M,IQ4_XS,IQ3_M",
+    }
+}
+/// A read-only front door for the existing pipeline. No shell command runs.
+pub fn plan_optimize_workflow(
+    input:&OptimizeWorkflowRequest,backends:&[FoundBackend],
+)->io::Result<Value>{
+    if !matches!(input.device.as_str(),"auto"|"cpu"|"cuda"|"xpu"){
+        return Err(invalid("device must be auto, cpu, cuda or xpu"));
+    }
+    if !input.min_saving_percent.is_finite()
+        ||!(0.0..=95.0).contains(&input.min_saving_percent){
+        return Err(invalid("minimum saving must be within 0..95 percent"));
+    }
+    if !input.max_loss_points.is_finite()
+        ||!(0.0..=100.0).contains(&input.max_loss_points){
+        return Err(invalid("maximum quality loss must be within 0..100 percentage points"));
+    }
+    if input.candidates.len()>6{return Err(invalid("at most six existing candidate GGUFs"));}
+    let mut names=HashSet::new();
+    for(label,_)in &input.candidates{
+        if label.is_empty()||label.len()>80||
+            !label.bytes().all(|v|v.is_ascii_alphanumeric()||matches!(v,b'_'|b'-'))||
+            !names.insert(label.clone()){
+            return Err(invalid("candidate names must be unique ASCII letters/numbers/-/_"));
+        }
+    }
+    let probe=probe_model(&input.model)?;
+    let source=probe.path.clone();
+    let original_gguf=if probe.format=="gguf"{
+        let g=inspect_gguf(&source)?;
+        matches!(g.file_type,Some(0|1|32))&&g.split_count.unwrap_or(1)==1
+    }else{false};
+    let compressed_gguf=if probe.format=="gguf"{!original_gguf}else{false};
+    let baseline=match &input.current_baseline{
+        Some(p)=>Some(p.canonicalize()?),
+        None if compressed_gguf=>Some(source.clone()),
+        None=>None,
+    };
+    let baseline=if let Some(p)=baseline{
+        let b=inspect_gguf(&p)?;
+        if b.tensor_count==0||b.split_count.unwrap_or(1)>1||
+            b.file_type.is_none()||matches!(b.file_type,Some(0|1|32)){
+            return Err(invalid("current quality baseline must be a compressed single-file GGUF"));
+        }
+        Some(p)
+    }else{None};
+    let suite=match &input.suite{
+        Some(p)=>{
+            let p=p.canonicalize()?;
+            parse_eval_suite(&p)?;
+            Some(p)
+        }
+        None=>None
+    };
+    let out=match &input.output_dir{
+        Some(p)=>{
+            let p=p.canonicalize()?;
+            if !p.is_dir(){return Err(invalid("output must be an existing directory"));}
+            Some(p)
+        }
+        None=>None
+    };
+    let mut options=QuantParityOptions::default();
+    options.min_saving_percent=input.min_saving_percent;
+    options.max_loss_points=input.max_loss_points;
+    options.gpu_layers=0; // planning never consumes a GPU; testing defaults CPU too
+    if let Some(bin)=executable(backends,BackendId::LlamaQuantize){options.quantizer=bin;}
+    if let Some(bin)=executable(backends,BackendId::LlamaCli){options.eval_tool=bin;}
+    let quantizer_available=executable(backends,BackendId::LlamaQuantize).is_some();
+    let evaluator_available=executable(backends,BackendId::LlamaCli).is_some();
+    let mut stages=vec![
+        stage("inspect","Inspect model and components","ready",
+              "Model metadata inspected; no weight payload loaded",None)
+    ];
+    let mut checks=Vec::<String>::new();
+    if probe.category==ModelCategory::VisionLanguage{
+        checks.push("Vision model: matching mmproj and image-input evaluation are mandatory before claiming quality parity. This basic workflow cannot yet automate those requirements.".into());
+    }
+    if input.device!="cpu"{
+        checks.push("Selected GPU/backend availability, loaded VRAM, and supported kernels are NOT verified by metadata-only planning.".into());
+    }
+    if suite.is_none(){
+        checks.push("No held-out test suite supplied; result cannot prove quality parity.".into());
+    }
+    let base_text=baseline.as_ref().map(|p|path_text(p));
+    let output_text=out.as_ref().map(|p|path_text(p));
+    let mut next=None::<String>;
+    let mut route="requires_input";
+    let mut action="blocked";
+    let mut permitted=false;
+    let mut argv:Option<Vec<String>>=None;
+
+    // Avoid misleadingly proposing text-only benchmarking as full VLM proof.
+    let text_like=probe.category==ModelCategory::Language;
+    if !text_like {
+        checks.push("No fully verified one-click quality optimization path for this model category. Use the individual model-family workflow.".into());
+    }else if !input.candidates.is_empty(){
+        route="existing_candidate_comparison";
+        if let (Some(base),Some(suite),Some(out))=(&baseline,&suite,&out){
+            let report=out.join("ojon-quant-comparison.json");
+            let valid=prepare_existing_quant_comparison(
+                base,&input.candidates,suite,&report,options.clone());
+            match valid {
+                Ok(_)=>{
+                    if !evaluator_available{
+                        checks.push("llama-cli not discovered; cannot execute quality comparison.".into());
+                    }else {
+                        let mut cmd=vec!["ojon".into(),"quant-compare-run".into(),
+                            path_text(base),path_text(suite),path_text(&report)];
+                        for(label,path)in &input.candidates {
+                            cmd.push("--candidate".into());
+                            cmd.push(format!("{label}={}",path_text(&path.canonicalize()?)));
+                        }
+                        cmd.extend(["--eval-tool".into(),path_text(&options.eval_tool),
+                            "--max-loss-points".into(),input.max_loss_points.to_string(),
+                            "--min-saving-percent".into(),input.min_saving_percent.to_string(),
+                            "--confirm".into()]);
+                        argv=Some(cmd);
+                        permitted=true;
+                        action="compare_existing_quants";
+                        next=Some("Compare existing quantized candidates to the current baseline".into());
+                    }
+                },
+                Err(e)=>checks.push(format!("Existing candidate comparison cannot run: {e}"))
+            }
+        }else{
+            checks.push("To compare existing quants, provide current Q4 baseline, held-out suite and output directory.".into());
+        }
+    }else if original_gguf {
+        if let (Some(base),Some(suite),Some(out))=(&baseline,&suite,&out){
+            route="quantize_and_compare";
+            if !quantizer_available||!evaluator_available {
+                checks.push("Both llama-quantize and llama-cli must be discovered for end-to-end candidate search.".into());
+            }else{
+                match prepare_quant_parity(&source,base,suite,out,options.clone()){
+                    Ok(_)=>{
+                        let cmd=vec!["ojon".into(),"quant-parity-run".into(),
+                            path_text(&source),path_text(base),path_text(suite),path_text(out),
+                            "--precisions".into(),types_for(input.goal).into(),
+                            "--quantizer".into(),path_text(&options.quantizer),
+                            "--eval-tool".into(),path_text(&options.eval_tool),
+                            "--max-buffer-mib".into(),"512".into(),
+                            "--min-saving-percent".into(),input.min_saving_percent.to_string(),
+                            "--max-loss-points".into(),input.max_loss_points.to_string(),
+                            "--gpu-layers".into(),"0".into(),
+                            "--confirm".into()];
+                        argv=Some(cmd);permitted=true;
+                        action="quantize_and_compare";
+                        next=Some("Generate and test smaller precision candidates from the original weights".into());
+                    }
+                    Err(e)=>checks.push(format!("Quantization parity preflight blocked: {e}"))
+                }
+            }
+        }else{
+            route="build_baseline_first";
+            checks.push("Provide an existing Q4_K_M baseline and a held-out task suite to establish whether smaller results preserve quality.".into());
+            if out.is_none(){checks.push("Select a writable output directory for any future conversion.".into());}
+            next=Some("Select a current Q4 baseline, held-out suite and output folder".into());
+        }
+    }else if compressed_gguf{
+        route="download_or_select_candidate";
+        checks.push("Existing GGUF is already compressed. Do not turn Q4 into Q3 by lossy requantization.".into());
+        next=Some("Add a smaller GGUF from the SAME model revision for a measured comparison".into());
+    }else if probe.format=="hf_checkpoint_directory"{
+        route="convert_hf_first";
+        checks.push("HF checkpoint must first be exported to compatible high-precision GGUF with original tokenizer and model components; no automatic conversion performed.".into());
+        next=Some("Prepare supported HF-to-GGUF source conversion and a quantized reference".into());
+    }else{
+        route="unsupported_source";
+        checks.push("No verified quantization workflow for this source format and architecture.".into());
+    }
+
+    if let Some(c)=argv.clone(){
+        stages.push(stage("verify_prerequisites","Check backend and output compatibility",
+            "ready","Backend filenames detected; real runtime compatibility not yet established",None));
+        stages.push(stage("run","Evaluate optimization candidates","awaiting_approval",
+            "Requires explicit user approval; command will perform real model inference and/or quantization",Some(c)));
+        stages.push(stage("verify_quality","Compare size, capability and hardware","not_started",
+            "Accept only measured task-parity results and separately confirm runtime memory and speed",None));
+        stages.push(stage("optional_lora","Optional LoRA quality repair and behavioural customization",
+            "optional_not_automated",
+            "Quantization recovery and refusal-reduction are separate user-approved experiments",None));
+    }else{
+        stages.push(stage("resolve","Resolve missing prerequisites","blocked",
+            "A real optimization run is not authorized until the listed checks are satisfied",None));
+    }
+    // NOTE: .ojonq, EXL3, OpenVINO, and VLM are excluded until
+    // an exact tested model-family+runtime recipe exists.
+    Ok(json!({
+        "schema":"ojon.optimize_workflow.v1",
+        "model":probe.as_json(),
+        "current_baseline":base_text,
+        "heldout_suite":suite.map(|p|path_text(&p)),
+        "output_directory":output_text,
+        "goal":input.goal.label(),
+        "target_device":input.device,
+        "runtime_gpu_allocated":false,
+        "weights_loaded":false,
+        "downloads_or_writes_performed":false,
+        "route":route,
+        "next_action":action,
+        "next_user_step":next,
+        "ready_for_user_approved_execution":permitted,
+        "recommended_command_argv":argv,
+        "recommended_precision_order":types_for(input.goal).split(',').collect::<Vec<_>>(),
+        "quality_thresholds":{"max_loss_points":input.max_loss_points,
+             "min_saving_percent":input.min_saving_percent},
+        "stages":stages,
+        "checks":checks,
+        "result":"NOT_TESTED",
+        "winner":Value::Null,
+        "general_quality_preservation_proven":false,
+        "warning":"Read-only next-step plan, not an optimization run. No quality, free-VRAM, model revision identity, or runtime capability is proven."
+    }))
+}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    #[test]
+    fn goals_and_limits_are_explicit(){
+        assert_eq!(OptimizeGoal::parse("smallest").unwrap(),OptimizeGoal::Smallest);
+        assert!(OptimizeGoal::parse("magical").is_err());
+        assert_eq!(types_for(OptimizeGoal::Smallest),"IQ3_M,Q3_K_M,IQ4_XS");
+    }
+    #[test]
+    fn invalid_arguments_do_not_invent_a_plan(){
+        let mut req=OptimizeWorkflowRequest::new(PathBuf::from("does-not-exist.gguf"));
+        req.max_loss_points=f64::NAN;
+        assert!(plan_optimize_workflow(&req,&[]).is_err());
+        req.max_loss_points=0.0;
+        req.device="pooled-40gb".into();
+        assert!(plan_optimize_workflow(&req,&[]).is_err());
+        req.device="cpu".into();
+        req.candidates=vec![("same".into(),PathBuf::from("a")),
+            ("same".into(),PathBuf::from("b"))];
+        assert!(plan_optimize_workflow(&req,&[]).is_err());
+    }
+    #[test]
+    fn stages_do_not_claim_gpu_or_quality(){
+        let s=stage("run","Quantize","awaiting_approval","requires consent",None);
+        assert_eq!(s["completed"],false);
+        assert_eq!(s["quality_verified"],false);
+    }
+}
