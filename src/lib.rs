@@ -63,6 +63,8 @@ pub use task_eval::{parse_eval_suite, prepare_eval, run_eval, EvalPlan, EvalSuit
 
 pub mod adaptive;
 pub mod quant_parity;
+pub mod quant_compare;
+pub use quant_compare::{prepare_existing_quant_comparison, run_existing_quant_comparison, ExistingQuantPlan};
 pub use quant_parity::{prepare_quant_parity, run_quant_parity, QuantParityOptions, QuantParityPlan};
 pub mod abliteration;
 pub mod model_edit;
