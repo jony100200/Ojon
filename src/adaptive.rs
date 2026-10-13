@@ -1,7 +1,7 @@
 //! Adaptive precision search. Real GGUF quantization + held-out task evaluation.
 //! Tensor sensitivities are externally measured inputs and must be auditable;
 //! no heuristic guess is described as observed activation sensitivity.
-use crate::gguf::{inspect_gguf, inspect_gguf_tensors};
+use crate::gguf::{inspect_gguf, inspect_gguf_tensors, read_imatrix_energy};
 use crate::llama::{prepare_gguf, quantize_gguf_with_log, Precision};
 use crate::task_eval::{prepare_eval, run_eval};
 use serde_json::{json,Value};
@@ -26,6 +26,55 @@ pub struct AdaptivePlan{
     pub eval_tool:PathBuf,pub imatrix:Option<PathBuf>,pub targets:Vec<f64>,
     pub threads:usize,pub gpu_layers:i32,pub device:Option<String>,pub tokens:u32,
     pub max_absolute_loss_pct:f64
+}
+
+/// Derive a ranked importance proxy directly from a real GGUF llama-imatrix.
+/// No source weights are loaded; this is an activation-energy proxy, not actual
+/// perturbation sensitivity. Every candidate still needs held-out task tests.
+pub fn extract_sensitivity_from_imatrix(
+    source:&Path,imatrix:&Path,output:&Path
+)->io::Result<Value>{
+    let source=source.canonicalize()?;
+    let info=inspect_gguf(&source)?;
+    if !matches!(info.file_type,Some(0|1|32)){
+        return Err(invalid("sensitivity source must be original F32/F16/BF16 GGUF"));
+    }
+    let energy=read_imatrix_energy(imatrix)?;
+    let by_name:HashMap<String,f64>=energy.into_iter().collect();
+    let catalog=inspect_gguf_tensors(&source)?;
+    let mut rows=Vec::new();
+    for t in catalog{
+        if t.shape.len()<2||t.elements<65536||t.shape[0]%256!=0
+            ||!t.name.ends_with(".weight")||!t.name.starts_with("blk."){continue;}
+        if let Some(&score)=by_name.get(&t.name) {
+            rows.push((t.name,score));
+        }
+    }
+    if rows.is_empty(){return Err(invalid("imatrix has no matched K-quantizable source tensors"));}
+    // Stable rank-based normalization avoids pretending raw activation units
+    // from unrelated tensor families share one calibrated loss scale.
+    rows.sort_by(|a,b|a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    let n=rows.len();
+    let tensors=rows.into_iter().enumerate().map(|(idx,(name,energy))|{
+        let scaled=(idx+1) as f64/n as f64;
+        json!({"name":name,"sensitivity":scaled,"activation_energy_proxy":energy})
+    }).collect::<Vec<_>>();
+    let result=json!({
+        "schema":"ojon.tensor_sensitivity.v1",
+        "source_file_bytes":info.file_bytes,
+        "architecture":info.architecture,
+        "calibration_protocol":"GGUF llama-imatrix mean squared activation-energy RANK proxy; not direct perturbation sensitivity",
+        "calibration_imatrix":imatrix.canonicalize()?.to_string_lossy(),
+        "verified_task_sensitivity":false,
+        "tensors":tensors
+    });
+    if output.extension().and_then(|x|x.to_str())!=Some("json"){
+        return Err(invalid("sensitivity output must be a new JSON file"));
+    }
+    let mut file=OpenOptions::new().create_new(true).write(true).open(output)?;
+    file.write_all(&serde_json::to_vec_pretty(&result).map_err(io::Error::other)?)?;
+    file.sync_all()?;
+    Ok(result)
 }
 
 pub fn parse_tensor_sensitivity(source:&Path, file:&Path)->io::Result<Vec<TensorScore>>{
