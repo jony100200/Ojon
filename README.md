@@ -81,6 +81,27 @@ This is not a need to install Heretic at Ojon runtime.
 
 ### Quantization target: smaller than your CURRENT Q4_K_M, no measured regression
 
+**Fastest first experiment: compare existing compressed downloads without
+the original high-precision checkpoint.** Download or reuse a Q3/IQ3 GGUF
+of the **same exact base model revision** and its Q4_K_M reference, then:
+
+```powershell
+ojon quant-compare-plan 'D:\Models\my-Q4_K_M.gguf' 'D:\Bench\coding-suite.json' 'D:\Bench\compare.json' --candidate iq3m='D:\Models\candidate-IQ3_M.gguf' --json
+ojon quant-compare-run 'D:\Models\my-Q4_K_M.gguf' 'D:\Bench\coding-suite.json' 'D:\Bench\compare.json' --candidate iq3m='D:\Models\candidate-IQ3_M.gguf' --confirm
+```
+
+For VLMs, append both `--vision-suite vision-suite.json --mmproj mmproj.gguf`.
+To require unchanged perplexity too, append `--ppl-corpus heldout.txt`.
+The program validates tensor catalog compatibility, but cannot prove
+checkpoint lineage from dimensions alone; inspect publisher provenance.
+
+These are **two independent routes**: `quant-compare-*` compares files
+that already exist (no source F16 or quantizer required), while
+`quant-parity-*` generates new candidates from original high-precision
+GGUF. Both require actual model inference only for `*-run`, not `*-plan`.
+
+
+
 **Quantization takes priority over editing.** The success reference is the
 actual model GGUF you already run (for example, a Q4_K_M), not a theoretical
 F16 score. Ojon's `quant-parity-*` workflow quantizes a separate high-precision
