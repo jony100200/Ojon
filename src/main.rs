@@ -12,7 +12,7 @@ use ojon_backend::{
     prepare_autoround_plan, run_autoround,
     prepare_research, ResearchKind,
     resource_plan, ResourceMode, prepare_bench, run_bench, compare_bench_files,
-    prepare_exl3, run_exl3,
+    prepare_exl3, run_exl3, prepare_eval, run_eval,
 };
 use std::env;
 use std::ffi::OsString;
@@ -36,6 +36,8 @@ Commands:
   ojon train-plan <config.yaml> [--tool <llamafactory-cli>] [--json]
   ojon train-run  <config.yaml> [--tool <llamafactory-cli>] --confirm
   ojon recommend <quality-evidence.json> [--json]  Smallest verified model within tolerance
+  ojon task-eval-plan <suite.json> <new-report.json> --baseline <original.gguf> --candidate <label=variant.gguf> [--candidate ...] [--tool llama-cli] [--gpu-layers 0] [--device Vulkan2] [--tokens 128]
+  ojon task-eval-run <suite.json> <new-report.json> --baseline <original.gguf> --candidate <label=variant.gguf> [options] --confirm
   ojon bench-plan <model.gguf> [--tool llama-bench] [--prompt-tokens 512] [--gen-tokens 128] [--repetitions 3] [--gpu-layers 0] [--device SYCL0|CUDA0|Vulkan0] [--json]
   ojon bench-run <model.gguf> <new-receipt.json> [same options] --confirm
   ojon bench-compare <reference-receipt.json> <candidate-receipt.json> [--json]
@@ -602,6 +604,48 @@ fn run() -> io::Result<()> {
                 println!("quantization_task_quality: NOT_EVALUATED");
                 println!("recommended_variant: NONE_UNTIL_REAL_BENCHMARKS");
             }
+        }
+        Some("task-eval-plan") | Some("task-eval-run") => {
+            let execute=cmd=="task-eval-run";
+            let suite=PathBuf::from(next_argument(&mut args,"held-out task suite JSON")?);
+            let output=PathBuf::from(next_argument(&mut args,"new quality evidence JSON")?);
+            let mut baseline:Option<PathBuf>=None;
+            let mut candidates:Vec<(String,PathBuf)>=Vec::new();
+            let mut tool=PathBuf::from("llama-cli");
+            let mut gpu_layers=0i32;
+            let mut device:Option<String>=None;
+            let mut tokens=128u32;
+            let mut confirm=false;
+            let mut json=false;
+            while let Some(option)=args.next() {
+                match option.to_str() {
+                    Some("--baseline") => baseline=Some(PathBuf::from(next_argument(&mut args,"baseline GGUF")?)),
+                    Some("--candidate") => {
+                        let pair=next_argument(&mut args,"label=model.gguf")?;
+                        let pair=pair.to_str().ok_or_else(||invalid("candidate must be UTF-8"))?;
+                        let (name,path)=pair.split_once('=').ok_or_else(||invalid("candidate must be label=path"))?;
+                        candidates.push((name.to_owned(),PathBuf::from(path)));
+                    }
+                    Some("--tool") => tool=PathBuf::from(next_argument(&mut args,"llama-cli executable")?),
+                    Some("--gpu-layers") => gpu_layers=next_argument(&mut args,"GPU layer count")?.to_str()
+                        .ok_or_else(||invalid("invalid layers"))?.parse().map_err(|_|invalid("invalid layers"))?,
+                    Some("--device") => device=Some(next_argument(&mut args,"Vulkan2 or SYCL0")?
+                        .to_str().ok_or_else(||invalid("invalid device"))?.to_owned()),
+                    Some("--tokens") => tokens=next_argument(&mut args,"token limit")?.to_str()
+                        .ok_or_else(||invalid("invalid tokens"))?.parse().map_err(|_|invalid("invalid tokens"))?,
+                    Some("--confirm") if execute => confirm=true,
+                    Some("--json") => json=true,
+                    _ => return Err(invalid(format!("unknown task evaluation option: {}",option.to_string_lossy()))),
+                }
+            }
+            let baseline=baseline.ok_or_else(||invalid("--baseline is required"))?;
+            let plan=prepare_eval(&suite,&baseline,&candidates,&tool,gpu_layers,device.as_deref(),tokens,&output)?;
+            if execute {
+                if !confirm{return Err(invalid("task evaluation loads real models; pass --confirm"));}
+                let result=run_eval(&plan,|line|eprintln!("{line}"))?;
+                if json {println!("{result}");}
+                else {println!("task_evaluation_receipt: {}",plan.report.display());}
+            } else {println!("{}",plan.as_json());}
         }
         Some("recommend") => {
             let file = PathBuf::from(next_argument(&mut args, "quality evidence JSON file")?);
