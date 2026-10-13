@@ -289,10 +289,14 @@ fn apply_edit(file: &mut File, edit: &Edit, preserve: bool) -> io::Result<()> {
         for (v, &p) in row.iter_mut().zip(&projection) { *v -= edit.strength * edit.direction[i] * p; }
         if preserve {
             let new_norm = row.iter().fold(0f64, |s,&v|s.hypot(v));
-            if original_norm > 0.0 && new_norm <= 1e-30 {
-                return Err(invalid("cannot preserve nonzero row norm after projection; disable preserve_row_norms or reduce strength"));
-            }
-            if original_norm > 0.0 {
+            if original_norm == 0.0 {
+                // Exactly preserve originally zero rows, even if a global
+                // projection would otherwise introduce nonzero weights.
+                row.fill(0.0);
+            } else {
+                if new_norm <= 1e-30 {
+                    return Err(invalid("cannot preserve nonzero row norm after projection; disable preserve_row_norms or reduce strength"));
+                }
                 let scale = original_norm / new_norm;
                 for value in &mut row { *value *= scale; }
             }
@@ -445,6 +449,22 @@ mod tests {
             }
             fs::remove_dir_all(dir).unwrap();
         }
+    }
+    #[test]
+    fn failed_norm_preservation_never_publishes_partial_output() {
+        let dir = scratch();
+        let src = fixture(&dir, "F32", &[2.0,0.0,0.0,2.0], &[19]);
+        let before = tensor_bytes(&src);
+        let recipe = recipe(&dir, json!({
+            "tensor": "model.layers.0.self_attn.o_proj.weight",
+            "direction": [1.0,0.0], "strength": 1.0
+        }), true);
+        let dest = dir.join("must-not-appear.safetensors");
+        let plan = prepare_abliteration(&src, &recipe, &dest).unwrap();
+        assert!(run_abliteration(&plan, |_| {}).is_err());
+        assert!(!dest.exists(), "failed edit must not publish a partial model");
+        assert_eq!(tensor_bytes(&src), before, "original weights must remain unchanged");
+        fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn guards_unknown_tensor_bad_dims_bad_direction_and_vision() {
