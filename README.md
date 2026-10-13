@@ -39,6 +39,65 @@ cargo run --release --features gui --bin ojon-gui
 ```
 
 
+
+### Experimental native Rust directional ablation — stage 1
+
+This is an **independent CPU-based math-and-weight-editing primitive**, not an
+automatic Heretic/ARA port, a model trainer, or an end-to-end uncensored VLM
+builder. No Python, Torch, Optuna, Heretic, model download, GPU or new Rust
+dependency is used at runtime. It requires a prepared local JSON recipe with
+**measured residual/output activation directions** for named transformer
+weights. Merely supplying a prompt does not collect those activations.
+
+```powershell
+# The recipe and target tensor name/direction length must match the original shard.
+ojon abliterate-plan "original.safetensors" "directions.json" "edited.safetensors" --json
+
+# Explicitly run; source file is never modified or overwritten.
+ojon abliterate-run "original.safetensors" "directions.json" "edited.safetensors" --confirm
+```
+
+Recipe `ojon.abliteration.v1` (the short vectors are *illustrative*, for a
+2-row synthetic tensor, **not** values that should be applied to a real model):
+
+```json
+{
+  "schema": "ojon.abliteration.v1",
+  "preserve_row_norms": true,
+  "edits": [
+    {
+      "tensor": "model.layers.0.self_attn.o_proj.weight",
+      "direction": [1.0, 0.0],
+      "strength": 0.5
+    }
+  ]
+}
+```
+
+Instead of `"direction"`, an entry may contain arrays of
+`"good_activations"` and `"bad_activations"`, each a list of equally sized,
+**externally captured** per-module output vectors. Ojon computes and normalizes
+the mean difference. This is **not** an activation-capture implementation.
+
+The only enabled edit targets in stage 1 are explicitly named
+`*.self_attn.o_proj.weight` and `*.mlp.down_proj.weight` in transformer
+`layers`. The editor rejects vision/projector targets, supports original
+F32/F16/BF16 matrices, uses two bounded-memory passes per edited matrix,
+and retains all untouched bytes and safetensors metadata. It publishes the new
+shard only after every edit succeeds; existing outputs are never overwritten.
+
+**Important limitations:** A saved shard alone is not a complete loadable
+Hugging Face or VLM checkpoint. Other original model shards, config, tokenizer,
+vision tower and processor must remain available. A real VLM workflow must
+package them and test image inputs before claiming VLM support. Stage 1 does
+not optimize directions against refusals, select layers automatically, perform
+Heretic ARA/L-BFGS/TPE, run inference, assess tool/coding quality, or establish
+refusal reduction. The edited shard also needs to be placed in a **new,
+complete model directory** with the original sidecars to be loadable; do not
+replace original weights. Benchmark it against the original and then quantize
+the complete verified model through the compatible Ojon/HF conversion route.
+
+
 ### Keep Rust builds and executables small
 
 Ojon defaults to line-only debug information for its own Rust code and no

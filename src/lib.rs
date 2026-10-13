@@ -62,4 +62,6 @@ pub mod task_eval;
 pub use task_eval::{parse_eval_suite, prepare_eval, run_eval, EvalPlan, EvalSuite};
 
 pub mod adaptive;
+pub mod abliteration;
+pub use abliteration::{direction_from_activations, prepare_abliteration, run_abliteration, AblationPlan, AblationResult};
 pub use adaptive::{allocate_bits, parse_tensor_sensitivity, extract_sensitivity_from_imatrix, prepare_adaptive, run_adaptive, AdaptivePlan, TensorScore};
