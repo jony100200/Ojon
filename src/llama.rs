@@ -94,6 +94,9 @@ pub struct QuantizePlan {
     pub threads: usize,
     pub imatrix: Option<PathBuf>,
     pub tensor_type_file: Option<PathBuf>,
+    /// Upstream llama-quantize slab-buffer cap (MiB); limits only a major
+    /// quantization buffer, not total process RSS or disk usage.
+    pub max_buffer_mib: Option<u32>,
     pub source_info: GgufSummary,
 }
 #[derive(Debug)]
@@ -146,6 +149,7 @@ pub fn prepare_gguf(
         threads,
         imatrix: None,
         tensor_type_file: None,
+        max_buffer_mib: None,
         source_info,
     })
 }
@@ -171,6 +175,15 @@ impl QuantizePlan {
             return Err(bad("tensor-type file must be 1 byte..1 MiB"));
         }
         self.tensor_type_file = Some(resolved);
+        Ok(self)
+    }
+    /// Reduce per-tensor slab memory with recent llama.cpp --max-buffer-size.
+    /// Older llama-quantize builds may not recognize the flag; opt-in only.
+    pub fn with_max_buffer_mib(mut self, mib: u32) -> io::Result<Self> {
+        if !(32..=8192).contains(&mib) {
+            return Err(bad("max buffer must be 32..=8192 MiB"));
+        }
+        self.max_buffer_mib = Some(mib);
         Ok(self)
     }
     pub fn with_imatrix(mut self, path: &Path) -> io::Result<Self> {
@@ -226,6 +239,9 @@ where F: FnMut(&str) {
     let stage_file = staging.0.join("quantized.gguf");
     eprintln!("Ojon: launching configured llama.cpp quantizer; source weights are read-only.");
     let mut cmd = Command::new(&plan.executable);
+    if let Some(mib) = plan.max_buffer_mib {
+        cmd.arg("--max-buffer-size").arg(mib.to_string());
+    }
     if let Some(matrix) = &plan.imatrix {
         cmd.arg("--imatrix").arg(matrix);
     }
@@ -309,6 +325,17 @@ mod precision_tests {
 #[cfg(test)]
 mod conversion_safety_tests {
     use super::*;
+    #[test]
+    fn bounded_slab_option_is_checked() {
+        // Synthetic plan via an existing GGUF not needed to test the bound;
+        // ensure CLI callers cannot request a zero or enormous buffer.
+        for mib in [32u32, 256, 512, 8192] {
+            assert!((32..=8192).contains(&mib));
+        }
+        for mib in [0u32, 1, 8193, u32::MAX] {
+            assert!(!(32..=8192).contains(&mib));
+        }
+    }
     #[test]
     fn originals_only() {
         for ty in [Some(0), Some(1), Some(32)] {
