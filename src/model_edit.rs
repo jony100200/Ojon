@@ -306,6 +306,8 @@ pub fn run_model_abliteration(plan:&ModelAblationPlan,mut log:impl FnMut(&str))-
         "quantization":"NOT_RUN"
     })).map_err(|e|invalid(format!("cannot serialize edit receipt: {e}")))?.as_bytes())?;
     file.sync_all()?;
+    // Windows cannot rename a directory while its receipt file is still open.
+    drop(file);
     if plan.output.symlink_metadata().is_ok() {
         return Err(io::Error::new(ErrorKind::AlreadyExists,"output folder appeared while editing"));
     }
