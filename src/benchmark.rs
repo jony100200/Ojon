@@ -124,10 +124,11 @@ pub fn prepare_bench(
     let model = model.canonicalize()?;
     let meta = inspect_gguf(&model)?;
     if meta.tensor_count == 0 { return Err(invalid("GGUF has no tensor catalog")); }
+    let model_bytes = total_model_bytes(&model, meta.file_bytes)?;
     Ok(BenchPlan {
         model, tool: tool.to_path_buf(), prompt_tokens, gen_tokens,
         repetitions, gpu_layers, device: device.map(str::to_owned),
-        model_bytes: total_model_bytes(&model, meta.file_bytes)?,
+        model_bytes,
         architecture: meta.architecture.unwrap_or_else(|| "unknown".into()),
     })
 }
