@@ -40,6 +40,59 @@ cargo run --release --features gui --bin ojon-gui
 
 
 
+### Native editing and VLM build pipeline (experimental)
+
+The native Rust editor can **now** modify full safetensors Hugging Face
+checkpoint folders (including multiple indexed shards) while copying
+tokenizer, config, processor and vision files unchanged. It supports
+directional projection or a bounded low-rank adapter from the experimental
+ARA-like fitter. This is NOT yet live automatic activation capture or full
+Heretic ARA: runtime hooks and model/vision-quality evaluation are still
+needed. No additional Rust crates are required.
+
+**Compile externally captured activations** (JSONL records must be captured
+from the *output* of the corresponding named linear module):
+\`\`\`json
+{"tensor":"model.layers.0.self_attn.o_proj.weight","class":"good","values":[0.1,0.2]}
+{"tensor":"model.layers.0.self_attn.o_proj.weight","class":"bad","values":[0.3,0.4]}
+\`\`\`
+\`\`\`powershell
+ojon activation-compile "trace.jsonl" "directions.json" --strength 0.7 --confirm
+ojon abliterate-model-run "C:\Models\OriginalHF" "directions.json" "C:\Models\EditedHF" --confirm
+\`\`\`
+
+**Optional ARA-like low-rank experiment:** run
+\`ojon ara-fit module-io.json directions.json --confirm\` instead, where
+\`module-io.json\` contains \`ojon.ara_fit.v1\` with the target tensor,
+rank, steps, learning rate, good/bad paired module input/output samples and
+loss weights. The fitter currently uses Rust Adam, **not** Heretic's exact
+L-BFGS/TPE procedure. Its numerical module loss is not a refusal benchmark.
+The resulting JSON uses the same edit-recipe format as the native editor.
+
+**Build edited + quantized model (and vision mmproj when applicable):**
+\`\`\`powershell
+ojon model-build-plan "C:\Models\OriginalHF" "directions.json" "C:\Models\Final" --converter "C:\llama.cpp\convert_hf_to_gguf.py" --precision Q4_K_M
+ojon model-build-run "C:\Models\OriginalHF" "directions.json" "C:\Models\Final" --converter "C:\llama.cpp\convert_hf_to_gguf.py" --quantizer "C:\llama.cpp\build\bin\Release\llama-quantize.exe" --python python --precision Q4_K_M --confirm
+\`\`\`
+This combines the **native Rust edit** with **user-installed llama.cpp**
+Python GGUF conversion and native GGUF quantization tools. Only the
+conversion stage still needs Python. Output is a new folder containing
+\`edited-hf/\`, \`model.gguf\`, and—only for compatible VLM architectures—
+\`mmproj.gguf\` in Q8_0. If the installed converter cannot create the vision
+projector, the entire staged build fails rather than pretending to produce
+a working VLM.
+
+Once local model evaluations are available, call
+\`ojon method-select measured-scores.json --json\` to choose the lowest
+refusal-rate candidate **that passes per-capability quality floors**;
+unknown vision scores are not accepted for VLM selection.
+
+All output receipts explicitly mark inference, refusal, coding, tool-use and
+vision testing as **NOT RUN**. For 27B/35B weights, a full-precision edited
+checkpoint plus intermediate GGUF may exceed available RAM/disk; B60 24 GB
+quantized inference feasibility does not establish large-model editing
+feasibility.
+
 ### Experimental native Rust directional ablation — stage 1
 
 This is an **independent CPU-based math-and-weight-editing primitive**, not an
