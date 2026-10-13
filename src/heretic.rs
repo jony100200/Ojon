@@ -123,7 +123,8 @@ pub fn prepare_heretic(
     };
     if resume{
         let existing=fs::read_to_string(plan.work.join("config.toml"))?;
-        if existing!=plan.config_toml(){
+        let expected=plan.config_toml().replace("checkpoint_action = \"continue\"","checkpoint_action = \"restart\"");
+        if existing!=expected {
             return Err(invalid("resume configuration does not match original Ojon Heretic inputs"));
         }
     }
