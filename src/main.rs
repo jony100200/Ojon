@@ -30,6 +30,7 @@ Commands:
   ojon verify    <model.gguf>
   ojon backends [--json]     Detect installed engines and show official download links
   ojon probe <model-path> [--json]   Identify model format/family without loading weights
+  ojon optimize-workflow-plan <model-path> [--baseline current-Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--goal balanced|smallest|fastest] [--device auto|cpu|cuda|xpu] [--min-saving-percent 5] [--max-loss-points 0] [--json]
   ojon optimize-plan <model-path> [--device auto|cpu|cuda|xpu] [--json]   Compare candidate routes without converting
   ojon resource-plan <model-path> <existing-output-parent> [--mode hqq|openvino|autoround|gguf|pack|exl3] [--device cpu|cuda|xpu|auto] [--json]
   ojon dataset-audit <dataset.jsonl> [--json]   Audit external dataset for drift, dead paths, staleness
@@ -1448,6 +1449,63 @@ fn run() -> io::Result<()> {
                 println!("{}", plan.json());
                 ojon_backend::autoround::run_autoround_with_policy(&plan, allow_resource_risk)?;
                 println!("autoround_status: COMPLETED");
+            }
+        }
+        Some("optimize-workflow-plan") => {
+            let source=PathBuf::from(next_argument(&mut args,"model file or directory")?);
+            let mut input=ojon_backend::OptimizeWorkflowRequest::new(source);
+            let mut json=false;
+            while let Some(option)=args.next(){
+                match option.to_str(){
+                    Some("--baseline")=>input.current_baseline=Some(
+                        PathBuf::from(next_argument(&mut args,"existing quantized quality baseline")?)),
+                    Some("--candidate")=>{
+                        let arg=next_argument(&mut args,"candidate label=path.gguf")?;
+                        let txt=arg.to_str().ok_or_else(||invalid("candidate must be UTF-8"))?;
+                        let(name,path)=txt.split_once('=')
+                            .ok_or_else(||invalid("--candidate requires label=path.gguf"))?;
+                        if name.is_empty()||path.is_empty(){return Err(invalid("empty candidate label/path"));}
+                        input.candidates.push((name.to_owned(),PathBuf::from(path)));
+                    }
+                    Some("--suite")=>input.suite=Some(
+                        PathBuf::from(next_argument(&mut args,"held-out task suite JSON")?)),
+                    Some("--output-dir")=>input.output_dir=Some(
+                        PathBuf::from(next_argument(&mut args,"existing output directory")?)),
+                    Some("--goal")=>{
+                        let name=next_argument(&mut args,"goal")?;
+                        input.goal=ojon_backend::OptimizeGoal::parse(
+                            name.to_str().ok_or_else(||invalid("goal must be UTF-8"))?)?;
+                    }
+                    Some("--device")=>input.device=next_argument(&mut args,"device")?
+                        .to_str().ok_or_else(||invalid("device must be UTF-8"))?.to_owned(),
+                    Some("--min-saving-percent")=>{
+                        input.min_saving_percent=next_argument(&mut args,"minimum size saving percent")?
+                            .to_string_lossy().parse().map_err(|_|invalid("saving must be numeric"))?;
+                    }
+                    Some("--max-loss-points")=>{
+                        input.max_loss_points=next_argument(&mut args,"maximum quality score loss")?
+                            .to_string_lossy().parse().map_err(|_|invalid("loss must be numeric"))?;
+                    }
+                    Some("--json")=>json=true,
+                    _=>return Err(invalid(format!("unknown workflow plan option: {}",
+                        option.to_string_lossy()))),
+                }
+            }
+            let plan=ojon_backend::plan_optimize_workflow(&input,&discover_backends())?;
+            if json{println!("{plan}");}
+            else{
+                println!("model: {}",plan["model"]["source"]);
+                println!("goal: {} / device: {}",plan["goal"],plan["target_device"]);
+                println!("route: {}",plan["route"]);
+                println!("ready_for_approved_run: {}",plan["ready_for_user_approved_execution"]);
+                if let Some(step)=plan["next_user_step"].as_str(){println!("next: {step}");}
+                if let Some(cmd)=plan["recommended_command_argv"].as_array(){
+                    println!("execution argv (display only; never started): {}",serde_json::Value::Array(cmd.clone()));
+                }
+                for note in plan["checks"].as_array().into_iter().flatten(){
+                    if let Some(text)=note.as_str(){println!("check: {text}");}
+                }
+                println!("quality: NOT_TESTED; no GPU allocated");
             }
         }
         Some("optimize-plan") => {
