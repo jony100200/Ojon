@@ -172,6 +172,15 @@ fn verify_dims(base:&GgufTensor,rows:usize,cols:usize)->io::Result<()>{
 pub fn prepare_compressed_edit(
     base:&Path,recipe:&Path,output:&Path,mmproj:Option<&Path>,
 )->io::Result<CompressedEditPlan>{
+    let recipe=read_recipe(recipe)?;
+    prepare_compressed_edit_with_recipe(base,&recipe,output,mmproj)
+}
+
+/// Build an adapter plan from an in-memory LoRA recipe. Allows the small
+/// CPU-only ARA fitter to feed the GGUF exporter without intermediary files.
+pub fn prepare_compressed_edit_with_recipe(
+    base:&Path,recipe:&Value,output:&Path,mmproj:Option<&Path>,
+)->io::Result<CompressedEditPlan>{
     let base=base.canonicalize()?;
     if !base.is_file(){return Err(invalid("base GGUF path is not a regular file"));}
     let summary=inspect_gguf(&base)?;
@@ -202,7 +211,6 @@ pub fn prepare_compressed_edit(
             Some(path)
         },None=>None
     };
-    let recipe=read_recipe(recipe)?;
     if recipe.get("schema").and_then(Value::as_str)!=Some("ojon.abliteration.v1"){
         return Err(invalid("expected ojon.abliteration.v1 recipe"));
     }
