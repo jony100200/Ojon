@@ -67,6 +67,8 @@ pub mod model_edit;
 pub mod activation_trace;
 pub mod model_build;
 pub mod compressed_edit;
+pub mod adapter_smoke;
+pub use adapter_smoke::{prepare_adapter_smoke, run_adapter_smoke, AdapterSmokePlan, AdapterSmokeResult};
 pub use compressed_edit::{prepare_compressed_edit, prepare_compressed_edit_with_recipe, run_compressed_edit, CompressedEditPlan, CompressedEditResult};
 pub mod ara;
 pub use ara::{fit_ara, fit_ara_file, save_ara_recipe, AraFitResult};
