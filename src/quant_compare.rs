@@ -255,6 +255,60 @@ pub fn run_existing_quant_comparison(
 #[cfg(test)]
 mod tests{
     use super::*;
+    fn tiny_gguf(path:&Path,file_type:u32){
+        use std::io::{Seek,Write};
+        fn val_string(f:&mut fs::File,s:&str){
+            f.write_all(&(s.len() as u64).to_le_bytes()).unwrap();
+            f.write_all(s.as_bytes()).unwrap();
+        }
+        let mut f=fs::File::create(path).unwrap();
+        f.write_all(b"GGUF").unwrap();
+        f.write_all(&3u32.to_le_bytes()).unwrap();
+        f.write_all(&1u64.to_le_bytes()).unwrap(); // 1 tensor
+        f.write_all(&2u64.to_le_bytes()).unwrap(); // 2 metadata keys
+        val_string(&mut f,"general.architecture");
+        f.write_all(&8u32.to_le_bytes()).unwrap();
+        val_string(&mut f,"qwen3");
+        val_string(&mut f,"general.file_type");
+        f.write_all(&4u32.to_le_bytes()).unwrap();
+        f.write_all(&file_type.to_le_bytes()).unwrap();
+        val_string(&mut f,"blk.0.attn_output.weight");
+        f.write_all(&2u32.to_le_bytes()).unwrap();
+        f.write_all(&2u64.to_le_bytes()).unwrap();
+        f.write_all(&2u64.to_le_bytes()).unwrap();
+        f.write_all(&2u32.to_le_bytes()).unwrap();
+        f.write_all(&0u64.to_le_bytes()).unwrap();
+        let pos=f.stream_position().unwrap();
+        f.write_all(&vec![0u8;((32-pos%32)%32) as usize]).unwrap();
+        f.write_all(&[0u8;32]).unwrap();
+    }
+    #[test]
+    fn compare_existing_quants_preflight_uses_metadata_only(){
+        use std::time::{SystemTime,UNIX_EPOCH};
+        let tick=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir=std::env::temp_dir().join(format!("ojon-existing-quant-{}-{tick}",std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let q4=dir.join("reference.gguf");tiny_gguf(&q4,15);
+        let q3=dir.join("candidate.gguf");tiny_gguf(&q3,27);
+        let suite=dir.join("tasks.json");
+        let tasks=(0..6).map(|i|json!({
+            "id":format!("t{i}"),
+            "category":if i<2{"coding"}else if i<4{"reasoning"}else{"tool_call"},
+            "prompt":"Return 42","expected":"42","match":"exact"
+        })).collect::<Vec<_>>();
+        fs::write(&suite,serde_json::to_vec(&json!({
+            "schema":"ojon.task_suite.v1","id":"fixture","tasks":tasks
+        })).unwrap()).unwrap();
+        let report=dir.join("compare.json");
+        let plan=prepare_existing_quant_comparison(&q4,
+            &[("iq3m".into(),q3.clone())],&suite,&report,QuantParityOptions::default()).unwrap();
+        assert_eq!(plan.as_json()["status"],"PLAN_ONLY");
+        assert!(plan.as_json()["no_quantization_or_weights_loaded"].as_bool().unwrap());
+        assert!(!report.exists());
+        assert!(prepare_existing_quant_comparison(&q4,
+            &[("duplicate".into(),q4.clone())],&suite,&report,QuantParityOptions::default()).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn default_existing_comparison_is_cpu_and_strict() {
         let options=QuantParityOptions::default();
