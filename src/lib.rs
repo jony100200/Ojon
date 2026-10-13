@@ -66,6 +66,8 @@ pub mod abliteration;
 pub mod model_edit;
 pub mod activation_trace;
 pub mod model_build;
+pub mod compressed_edit;
+pub use compressed_edit::{prepare_compressed_edit, run_compressed_edit, CompressedEditPlan, CompressedEditResult};
 pub mod ara;
 pub use ara::{fit_ara, fit_ara_file, save_ara_recipe, AraFitResult};
 pub mod method_select;
