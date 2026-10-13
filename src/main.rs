@@ -38,6 +38,8 @@ Commands:
   ojon train-plan <config.yaml> [--tool <llamafactory-cli>] [--json]
   ojon train-run  <config.yaml> [--tool <llamafactory-cli>] --confirm
   ojon recommend <quality-evidence.json> [--json]  Smallest verified model within tolerance
+  ojon ara-fit <module-io-calibration.json> <new-lowrank-edit-recipe.json> --confirm [--json]
+  ojon method-select <measured-quality-scores.json> [--json]
   ojon model-build-plan <original-HF-dir> <directions.json> <new-output-folder> --converter <convert_hf_to_gguf.py> [--python python] [--quantizer llama-quantize] [--precision Q4_K_M] [--threads N] [--json]
   ojon model-build-run <original-HF-dir> <directions.json> <new-output-folder> [options] --confirm
   ojon activation-compile <trace.jsonl> <new-directions.json> [--strength 0.7] [--no-preserve] [--json] --confirm
@@ -187,6 +189,45 @@ fn run() -> io::Result<()> {
     let mut args = env::args_os().skip(1);
     let cmd = args.next().unwrap_or_else(|| OsString::from("--help"));
     match cmd.to_str() {
+        Some("ara-fit") => {
+            let source=PathBuf::from(next_argument(&mut args,"module input/output calibration JSON")?);
+            let output=PathBuf::from(next_argument(&mut args,"output low-rank edit recipe JSON")?);
+            let(mut confirmed,mut json)=(false,false);
+            while let Some(arg)=args.next(){
+                match arg.to_str(){
+                    Some("--confirm")=>confirmed=true,
+                    Some("--json")=>json=true,
+                    _=>return Err(invalid(format!("unknown ARA option: {}",arg.to_string_lossy())))
+                }
+            }
+            let result=ojon_backend::fit_ara_file(&source)?;
+            if !confirmed {
+                if json{println!("{}",result.as_json());}
+                else {println!("plan_only: ARA-like rank {}, {} steps; add --confirm to save low-rank recipe",
+                    result.rank,result.steps);}
+            } else {
+                let path=ojon_backend::save_ara_recipe(&result,&output)?;
+                if json{println!("{}",serde_json::json!({"output":path,"status":"ARA_RECIPE_WRITTEN","refusal_rate":"NOT_EVALUATED","initial_loss":result.initial_loss,"final_loss":result.final_loss}));}
+                else{
+                    println!("ARA-like adapter recipe: {}",path.display());
+                    println!("module_loss: {} -> {}",result.initial_loss,result.final_loss);
+                    println!("refusal_rate: NOT_EVALUATED");
+                }
+            }
+        }
+        Some("method-select") => {
+            let path=PathBuf::from(next_argument(&mut args,"measured quality evidence JSON")?);
+            let mut json=false;
+            for option in args{
+                match option.to_str(){
+                    Some("--json")=>json=true,
+                    _=>return Err(invalid(format!("unknown selection option: {}",option.to_string_lossy())))
+                }
+            }
+            let result=ojon_backend::choose_edit_method_file(&path)?;
+            if json{println!("{}",result.as_json());}
+            else{println!("{}",result.as_json());}
+        }
         Some("model-build-plan") | Some("model-build-run") => {
             let execute=cmd=="model-build-run";
             let source=PathBuf::from(next_argument(&mut args,"original Hugging Face model folder")?);
