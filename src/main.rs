@@ -54,6 +54,8 @@ Commands:
   ojon abliterate-plan <original-shard.safetensors> <direction-recipe.json> <new-shard.safetensors> [--json]
   ojon abliterate-run <original-shard.safetensors> <direction-recipe.json> <new-shard.safetensors> --confirm [--json]
   ojon sensitivity-extract <original.gguf> <calibration.imatrix> <new-tensor-sensitivity.json> --confirm
+  ojon quant-compare-plan <current-Q4_K_M.gguf> <suite.json> <new-report.json> --candidate name=lower-bit.gguf [--candidate ...] [--vision-suite vision.json --mmproj vision.gguf] [--ppl-corpus heldout.txt] [--json]
+  ojon quant-compare-run  <current-Q4_K_M.gguf> <suite.json> <new-report.json> --candidate name=lower-bit.gguf [--candidate ...] [same options] --confirm
   ojon quant-parity-plan <original-F16.gguf> <current-Q4_K_M.gguf> <suite.json> <output-dir> [--precisions IQ4_XS,IQ3_M,Q3_K_M] [--imatrix path] [--max-buffer-mib 512] [--gpu-layers 0] [--vision-suite vision.json --mmproj vision.gguf] [--ppl-corpus heldout.txt --max-ppl-regression-pct 0] [--json]
   ojon quant-parity-run  <original-F16.gguf> <current-Q4_K_M.gguf> <suite.json> <output-dir> [same options] --confirm
   ojon adaptive-plan <original.gguf> <tensor-sensitivity.json> <existing-output-dir> <suite.json> [--targets 3.0,3.5,4.0] [--quantizer llama-quantize] [--eval-tool llama-cli] [--imatrix path] [--device Vulkan2] [--gpu-layers 99] [--max-loss 1.0] [--json]
@@ -955,6 +957,74 @@ fn run() -> io::Result<()> {
             println!("sensitivity_entries: {}",result["tensors"].as_array().map(|v|v.len()).unwrap_or(0));
             println!("output: {}",output.display());
             println!("status: ACTIVATION_ENERGY_PROXY_NOT_TASK_SENSITIVITY");
+        }
+        Some("quant-compare-plan") | Some("quant-compare-run") => {
+            let execute=cmd=="quant-compare-run";
+            let baseline=PathBuf::from(next_argument(&mut args,"existing Q4_K_M reference GGUF")?);
+            let suite=PathBuf::from(next_argument(&mut args,"held-out task suite JSON")?);
+            let report=PathBuf::from(next_argument(&mut args,"new comparison report JSON")?);
+            let mut candidates=Vec::<(String,PathBuf)>::new();
+            let mut options=ojon_backend::QuantParityOptions::default();
+            let(mut confirmed,mut json)=(false,false);
+            while let Some(option)=args.next(){
+                match option.to_str(){
+                    Some("--candidate")=>{
+                        let raw=next_argument(&mut args,"name=path to candidate GGUF")?;
+                        let raw=raw.to_str().ok_or_else(||invalid("candidate must be UTF-8"))?;
+                        let(name,path)=raw.split_once('=')
+                            .ok_or_else(||invalid("candidate must be name=path.gguf"))?;
+                        if name.is_empty()||path.is_empty(){return Err(invalid("invalid candidate path"));}
+                        candidates.push((name.to_owned(),PathBuf::from(path)));
+                    }
+                    Some("--eval-tool")=>options.eval_tool=PathBuf::from(next_argument(&mut args,"llama-cli path")?),
+                    Some("--gpu-layers")=>{
+                        options.gpu_layers=next_argument(&mut args,"GPU layers")?.to_string_lossy()
+                            .parse().map_err(|_|invalid("gpu-layers must be integer"))?;
+                    }
+                    Some("--device")=>options.device=Some(next_argument(&mut args,"GPU device")?.to_string_lossy().to_string()),
+                    Some("--tokens")=>{
+                        options.tokens=next_argument(&mut args,"generation tokens")?.to_string_lossy()
+                            .parse().map_err(|_|invalid("tokens must be integer"))?;
+                    }
+                    Some("--max-loss-points")=>{
+                        options.max_loss_points=next_argument(&mut args,"max loss percentage points")?
+                            .to_string_lossy().parse().map_err(|_|invalid("loss must be numeric"))?;
+                    }
+                    Some("--min-saving-percent")=>{
+                        options.min_saving_percent=next_argument(&mut args,"minimum smaller-size percent")?
+                            .to_string_lossy().parse().map_err(|_|invalid("savings must be numeric"))?;
+                    }
+                    Some("--vision-suite")=>options.vision_suite=Some(PathBuf::from(next_argument(&mut args,"vision suite")?)),
+                    Some("--mmproj")=>options.mmproj=Some(PathBuf::from(next_argument(&mut args,"mmproj")?)),
+                    Some("--ppl-corpus")=>options.ppl_corpus=Some(PathBuf::from(next_argument(&mut args,"held-out text corpus")?)),
+                    Some("--ppl-tool")=>options.ppl_tool=PathBuf::from(next_argument(&mut args,"llama-perplexity tool")?),
+                    Some("--ppl-context")=>{
+                        options.ppl_context=next_argument(&mut args,"perplexity context")?.to_string_lossy()
+                            .parse().map_err(|_|invalid("PPL context must be integer"))?;
+                    }
+                    Some("--max-ppl-regression-pct")=>{
+                        options.max_ppl_regression_pct=next_argument(&mut args,"PPL regression limit")?
+                            .to_string_lossy().parse().map_err(|_|invalid("PPL regression must be numeric"))?;
+                    }
+                    Some("--json")=>json=true,
+                    Some("--confirm")=>confirmed=true,
+                    _=>return Err(invalid(format!("unknown comparison option: {}",option.to_string_lossy())))
+                }
+            }
+            if confirmed&&!execute{return Err(invalid("--confirm only works with quant-compare-run"));}
+            let plan=ojon_backend::prepare_existing_quant_comparison(
+                &baseline,&candidates,&suite,&report,options)?;
+            if execute{
+                if !confirmed{return Err(invalid("quant-compare-run requires --confirm"));}
+                let result=ojon_backend::run_existing_quant_comparison(&plan,|msg|eprintln!("{msg}"))?;
+                if json{println!("{result}");}
+                else{
+                    println!("comparison_report: {}",report.display());
+                    println!("smallest_provisional_candidate: {}",result["provisional_smallest_candidate"]);
+                    println!("global_quality_loss_proven_absent: NO");
+                }
+            }else if json{println!("{}",plan.as_json());}
+            else{println!("{}",plan.as_json());}
         }
         Some("quant-parity-plan") | Some("quant-parity-run") => {
             let execute=cmd=="quant-parity-run";
