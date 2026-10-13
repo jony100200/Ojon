@@ -72,7 +72,7 @@ pub fn prepare_existing_quant_comparison(
         }
         let c=inspect_gguf(&path)?;
         if c.tensor_count!=b.tensor_count||c.split_count.unwrap_or(1)>1||
-            c.architecture.as_deref()!=Some(&b_arch)||c.file_type.is_none()||
+            c.architecture.as_deref()!=Some(b_arch.as_str())||c.file_type.is_none()||
             matches!(c.file_type,Some(0|1|32)){
             return Err(invalid(format!("candidate {name} is not a matching compressed GGUF")));
         }
@@ -151,7 +151,7 @@ pub fn run_existing_quant_comparison(
         // deterministic answers. Never overwrite preexisting files.
         let evidence=plan.report.with_file_name(format!(
             "{}-candidate-{idx}-evidence.json",
-            plan.report.file_stem().unwrap_or_default().to_string_lossy()));
+            plan.report.file_stem().and_then(|s|s.to_str()).unwrap_or("parity")));
         let test=(||{
             let v=vec![(label.clone(),path.clone())];
             let prep=prepare_eval(&plan.suite,&plan.baseline,&v,&plan.options.eval_tool,
