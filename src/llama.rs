@@ -93,6 +93,7 @@ pub struct QuantizePlan {
     pub precision: Precision,
     pub threads: usize,
     pub imatrix: Option<PathBuf>,
+    pub tensor_type_file: Option<PathBuf>,
     pub source_info: GgufSummary,
 }
 #[derive(Debug)]
@@ -144,6 +145,7 @@ pub fn prepare_gguf(
         precision,
         threads,
         imatrix: None,
+        tensor_type_file: None,
         source_info,
     })
 }
@@ -161,6 +163,16 @@ impl QuantizePlan {
     /// Optional importance matrix computed separately with the public
     /// llama-imatrix tool and representative calibration data. Never claims
     /// guaranteed quality; actual task evaluation remains mandatory.
+    /// Apply explicit tensor-level bit assignments supported by llama-quantize.
+    /// Must be a preexisting nonempty text file produced by a trusted planner.
+    pub fn with_tensor_type_file(mut self, path: &Path) -> io::Result<Self> {
+        let resolved = path.canonicalize()?;
+        if !resolved.is_file() || !(1..=1024*1024).contains(&resolved.metadata()?.len()) {
+            return Err(bad("tensor-type file must be 1 byte..1 MiB"));
+        }
+        self.tensor_type_file = Some(resolved);
+        Ok(self)
+    }
     pub fn with_imatrix(mut self, path: &Path) -> io::Result<Self> {
         let real = path.canonicalize()?;
         if !real.is_file() || real.metadata()?.len()==0 {
@@ -217,6 +229,9 @@ where F: FnMut(&str) {
     if let Some(matrix) = &plan.imatrix {
         cmd.arg("--imatrix").arg(matrix);
     }
+    if let Some(overrides) = &plan.tensor_type_file {
+        cmd.arg("--tensor-type-file").arg(overrides);
+    }
     cmd.arg(&plan.source)
         .arg(&stage_file)
         .arg(plan.precision.as_str())
@@ -258,6 +273,7 @@ fn write_receipt(plan: &QuantizePlan, info: &GgufSummary) -> io::Result<PathBuf>
     writeln!(file, "Ojon GGUF conversion receipt v1")?;
     writeln!(file, "created_utc_unix={timestamp}")?;
     writeln!(file, "adapter=llama.cpp-quantize")?;
+    writeln!(file, "tensor_type_file={}", plan.tensor_type_file.as_ref().map(|p|p.display().to_string()).unwrap_or_else(||"none".into()))?;
     writeln!(file, "tool={}", plan.executable.display())?;
     writeln!(file, "source={}", plan.source.display())?;
     writeln!(file, "source_bytes={}", plan.source_info.file_bytes)?;
