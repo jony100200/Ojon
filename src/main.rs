@@ -14,6 +14,7 @@ use ojon_backend::{
     resource_plan, ResourceMode, prepare_bench, run_bench, compare_bench_files,
     prepare_exl3, run_exl3, prepare_eval, run_eval, prepare_adaptive, run_adaptive,
     extract_sensitivity_from_imatrix,
+    prepare_model_abliteration, run_model_abliteration,
 };
 use std::env;
 use std::ffi::OsString;
@@ -37,6 +38,8 @@ Commands:
   ojon train-plan <config.yaml> [--tool <llamafactory-cli>] [--json]
   ojon train-run  <config.yaml> [--tool <llamafactory-cli>] --confirm
   ojon recommend <quality-evidence.json> [--json]  Smallest verified model within tolerance
+  ojon abliterate-model-plan <original-HF-folder> <direction-recipe.json> <new-model-folder> [--json]
+  ojon abliterate-model-run <original-HF-folder> <direction-recipe.json> <new-model-folder> --confirm [--json]
   ojon abliterate-plan <original-shard.safetensors> <direction-recipe.json> <new-shard.safetensors> [--json]
   ojon abliterate-run <original-shard.safetensors> <direction-recipe.json> <new-shard.safetensors> --confirm [--json]
   ojon sensitivity-extract <original.gguf> <calibration.imatrix> <new-tensor-sensitivity.json> --confirm
@@ -181,6 +184,41 @@ fn run() -> io::Result<()> {
     let mut args = env::args_os().skip(1);
     let cmd = args.next().unwrap_or_else(|| OsString::from("--help"));
     match cmd.to_str() {
+        Some("abliterate-model-plan") | Some("abliterate-model-run") => {
+            let execute = cmd == "abliterate-model-run";
+            let source = PathBuf::from(next_argument(&mut args, "original Hugging Face model folder")?);
+            let recipe = PathBuf::from(next_argument(&mut args, "direction recipe JSON")?);
+            let output = PathBuf::from(next_argument(&mut args, "new model output folder")?);
+            let (mut confirmed, mut json) = (false, false);
+            while let Some(option) = args.next() {
+                match option.to_str() {
+                    Some("--confirm") => confirmed = true,
+                    Some("--json") => json = true,
+                    _ => return Err(invalid(format!("unknown option: {}",option.to_string_lossy()))),
+                }
+            }
+            let plan = prepare_model_abliteration(&source,&recipe,&output)?;
+            if execute {
+                if !confirmed {
+                    return Err(invalid("abliterate-model-run writes a new checkpoint and requires --confirm"));
+                }
+                let result = run_model_abliteration(&plan, |msg| eprintln!("{msg}"))?;
+                if json { println!("{}",result.as_json()); }
+                else {
+                    println!("model_folder: {}",result.output.display());
+                    println!("model_files: {}",result.files);
+                    println!("edited_weight_tensors: {}",result.edited_tensors);
+                    println!("edited_weight_shards: {}",result.edited_shards);
+                    println!("original_model: PRESERVED");
+                    println!("load_test: NOT_RUN");
+                    println!("refusal_rate: NOT_EVALUATED");
+                    println!("vision_qa: NOT_EVALUATED");
+                    println!("quantization: NOT_RUN");
+                }
+            } else {
+                println!("{}",plan.as_json());
+            }
+        }
         Some("abliterate-plan") | Some("abliterate-run") => {
             let execute = cmd == "abliterate-run";
             let source = PathBuf::from(next_argument(&mut args, "original safetensors shard")?);
