@@ -347,8 +347,11 @@ mod tests {
         let s2="model-00002-of-00002.safetensors";
         shard(&src.join(s1),a,&[2.0,0.0,0.0,2.0]);
         shard(&src.join(s2),b,&[3.0,0.0,0.0,3.0]);
+        let mut weight_map=serde_json::Map::new();
+        weight_map.insert(a.to_owned(),json!(s1));
+        weight_map.insert(b.to_owned(),json!(s2));
         fs::write(src.join("model.safetensors.index.json"),
-            serde_json::to_vec(&json!({"metadata":{"total_size":32},"weight_map":{a:s1,b:s2}})).unwrap()).unwrap();
+            serde_json::to_vec(&json!({"metadata":{"total_size":32},"weight_map":weight_map})).unwrap()).unwrap();
         let recipe=root.join("directions.json");
         fs::write(&recipe,serde_json::to_vec(&json!({
             "schema":"ojon.abliteration.v1","preserve_row_norms":false,
