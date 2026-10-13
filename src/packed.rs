@@ -182,7 +182,7 @@ fn f32_f16(v:f32)->u16{
     }
     sign|((e as u16)<<10)|((mant>>13) as u16)
 }
-fn decode_float(buf:&[u8],dtype:&str)->io::Result<f32>{
+pub(crate) fn decode_float(buf:&[u8],dtype:&str)->io::Result<f32>{
     let v=match dtype{
         "F32"=>f32::from_le_bytes(buf.try_into().map_err(|_|bad("invalid f32"))?),
         "F16"=>f16_f32(u16::from_le_bytes(buf.try_into().map_err(|_|bad("invalid f16"))?)),
@@ -192,7 +192,7 @@ fn decode_float(buf:&[u8],dtype:&str)->io::Result<f32>{
     if !v.is_finite(){return Err(bad("nonfinite input weight cannot be quantized safely"));}
     Ok(v)
 }
-fn encode_float(v:f32,dtype:&str)->io::Result<Vec<u8>>{
+pub(crate) fn encode_float(v:f32,dtype:&str)->io::Result<Vec<u8>>{
     Ok(match dtype{
         "F32"=>v.to_le_bytes().to_vec(),
         "F16"=>f32_f16(v).to_le_bytes().to_vec(),
