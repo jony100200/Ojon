@@ -209,7 +209,7 @@ fn run() -> io::Result<()> {
                     println!("artifact: single safetensors shard, not a complete HF checkpoint");
                 }
             } else if json { println!("{}", plan.as_json()); }
-            else { println!("{}", serde_json::to_string_pretty(&plan.as_json())?); }
+            else { println!("{}", plan.as_json()); }
         }
         Some("bench-plan") | Some("bench-run") => {
             let execute=cmd=="bench-run";
