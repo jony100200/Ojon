@@ -374,12 +374,11 @@ mod tests {
     fn fixture(dir: &Path, dtype: &str, matrix: &[f32], other: &[u8]) -> PathBuf {
         let w = weight_width(dtype).unwrap();
         let name = "model.layers.0.self_attn.o_proj.weight";
-        let h = json!({
-            name: {"dtype":dtype,"shape":[2,2],"data_offsets":[0,4*w]},
-            "vision_tower.weight": {"dtype":"U8","shape":[other.len()],"data_offsets":[4*w,4*w+other.len()]},
-            "__metadata__":{"test":"preserve"}
-        });
-        let header = serde_json::to_vec(&h).unwrap();
+        let mut h = serde_json::Map::new();
+        h.insert(name.to_owned(), json!({"dtype":dtype,"shape":[2,2],"data_offsets":[0,4*w]}));
+        h.insert("vision_tower.weight".into(), json!({"dtype":"U8","shape":[other.len()],"data_offsets":[4*w,4*w+other.len()]}));
+        h.insert("__metadata__".into(), json!({"test":"preserve"}));
+        let header = serde_json::to_vec(&Value::Object(h)).unwrap();
         let path = dir.join("model.safetensors");
         let mut f = File::create(&path).unwrap();
         f.write_all(&(header.len() as u64).to_le_bytes()).unwrap();
