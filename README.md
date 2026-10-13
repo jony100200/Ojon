@@ -38,6 +38,42 @@ cargo run --release -- backends
 cargo run --release --features gui --bin ojon-gui
 ```
 
+
+### Keep Rust builds and executables small
+
+Ojon defaults to line-only debug information for its own Rust code and no
+dependency debug symbols. Normal `--release` builds remain speed-optimized, but
+use thin link-time optimization and symbol stripping to reduce executable size.
+The CLI still has no GUI/tensor-framework dependency unless explicitly enabled.
+
+```powershell
+# Smallest distributable CLI (potentially slower than normal --release):
+cargo build --profile release-small --bin ojon
+
+# Smallest GUI build, only when actually packaging the GUI:
+cargo build --profile release-small --features gui --bin ojon-gui
+
+# When full debugger information is actually required:
+cargo build --profile debugging
+```
+
+Cargo's `target/` directory is a **rebuildable cache**, not Ojon's model storage.
+On Windows, you can move build outputs to another disk:
+
+```powershell
+$env:CARGO_TARGET_DIR = "D:\\RustBuild\\Ojon"
+cargo build --release --bin ojon
+```
+
+To **reclaim existing** build space in the repository (which a profile change
+does not automatically delete), run `cargo clean --target-dir .\\target` from
+the Ojon root, after making sure no Cargo job is running. This deletes *only*
+the Rust build cache under that target directory and will require recompilation.
+For an additional disk-versus-rebuild-speed trade-off, set
+`$env:CARGO_INCREMENTAL = "0"` for a build session. Avoid forcing this for
+everyone: incremental builds can make rapid Rust development substantially faster.
+
+
 For GGUF conversion, install or build public [llama.cpp](https://github.com/ggml-org/llama.cpp) independently. If it isn't found, configure its executable path explicitly. For Hugging Face checkpoint-folder conversion, install the public `convert_hf_to_gguf.py` dependencies separately. Ojon doesn't bundle Python environments, giant backend packages, model weights, or GPU drivers.
 
 ### Convert an existing GGUF model
