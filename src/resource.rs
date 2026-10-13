@@ -4,6 +4,7 @@
 //! only when the returned telemetry is valid, otherwise UNKNOWN.
 use crate::probe::probe_model;
 use serde_json::{json, Value};
+#[cfg(target_os = "linux")]
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::Path;
