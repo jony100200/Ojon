@@ -79,6 +79,73 @@ input/output samples. Fully unattended Heretic-style capture/search
 requires adding an inference-backend hook or compatible native library.
 This is not a need to install Heretic at Ojon runtime.
 
+### Quantization target: smaller than your CURRENT Q4_K_M, no measured regression
+
+**Quantization takes priority over editing.** The success reference is the
+actual model GGUF you already run (for example, a Q4_K_M), not a theoretical
+F16 score. Ojon's `quant-parity-*` workflow quantizes a separate high-precision
+GGUF and compares the candidate on the **same** deterministic coding,
+reasoning and tool-call suite, with optional vision image tasks and PPL.
+
+**Important:** Do **not** use an existing Q4_K_M as the quantization input.
+Requantizing low-precision weights typically compounds error. The original
+F16/BF16/F32 GGUF is needed as source; the existing Q4_K_M is the reference.
+If you only have the Q4 file, retain it while preparing or downloading a
+matching original checkpoint. Ojon checks GGUF architecture and full
+tensor-name/shape agreement; this does not cryptographically verify that
+both files came from the same model revision.
+
+```powershell
+# Plan without loading model weights or using a GPU:
+ojon quant-parity-plan 'D:\Models\original-F16.gguf' 'D:\Models\my-Q4_K_M.gguf' 'D:\Bench\coding-suite.json' 'D:\Bench\candidates' --precisions IQ4_XS,IQ3_M,Q3_K_M --max-buffer-mib 512 --gpu-layers 0 --json
+
+# Later: compute candidates, run the same tasks against reference and candidates:
+ojon quant-parity-run 'D:\Models\original-F16.gguf' 'D:\Models\my-Q4_K_M.gguf' 'D:\Bench\coding-suite.json' 'D:\Bench\candidates' --precisions IQ4_XS,IQ3_M,Q3_K_M --imatrix 'D:\Bench\calibration.imatrix.gguf' --max-buffer-mib 512 --gpu-layers 0 --confirm
+
+# For VLMs, pass BOTH a matching vision-projector GGUF and vision suite:
+ojon quant-parity-run 'D:\Models\original-F16.gguf' 'D:\Models\my-Q4_K_M.gguf' 'D:\Bench\coding-suite.json' 'D:\Bench\candidates' --vision-suite 'D:\Bench\vision-suite.json' --mmproj 'D:\Models\mmproj.gguf' --max-buffer-mib 512 --confirm
+```
+
+Set `--ppl-corpus D:\Bench\heldout.txt` (at least 100 bytes),
+`--ppl-tool llama-perplexity` and optional `--max-ppl-regression-pct 0`
+to also reject higher perplexity on the exact same text corpus.
+`--max-loss-points 0` is the default for every text category and vision
+accuracy; `--min-saving-percent 5` requires meaningful size reduction.
+Results mark this as **no observed regression on the chosen suite**, never
+mathematically lossless. Candidates that fail the size gate are skipped
+without using the GPU for quality scoring.
+
+The text suite uses `ojon.task_suite.v1`: 6–256 tasks, at least two each
+from `coding`, `reasoning` and `tool_call`. Exact/JSON-answer matching
+does **not** execute generated code and is not a full agentic benchmark.
+Optional vision suite example (real image files must already exist):
+
+```json
+{
+  "schema": "ojon.vision_suite.v1",
+  "tasks": [
+    {"id":"ocr-1","image":"images/receipt-1.png","prompt":"Return only the receipt total.","expected":"$15.98","match":"exact"},
+    {"id":"screen-1","image":"images/screen-1.png","prompt":"Which button is highlighted?","expected":"Settings","match":"contains"},
+    {"id":"chart-1","image":"images/chart-1.png","prompt":"Give only the label of the tallest bar.","expected":"June","match":"exact"}
+  ]
+}
+```
+
+**Large-model memory finding:** Recent upstream `llama-quantize` on
+Windows/Linux memory-maps original GGUF and processes tensor rows in slabs.
+Its `--max-buffer-size MiB` accepts a per-tensor working-buffer cap;
+Ojon uses an opt-in setting in its quantizer and defaults to 512 MiB
+for the parity search. This limit is **not** total process RAM usage, and
+it requires a llama.cpp build supporting that flag. On-disk source and
+intermediate GGUF files remain large; HF → GGUF conversion has its own
+memory/disk demands. Check actual resources before a 27B/35B run.
+
+Comparison priorities: **IQ4_XS** (gentler), **IQ3_M** and **Q3_K_M**;
+importance-matrix calibration can improve lower-bit results, but never
+guarantees parity. We should only accept a smaller candidate after
+demonstrating matching visual QA, coding/agent tasks and throughput on
+the real hardware. This is separate from refusal-reduction.
+
 ### Quantize first, then edit with a small native Rust LoRA (experimental)
 
 Ojon now supports a **compressed-first** workflow that does not load or rewrite
