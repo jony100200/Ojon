@@ -178,7 +178,7 @@ pub fn prepare_adaptive(
     let mut bits=Vec::new();
     for &b in targets{
         allocate_bits(&parsed,b)?;
-        if bits.iter().any(|n:f64|(*n-b).abs()<0.00001){return Err(invalid("duplicate adaptive bitrate target"));}
+        if bits.iter().any(|n:&f64|(*n-b).abs()<0.00001){return Err(invalid("duplicate adaptive bitrate target"));}
         bits.push(b);
     }
     bits.sort_by(|a,b|a.total_cmp(b));
