@@ -52,12 +52,12 @@ pub fn parse_eval_suite(path:&Path)->io::Result<EvalSuite> {
 fn answer_matches(task:&EvalTask,answer:&str)->bool {
     let text=answer.trim();
     if task.matching=="json" {
-        let inner=if text.starts_with("&#96;&#96;&#96;") {text} else {text};
-        // Parse whole response only; substring matches are forbidden.
-        let candidate=if inner.starts_with(&[char::from(96);3].iter().collect::<String>())
-            && inner.ends_with(&[char::from(96);3].iter().collect::<String>()) {
-            inner.split_once('\n').and_then(|(_,s)|s.rsplit_once(&[char::from(96);3].iter().collect::<String>()).map(|v|v.0)).unwrap_or("")
-        }else{inner};
+        const FENCE: &str = "\u{60}\u{60}\u{60}";
+        let candidate = if text.starts_with(FENCE) && text.ends_with(FENCE) {
+            text.split_once('\n')
+                .and_then(|(_, s)| s.rsplit_once(FENCE).map(|v| v.0))
+                .unwrap_or("")
+        } else { text };
         match (serde_json::from_str::<Value>(candidate.trim()),
                serde_json::from_str::<Value>(&task.expected)) {
             (Ok(a),Ok(b))=>a==b,_=>false,
