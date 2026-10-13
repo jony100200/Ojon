@@ -40,6 +40,50 @@ cargo run --release --features gui --bin ojon-gui
 
 
 
+### Quantize first, then edit with a small native Rust LoRA (experimental)
+
+Ojon now supports a **compressed-first** workflow that does not load or rewrite
+the original BF16 model when producing the final adapter. Start with an
+**already quantized, single-file GGUF**, such as a Q4_K_M model downloaded
+from Hugging Face or produced by a separate supported quantization run.
+The quantizer itself can still need substantial system RAM: this command
+**does not** create an enormous quantized GGUF from raw 70 GB BF16 checkpoints.
+
+1. Generate an `ojon.abliteration.v1` recipe with actual **low-rank**
+   `lora.a` (rank x input features) and `lora.b` (output features x rank)
+   matrices, e.g. from `ojon ara-fit`. Set `preserve_row_norms` to `false`:
+   separate LoRA adapters cannot reproduce the post-merge row-renormalization
+   performed by the full-precision editor. Direction-vector-only recipes
+   are rejected, because computing their projection requires base weights.
+2. Run the low-memory adapter exporter:
+
+```powershell
+ojon compressed-edit-plan 'C:\Models\Qwen3VL-Q4_K_M.gguf' 'lowrank.json' 'C:\Models\Qwen3VL-edited' --mmproj 'C:\Models\mmproj-Q8.gguf' --json
+ojon compressed-edit-run 'C:\Models\Qwen3VL-Q4_K_M.gguf' 'lowrank.json' 'C:\Models\Qwen3VL-edited' --mmproj 'C:\Models\mmproj-Q8.gguf' --confirm
+```
+
+3. The output contains **only** `adapter.gguf` and
+   `ojon-compressed-bundle.json`. It references the original compressed
+   GGUF and optional mmproj by absolute path; neither model file is copied.
+   The adapter is a native GGUF v3 LoRA with `general.type=adapter`,
+   `adapter.type=lora`, and matching GGUF matrix names and shapes.
+
+```powershell
+llama-cli -m 'C:\Models\Qwen3VL-Q4_K_M.gguf' --lora 'C:\Models\Qwen3VL-edited\adapter.gguf' --mmproj 'C:\Models\mmproj-Q8.gguf' --image 'C:\Images\test.jpg' -p 'Describe this picture.'
+```
+
+**Compatibility and limits:** Native export currently maps only
+`*.self_attn.o_proj.weight` and `*.mlp.down_proj.weight` names to their
+`blk.N.attn_output.weight` and `blk.N.ffn_down.weight` GGUF counterparts.
+It validates real tensor dimensions and requires equal adapter rank.
+Runtime loading, refusal effectiveness, VLM understanding, and model-family
+coverage remain **unverified until locally tested**. Real ARA fitting still
+needs the corresponding model's per-module good/bad input/output activations;
+the exporter alone does not collect them or magically reduce refusals.
+For a model larger than available RAM, use an existing quantized GGUF or
+a separately validated out-of-core quantizer; Ojon's current llama.cpp
+conversion/quantization pipeline is not guaranteed to be streaming.
+
 ### Native editing and VLM build pipeline (experimental)
 
 The native Rust editor can **now** modify full safetensors Hugging Face
