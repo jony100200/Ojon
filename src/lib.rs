@@ -64,6 +64,8 @@ pub use task_eval::{parse_eval_suite, prepare_eval, run_eval, EvalPlan, EvalSuit
 pub mod adaptive;
 pub mod abliteration;
 pub mod model_edit;
+pub mod activation_trace;
+pub use activation_trace::{compile_activation_recipe, save_activation_recipe, ActivationRecipe};
 pub use model_edit::{prepare_model_abliteration, run_model_abliteration, ModelAblationPlan, ModelAblationResult};
 pub use abliteration::{direction_from_activations, prepare_abliteration, run_abliteration, AblationPlan, AblationResult};
 pub use adaptive::{allocate_bits, parse_tensor_sensitivity, extract_sensitivity_from_imatrix, prepare_adaptive, run_adaptive, AdaptivePlan, TensorScore};
