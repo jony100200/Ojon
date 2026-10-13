@@ -40,6 +40,8 @@ Commands:
   ojon recommend <quality-evidence.json> [--json]  Smallest verified model within tolerance
   ojon ara-fit <module-io-calibration.json> <new-lowrank-edit-recipe.json> --confirm [--json]
   ojon method-select <measured-quality-scores.json> [--json]
+  ojon compressed-edit-plan <already-quantized-base.gguf> <lowrank-recipe.json> <new-adapter-folder> [--mmproj vision.gguf] [--json]
+  ojon compressed-edit-run <already-quantized-base.gguf> <lowrank-recipe.json> <new-adapter-folder> [--mmproj vision.gguf] --confirm [--json]
   ojon model-build-plan <original-HF-dir> <directions.json> <new-output-folder> --converter <convert_hf_to_gguf.py> [--python python] [--quantizer llama-quantize] [--precision Q4_K_M] [--threads N] [--json]
   ojon model-build-run <original-HF-dir> <directions.json> <new-output-folder> [options] --confirm
   ojon activation-compile <trace.jsonl> <new-directions.json> [--strength 0.7] [--no-preserve] [--json] --confirm
@@ -227,6 +229,41 @@ fn run() -> io::Result<()> {
             let result=ojon_backend::choose_edit_method_file(&path)?;
             if json{println!("{}",result.as_json());}
             else{println!("{}",result.as_json());}
+        }
+        Some("compressed-edit-plan") | Some("compressed-edit-run") => {
+            let execute=cmd=="compressed-edit-run";
+            let base=PathBuf::from(next_argument(&mut args,"already quantized GGUF base")?);
+            let recipe=PathBuf::from(next_argument(&mut args,"LoRA edit recipe JSON")?);
+            let output=PathBuf::from(next_argument(&mut args,"new adapter bundle directory")?);
+            let mut mmproj=None::<PathBuf>;
+            let mut confirmed=false;
+            let mut json=false;
+            while let Some(option)=args.next(){
+                match option.to_str(){
+                    Some("--mmproj")=>mmproj=Some(PathBuf::from(next_argument(&mut args,"multimodal mmproj GGUF")?)),
+                    Some("--confirm")=>confirmed=true,
+                    Some("--json")=>json=true,
+                    _=>return Err(invalid(format!("unknown compressed-edit option: {}",option.to_string_lossy())))
+                }
+            }
+            if confirmed && !execute {return Err(invalid("--confirm is only valid on compressed-edit-run"));}
+            let plan=ojon_backend::prepare_compressed_edit(&base,&recipe,&output,mmproj.as_deref())?;
+            if execute {
+                if !confirmed{return Err(invalid("compressed-edit-run requires --confirm"));}
+                let result=ojon_backend::run_compressed_edit(&plan,|line|eprintln!("{line}"))?;
+                if json{println!("{}",result.as_json());}
+                else{
+                    println!("adapter_gguf: {}",result.output.join("adapter.gguf").display());
+                    println!("bundle_manifest: {}",result.output.join("ojon-compressed-bundle.json").display());
+                    println!("adapter_bytes: {}",result.adapter_bytes);
+                    println!("original_model: NOT_COPIED_OR_MODIFIED");
+                    println!("inference_compatibility: NOT_TESTED");
+                    println!("refusal_rate: NOT_EVALUATED");
+                    println!("vision_qa: NOT_EVALUATED");
+                    println!("runtime: llama-cli -m <base.gguf> --lora <adapter.gguf> [--mmproj <vision.gguf>]");
+                }
+            }else if json{println!("{}",plan.as_json());}
+            else{println!("{}",plan.as_json());}
         }
         Some("model-build-plan") | Some("model-build-run") => {
             let execute=cmd=="model-build-run";
