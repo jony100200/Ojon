@@ -34,6 +34,54 @@ pub struct Candidate {
     pub runtime_load_verified: bool,
     pub evaluation_verified: bool,
     pub metrics: Value,
+    /// Explicitly measured runtime evidence; null does not establish hardware fit.
+    pub runtime_measurements: Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct HardwareRequirements {
+    pub backend: Option<String>,
+    pub max_peak_ram_bytes: Option<u64>,
+    pub max_peak_vram_bytes: Option<u64>,
+    pub min_decode_tps: Option<f64>,
+    pub min_prefill_tps: Option<f64>,
+}
+
+fn parse_hardware_requirements(value: &Value) -> io::Result<HardwareRequirements> {
+    let object = value.as_object().ok_or_else(||bad("hardware_requirements must be an object"))?;
+    if object.is_empty() { return Err(bad("hardware_requirements cannot be empty")); }
+    for key in object.keys() {
+        if !matches!(key.as_str(),
+            "backend" | "max_peak_ram_bytes" | "max_peak_vram_bytes"
+            | "min_decode_tps" | "min_prefill_tps")
+        { return Err(bad(format!("unknown hardware requirement: {key}"))); }
+    }
+    let backend = match object.get("backend") {
+        None => None,
+        Some(v) => Some(v.as_str().filter(|s|!s.trim().is_empty())
+            .ok_or_else(||bad("backend must be a nonempty string"))?.to_owned()),
+    };
+    fn memory(value:&Value, key:&str) -> io::Result<Option<u64>> {
+        match value.get(key) {
+            None => Ok(None),
+            Some(v) => Ok(Some(v.as_u64().filter(|n|*n>0)
+                .ok_or_else(||bad(format!("{key} must be a positive integer")))?)),
+        }
+    }
+    fn speed(value:&Value, key:&str) -> io::Result<Option<f64>> {
+        match value.get(key) {
+            None => Ok(None),
+            Some(v) => Ok(Some(v.as_f64().filter(|n|n.is_finite() && *n>0.0)
+                .ok_or_else(||bad(format!("{key} must be a positive finite number")))?)),
+        }
+    }
+    Ok(HardwareRequirements {
+        backend,
+        max_peak_ram_bytes: memory(value,"max_peak_ram_bytes")?,
+        max_peak_vram_bytes: memory(value,"max_peak_vram_bytes")?,
+        min_decode_tps: speed(value,"min_decode_tps")?,
+        min_prefill_tps: speed(value,"min_prefill_tps")?,
+    })
 }
 #[derive(Clone, Debug)]
 pub struct QualityReport {
@@ -41,6 +89,8 @@ pub struct QualityReport {
     pub baseline: Value,
     pub requirements: Vec<Requirement>,
     pub candidates: Vec<Candidate>,
+    /// Optional strict local hardware limits; absent retains v1 behavior.
+    pub hardware_requirements: Option<HardwareRequirements>,
 }
 fn parse_score(metric: &Value, key: &str) -> io::Result<f64> {
     let v=metric.get(key).and_then(Value::as_f64)
@@ -84,6 +134,8 @@ pub fn parse_quality_report(path: &Path) -> io::Result<QualityReport> {
         }
         requirements.push(Requirement {name, direction, max_relative_degradation_pct:pct});
     }
+    let hardware_requirements=raw.get("hardware_requirements")
+        .map(parse_hardware_requirements).transpose()?;
     let rows=raw.get("candidates").and_then(Value::as_array)
         .ok_or_else(||bad("candidates array missing"))?;
     if rows.is_empty() || rows.len()>256 { return Err(bad("require 1..=256 candidates")); }
@@ -96,9 +148,59 @@ pub fn parse_quality_report(path: &Path) -> io::Result<QualityReport> {
         let verified=row.get("evaluation_verified").and_then(Value::as_bool).unwrap_or(false);
         let runtime=row.get("runtime_load_verified").and_then(Value::as_bool).unwrap_or(false);
         let metrics=row.get("metrics").cloned().unwrap_or(Value::Null);
-        candidates.push(Candidate {label,bytes,runtime_load_verified:runtime,evaluation_verified:verified,metrics});
+        let runtime_measurements=row.get("runtime_measurements").cloned().unwrap_or(Value::Null);
+        if !runtime_measurements.is_null() && !runtime_measurements.is_object() {
+            return Err(bad("runtime_measurements must be an object when supplied"));
+        }
+        candidates.push(Candidate {label,bytes,runtime_load_verified:runtime,
+            evaluation_verified:verified,metrics,runtime_measurements});
     }
-    Ok(QualityReport { evaluation_suite:suite,baseline,requirements,candidates })
+    Ok(QualityReport { evaluation_suite:suite,baseline,requirements,candidates,hardware_requirements })
+}
+
+/// Evaluate separately measured hardware requirements. Unknown readings fail closed.
+fn hardware_checks(
+    candidate: &Candidate, requirements: &HardwareRequirements, reasons: &mut Vec<String>
+) -> Vec<Value> {
+    let runtime=&candidate.runtime_measurements;
+    if runtime.get("measured").and_then(Value::as_bool)!=Some(true) {
+        reasons.push("runtime measurements not verified".into());
+    }
+    let mut checks=Vec::new();
+    if let Some(expected)=requirements.backend.as_ref() {
+        let actual=runtime.get("backend").and_then(Value::as_str);
+        let passes=actual==Some(expected.as_str());
+        if !passes { reasons.push(format!("runtime backend must be {expected}")); }
+        checks.push(json!({"name":"backend","required":expected,"measured":actual,"passes":passes}));
+    }
+    fn check_memory(
+        runtime:&Value, key:&str, limit:Option<u64>, reasons:&mut Vec<String>,
+        checks:&mut Vec<Value>
+    ) {
+        if let Some(maximum)=limit {
+            let observed=runtime.get(key).and_then(Value::as_u64);
+            let passes=observed.is_some_and(|n|n<=maximum);
+            if !passes { reasons.push(format!("{key} missing or exceeds budget {maximum}")); }
+            checks.push(json!({"name":key,"max":maximum,"measured":observed,"passes":passes}));
+        }
+    }
+    fn check_speed(
+        runtime:&Value, key:&str, limit:Option<f64>, reasons:&mut Vec<String>,
+        checks:&mut Vec<Value>
+    ) {
+        if let Some(minimum)=limit {
+            let observed=runtime.get(key).and_then(Value::as_f64)
+                .filter(|v|v.is_finite() && *v>=0.0);
+            let passes=observed.is_some_and(|n|n>=minimum);
+            if !passes { reasons.push(format!("{key} missing or below minimum {minimum}")); }
+            checks.push(json!({"name":key,"min":minimum,"measured":observed,"passes":passes}));
+        }
+    }
+    check_memory(runtime,"peak_ram_bytes",requirements.max_peak_ram_bytes,reasons,&mut checks);
+    check_memory(runtime,"peak_vram_bytes",requirements.max_peak_vram_bytes,reasons,&mut checks);
+    check_speed(runtime,"decode_tps",requirements.min_decode_tps,reasons,&mut checks);
+    check_speed(runtime,"prefill_tps",requirements.min_prefill_tps,reasons,&mut checks);
+    checks
 }
 
 pub fn recommend(report: &QualityReport) -> Value {
@@ -126,15 +228,21 @@ pub fn recommend(report: &QualityReport) -> Value {
                 Err(_) => reasons.push(format!("missing measured metric {}",req.name)),
             }
         }
+        let runtime_comparisons=report.hardware_requirements.as_ref()
+            .map(|limits| hardware_checks(candidate,limits,&mut reasons)).unwrap_or_default();
         ranked.push(json!({"label":candidate.label,"bytes":candidate.bytes,
-            "eligible":reasons.is_empty(),"reasons":reasons,"comparisons":metrics}));
+            "eligible":reasons.is_empty(),"reasons":reasons,
+            "comparisons":metrics,"runtime_comparisons":runtime_comparisons}));
     }
     ranked.sort_by(|a,b|a["bytes"].as_u64().cmp(&b["bytes"].as_u64()));
     let best=ranked.iter().find(|v|v["eligible"].as_bool()==Some(true))
         .map(|v|v["label"].clone());
     json!({"schema":"ojon.quality_recommendation.v1",
         "evaluation_suite":report.evaluation_suite,
-        "selection_policy":"smallest_runtime_verified_candidate_meeting_all_supplied_quality_thresholds",
+        "selection_policy":if report.hardware_requirements.is_some() {
+            "smallest_runtime_verified_candidate_meeting_quality_and_hardware_requirements"
+        } else { "smallest_runtime_verified_candidate_meeting_all_supplied_quality_thresholds" },
+        "hardware_constraints_applied":report.hardware_requirements.is_some(),
         "recommendation":best,
         "candidates":ranked,
         "warning":"User-supplied evidence is not independently verified by Ojon; benchmark protocol, sample size, and comparability must be audited. No model was run to compute this ranking.",
@@ -143,30 +251,103 @@ pub fn recommend(report: &QualityReport) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn requirement() -> Requirement {
+        Requirement { name:"accuracy".into(), direction:Direction::Higher,
+            max_relative_degradation_pct:1.0 }
+    }
+    fn candidate(label:&str, bytes:u64, accuracy:f64) -> Candidate {
+        Candidate { label:label.into(), bytes, runtime_load_verified:true,
+            evaluation_verified:true, metrics:json!({"accuracy":accuracy}),
+            runtime_measurements:Value::Null }
+    }
+    fn report(candidates:Vec<Candidate>) -> QualityReport {
+        QualityReport { evaluation_suite:"held_out_code_and_tool_tests".into(),
+            baseline:json!({"accuracy":0.90}), requirements:vec![requirement()],
+            candidates, hardware_requirements:None }
+    }
+
     #[test]
     fn choose_smallest_verified_quality_preserving_variant() {
-        let report=QualityReport {
-            evaluation_suite:"fixed_task_suite".into(),
-            baseline:json!({"accuracy":0.90}),
-            requirements:vec![Requirement {name:"accuracy".into(),direction:Direction::Higher,max_relative_degradation_pct:1.0}],
-            candidates:vec![
-                Candidate {label:"Q3".into(),bytes:3,runtime_load_verified:true,evaluation_verified:true,metrics:json!({"accuracy":0.85})},
-                Candidate {label:"Q4".into(),bytes:4,runtime_load_verified:true,evaluation_verified:true,metrics:json!({"accuracy":0.895})},
-                Candidate {label:"Q5".into(),bytes:5,runtime_load_verified:true,evaluation_verified:true,metrics:json!({"accuracy":0.899})},
-                Candidate {label:"Q2_UNTESTED".into(),bytes:2,runtime_load_verified:false,evaluation_verified:false,metrics:json!({"accuracy":0.9})},
-            ],
-        };
-        let result=recommend(&report);
-        assert_eq!(result["recommendation"],"Q4");
+        let mut r=report(vec![
+            candidate("Q3",3,0.85), candidate("Q4",4,0.895),candidate("Q5",5,0.899),
+            candidate("Q2_UNTESTED",2,0.9)
+        ]);
+        r.candidates[3].runtime_load_verified=false;
+        r.candidates[3].evaluation_verified=false;
+        assert_eq!(recommend(&r)["recommendation"],"Q4");
+        assert_eq!(recommend(&r)["hardware_constraints_applied"],false);
     }
+
     #[test]
     fn reject_untested() {
-        let report=QualityReport {
-            evaluation_suite:"vision_ocr".into(),baseline:json!({"word_accuracy":0.94}),
-            requirements:vec![Requirement {name:"word_accuracy".into(),direction:Direction::Higher,max_relative_degradation_pct:0.5}],
-            candidates:vec![Candidate {label:"Q5".into(),bytes:8,runtime_load_verified:false,evaluation_verified:false,metrics:Value::Null}],
-        };
-        let result=recommend(&report);
-        assert!(result["recommendation"].is_null());
+        let mut r=report(vec![candidate("Q5",8,0.9)]);
+        r.candidates[0].runtime_load_verified=false;
+        r.candidates[0].evaluation_verified=false;
+        assert!(recommend(&r)["recommendation"].is_null());
+    }
+
+    #[test]
+    fn actual_hardware_fit_filters_smaller_quality_passing_models() {
+        let mut r=report(vec![
+            candidate("Q3-no-bench",3,0.9),
+            candidate("Q4-too-slow",4,0.898),
+            candidate("Q5-fits",5,0.899)
+        ]);
+        r.hardware_requirements=Some(HardwareRequirements {
+            backend:Some("intel-vulkan".into()),max_peak_ram_bytes:Some(30_000),
+            max_peak_vram_bytes:Some(20_000),min_decode_tps:Some(10.0),
+            min_prefill_tps:Some(100.0)
+        });
+        r.candidates[1].runtime_measurements=json!({"measured":true,"backend":"intel-vulkan",
+            "peak_ram_bytes":9000,"peak_vram_bytes":12000,"decode_tps":7.0,"prefill_tps":200.0});
+        r.candidates[2].runtime_measurements=json!({"measured":true,"backend":"intel-vulkan",
+            "peak_ram_bytes":8000,"peak_vram_bytes":15000,"decode_tps":14.0,"prefill_tps":125.0});
+        let result=recommend(&r);
+        assert_eq!(result["recommendation"],"Q5-fits");
+        assert_eq!(result["hardware_constraints_applied"],true);
+        assert_eq!(result["candidates"][0]["eligible"],false);
+        assert_eq!(result["candidates"][1]["eligible"],false);
+        assert_eq!(result["candidates"][2]["eligible"],true);
+    }
+
+    #[test]
+    fn incompatible_backend_and_excess_vram_fail_closed() {
+        let mut r=report(vec![candidate("Q4",4,0.9)]);
+        r.hardware_requirements=Some(HardwareRequirements {
+            backend:Some("intel-sycl".into()),max_peak_ram_bytes:None,
+            max_peak_vram_bytes:Some(16),min_decode_tps:None,min_prefill_tps:None
+        });
+        r.candidates[0].runtime_measurements=json!({"measured":true,"backend":"cuda",
+            "peak_vram_bytes":17});
+        assert!(recommend(&r)["recommendation"].is_null());
+    }
+
+    #[test]
+    fn parse_hardware_limit_rejects_unknown_fields_and_invalid_values() {
+        assert!(parse_hardware_requirements(&json!({"max_peak_vram":123})).is_err());
+        assert!(parse_hardware_requirements(&json!({"min_decode_tps":-1.0})).is_err());
+        assert!(parse_hardware_requirements(&json!({})).is_err());
+        assert!(parse_hardware_requirements(&json!({"max_peak_ram_bytes":100})).is_ok());
+    }
+
+    #[test]
+    fn parse_report_accepts_hardware_evidence_and_rejects_unmeasured_runtime() {
+        let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let path=std::env::temp_dir().join(format!("ojon-quality-hardware-{}-{now}.json",std::process::id()));
+        let payload=json!({"schema":"ojon.quality_evidence.v1",
+            "evaluation_suite":"held_out_code",
+            "baseline":{"metrics":{"accuracy":0.9}},
+            "requirements":[{"name":"accuracy","direction":"higher","max_relative_degradation_pct":1.0}],
+            "hardware_requirements":{"backend":"intel-vulkan","max_peak_vram_bytes":20000},
+            "candidates":[{"label":"Q4","bytes":3000,"runtime_load_verified":true,
+                "evaluation_verified":true,"metrics":{"accuracy":0.9},
+                "runtime_measurements":{"backend":"intel-vulkan","peak_vram_bytes":10000}}]
+        });
+        fs::write(&path,serde_json::to_vec(&payload).unwrap()).unwrap();
+        let result=parse_quality_report(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        assert!(recommend(&result)["recommendation"].is_null());
     }
 }
