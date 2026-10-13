@@ -149,6 +149,15 @@ fn safe_target(name: &str) -> bool {
 /// Plan a targeted projection. Exact tensor names only: never glob image
 /// tower/processor tensors and never silently edit unexpected architectures.
 pub fn prepare_abliteration(source: &Path, recipe: &Path, output: &Path) -> io::Result<AblationPlan> {
+    let json = read_bounded_json(recipe, RECIPE_MAX)?;
+    prepare_abliteration_with_recipe(source, &json, output)
+}
+
+/// Plan shard edits from a pre-validated in-memory recipe. This avoids
+/// temporary recipe files when editing a complete multi-shard HF checkpoint.
+pub(crate) fn prepare_abliteration_with_recipe(
+    source: &Path, json: &Value, output: &Path,
+) -> io::Result<AblationPlan> {
     let source = source.canonicalize()?;
     if !source.is_file() || source.extension().and_then(|s| s.to_str()) != Some("safetensors") {
         return Err(invalid("source must be an original .safetensors file"));
@@ -162,7 +171,6 @@ pub fn prepare_abliteration(source: &Path, recipe: &Path, output: &Path) -> io::
     if destination == source || destination.symlink_metadata().is_ok() {
         return Err(io::Error::new(ErrorKind::AlreadyExists, "output exists or equals source; refusing overwrite"));
     }
-    let json = read_bounded_json(recipe, RECIPE_MAX)?;
     if json.get("schema").and_then(Value::as_str) != Some("ojon.abliteration.v1") {
         return Err(invalid("expected ojon.abliteration.v1 recipe schema"));
     }
