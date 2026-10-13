@@ -62,6 +62,8 @@ pub mod task_eval;
 pub use task_eval::{parse_eval_suite, prepare_eval, run_eval, EvalPlan, EvalSuite};
 
 pub mod adaptive;
+pub mod quant_parity;
+pub use quant_parity::{prepare_quant_parity, run_quant_parity, QuantParityOptions, QuantParityPlan};
 pub mod abliteration;
 pub mod model_edit;
 pub mod activation_trace;
