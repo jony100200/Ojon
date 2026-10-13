@@ -31,6 +31,7 @@ struct VisionTask {
 }
 #[derive(Clone, Debug)]
 pub(crate) struct VisionSuite {tasks:Vec<VisionTask>}
+impl VisionSuite {pub(crate) fn count(&self)->usize{self.tasks.len()}}
 pub(crate) fn vision_suite(path:&Path)->io::Result<VisionSuite>{
     let path=path.canonicalize()?;
     let len=fs::metadata(&path)?.len();
