@@ -40,6 +40,8 @@ Commands:
   ojon recommend <quality-evidence.json> [--json]  Smallest verified model within tolerance
   ojon ara-fit <module-io-calibration.json> <new-lowrank-edit-recipe.json> --confirm [--json]
   ojon method-select <measured-quality-scores.json> [--json]
+  ojon adapter-smoke-plan <bundle-folder> <new-receipt.json> [--tool llama-cli] [--gpu-layers 0] [--device CUDA0|Vulkan0] [--image image.jpg] [--tokens 64] [--prompt text] [--json]
+  ojon adapter-smoke-run  <bundle-folder> <new-receipt.json> [same options] --confirm
   ojon compressed-ara-plan <already-quantized-base.gguf> <module-io-calibration.json> <new-adapter-folder> [--mmproj vision.gguf] [--json]
   ojon compressed-ara-run <already-quantized-base.gguf> <module-io-calibration.json> <new-adapter-folder> [--mmproj vision.gguf] --confirm [--json]
   ojon compressed-edit-plan <already-quantized-base.gguf> <lowrank-recipe.json> <new-adapter-folder> [--mmproj vision.gguf] [--json]
@@ -231,6 +233,58 @@ fn run() -> io::Result<()> {
             let result=ojon_backend::choose_edit_method_file(&path)?;
             if json{println!("{}",result.as_json());}
             else{println!("{}",result.as_json());}
+        }
+        Some("adapter-smoke-plan") | Some("adapter-smoke-run") => {
+            let execute=cmd=="adapter-smoke-run";
+            let bundle=PathBuf::from(next_argument(&mut args,"Ojon compressed adapter bundle folder")?);
+            let report=PathBuf::from(next_argument(&mut args,"new JSON receipt file")?);
+            let mut tool=PathBuf::from("llama-cli");
+            let mut gpu_layers=0i32; // GPU-free by default.
+            let mut device=None::<String>;
+            let mut image=None::<PathBuf>;
+            let mut prompt=None::<String>;
+            let mut tokens=64u32;
+            let(mut confirmed,mut json)=(false,false);
+            while let Some(option)=args.next(){
+                match option.to_str(){
+                    Some("--tool")=>tool=PathBuf::from(next_argument(&mut args,"llama-cli executable")?),
+                    Some("--gpu-layers")=>{
+                        gpu_layers=next_argument(&mut args,"GPU layers")?.to_string_lossy()
+                            .parse().map_err(|_|invalid("gpu layers must be an integer"))?;
+                    }
+                    Some("--device")=>device=Some(next_argument(&mut args,"device name")?
+                        .to_string_lossy().to_string()),
+                    Some("--image")=>image=Some(PathBuf::from(next_argument(&mut args,"image")?)),
+                    Some("--prompt")=>prompt=Some(next_argument(&mut args,"prompt")?
+                        .to_string_lossy().to_string()),
+                    Some("--tokens")=>{
+                        tokens=next_argument(&mut args,"token limit")?.to_string_lossy()
+                            .parse().map_err(|_|invalid("tokens must be a positive integer"))?;
+                    }
+                    Some("--confirm")=>confirmed=true,
+                    Some("--json")=>json=true,
+                    _=>return Err(invalid(format!("unknown adapter smoke option: {}",option.to_string_lossy())))
+                }
+            }
+            if confirmed&&!execute{
+                return Err(invalid("--confirm may only be used with adapter-smoke-run"));
+            }
+            let plan=ojon_backend::prepare_adapter_smoke(
+                &bundle,&report,&tool,gpu_layers,device.as_deref(),
+                image.as_deref(),prompt.as_deref(),tokens)?;
+            if execute{
+                if !confirmed{return Err(invalid("adapter-smoke-run requires --confirm"));}
+                let result=ojon_backend::run_adapter_smoke(&plan,|line|eprintln!("{line}"))?;
+                if json{println!("{}",result.as_json());}
+                else{
+                    println!("smoke_receipt: {}",result.report.display());
+                    println!("llama-cli process exited successfully");
+                    println!("model_compatibility: RUNTIME_PROCESS_SUCCESS");
+                    println!("refusal_rate: NOT_EVALUATED");
+                    println!("vision_quality: NOT_EVALUATED");
+                }
+            }else if json{println!("{}",plan.as_json());}
+            else{println!("{}",plan.as_json());}
         }
         Some("compressed-ara-plan") | Some("compressed-ara-run") => {
             let execute=cmd=="compressed-ara-run";
