@@ -40,6 +40,45 @@ cargo run --release --features gui --bin ojon-gui
 
 
 
+### Verify a compressed GGUF + LoRA bundle when your GPU is free
+
+No Heretic/PyTorch/Optuna installation is needed to **check an existing
+Ojon compressed adapter bundle**. The CPU-only `adapter-smoke-plan`
+validates model and adapter catalogs, architecture and file references
+without loading model weights. A real smoke test needs only a working
+`llama-cli` executable (built for CPU, Vulkan, CUDA, or your backend);
+no download or installation is performed by Ojon.
+
+```powershell
+# Inspect what will run; does not load weights or consume VRAM:
+ojon adapter-smoke-plan "D:\\Models\\edited-adapter" "D:\\Models\\smoke.json" --json
+
+# Run a quick CPU-only load/generation test when ready:
+ojon adapter-smoke-run "D:\\Models\\edited-adapter" "D:\\Models\\smoke.json" --tool "C:\\llama.cpp\\build\\bin\\Release\\llama-cli.exe" --gpu-layers 0 --confirm
+
+# Check which GPU IDs llama.cpp actually exposes (mapping varies by build):
+llama-cli --list-devices
+
+# Optionally use only a selected *available* GPU, e.g. its reported Vulkan0:
+ojon adapter-smoke-run "D:\\Models\\edited-adapter" "D:\\Models\\vision-smoke.json" --tool "C:\\llama.cpp\\build\\bin\\Release\\llama-cli.exe" --gpu-layers 12 --device Vulkan0 --image "D:\\Images\\sample.jpg" --prompt "Describe the image briefly." --confirm
+```
+
+The `--image` option requires an mmproj path already present in the
+compressed bundle manifest. The runner passes `--mmproj`, `--lora`,
+`-m`, deterministic sampling, offline mode and bounded output tokens
+to the selected local `llama-cli`. GPU offload is **opt-in**; a large
+model can still exceed CPU RAM or free VRAM even when the adapter is tiny.
+The receipt records only successful runtime exit and captured logs,
+**not measured visual understanding or refusal improvements**.
+
+**Activation capture for ARA** is a distinct prerequisite. Official
+llama.cpp's normal CLI does not expose arbitrary linear-module input
+and output activations. For now Ojon can import an instrumented runtime's
+captured activation JSONL and fit a low-rank adapter from paired module
+input/output samples. Fully unattended Heretic-style capture/search
+requires adding an inference-backend hook or compatible native library.
+This is not a need to install Heretic at Ojon runtime.
+
 ### Quantize first, then edit with a small native Rust LoRA (experimental)
 
 Ojon now supports a **compressed-first** workflow that does not load or rewrite
