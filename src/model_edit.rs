@@ -143,6 +143,9 @@ pub fn prepare_model_abliteration(source: &Path, recipe_path: &Path, output: &Pa
     let mut files=Vec::new();
     enumerate(&source, &source, 0, &mut files)?;
     let file_names:HashSet<PathBuf>=files.iter().map(|f|f.relative.clone()).collect();
+    if file_names.contains(Path::new("ojon-edit-receipt.json")) {
+        return Err(invalid("source contains reserved ojon-edit-receipt.json; refusing ambiguous copy"));
+    }
     let cfg=read_json(&source.join("config.json"),MAX_JSON_BYTES)?;
     let vision_config_detected=cfg.get("vision_config").is_some() ||
         cfg.get("text_config").is_some() && cfg.get("model_type").and_then(Value::as_str)
@@ -301,7 +304,7 @@ pub fn run_model_abliteration(plan:&ModelAblationPlan,mut log:impl FnMut(&str))-
         "refusal_rate":"NOT_EVALUATED",
         "vision_qa":"NOT_EVALUATED",
         "quantization":"NOT_RUN"
-    }))?.as_bytes())?;
+    })).map_err(|e|invalid(format!("cannot serialize edit receipt: {e}")))?.as_bytes())?;
     file.sync_all()?;
     if plan.output.symlink_metadata().is_ok() {
         return Err(io::Error::new(ErrorKind::AlreadyExists,"output folder appeared while editing"));
@@ -323,8 +326,9 @@ mod tests {
         fs::create_dir(&d).unwrap();d
     }
     fn shard(path:&Path, name:&str, vals:&[f32]) {
-        let h=json!({name:{"dtype":"F32","shape":[2,2],"data_offsets":[0,16]}});
-        let header=serde_json::to_vec(&h).unwrap();
+        let mut h=serde_json::Map::new();
+        h.insert(name.to_owned(),json!({"dtype":"F32","shape":[2,2],"data_offsets":[0,16]}));
+        let header=serde_json::to_vec(&Value::Object(h)).unwrap();
         let mut f=File::create(path).unwrap();
         f.write_all(&(header.len() as u64).to_le_bytes()).unwrap();
         f.write_all(&header).unwrap();
