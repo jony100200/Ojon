@@ -41,3 +41,35 @@ ui-widgets  = { git = "https://github.com/jony100200/Kathamo", rev = "f3bed97837
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", optional = true, features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Memory"] }
+
+# Keep routine development/test build artifacts small, especially on Windows.
+# Retain line information for useful panic backtraces; opt into the debugging
+# profile below when a full native debugger session is needed.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = 0
+
+[profile.debugging]
+inherits = "dev"
+debug = 2
+
+[profile.debugging.package."*"]
+debug = 2
+
+# Default release builds favor quantization throughput, not minimum binary size.
+# Thin LTO, single codegen unit and stripping reduce distributable size without
+# lowering the normal release optimization level.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+# Opt-in minimum-size build: may be slower for computationally intensive work.
+[profile.release-small]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+panic = "abort"
