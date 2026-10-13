@@ -54,6 +54,8 @@ Commands:
   ojon abliterate-plan <original-shard.safetensors> <direction-recipe.json> <new-shard.safetensors> [--json]
   ojon abliterate-run <original-shard.safetensors> <direction-recipe.json> <new-shard.safetensors> --confirm [--json]
   ojon sensitivity-extract <original.gguf> <calibration.imatrix> <new-tensor-sensitivity.json> --confirm
+  ojon quant-parity-plan <original-F16.gguf> <current-Q4_K_M.gguf> <suite.json> <output-dir> [--precisions IQ4_XS,IQ3_M,Q3_K_M] [--imatrix path] [--max-buffer-mib 512] [--gpu-layers 0] [--vision-suite vision.json --mmproj vision.gguf] [--json]
+  ojon quant-parity-run  <original-F16.gguf> <current-Q4_K_M.gguf> <suite.json> <output-dir> [same options] --confirm
   ojon adaptive-plan <original.gguf> <tensor-sensitivity.json> <existing-output-dir> <suite.json> [--targets 3.0,3.5,4.0] [--quantizer llama-quantize] [--eval-tool llama-cli] [--imatrix path] [--device Vulkan2] [--gpu-layers 99] [--max-loss 1.0] [--json]
   ojon adaptive-run <original.gguf> <tensor-sensitivity.json> <existing-output-dir> <suite.json> [options] --confirm
   ojon task-eval-plan <suite.json> <new-report.json> --baseline <original.gguf> --candidate <label=variant.gguf> [--candidate ...] [--tool llama-cli] [--gpu-layers 0] [--device Vulkan2] [--tokens 128]
@@ -953,6 +955,78 @@ fn run() -> io::Result<()> {
             println!("sensitivity_entries: {}",result["tensors"].as_array().map(|v|v.len()).unwrap_or(0));
             println!("output: {}",output.display());
             println!("status: ACTIVATION_ENERGY_PROXY_NOT_TASK_SENSITIVITY");
+        }
+        Some("quant-parity-plan") | Some("quant-parity-run") => {
+            let execute=cmd=="quant-parity-run";
+            let source=PathBuf::from(next_argument(&mut args,"original high-precision GGUF")?);
+            let baseline=PathBuf::from(next_argument(&mut args,"current quantized Q4 GGUF reference")?);
+            let suite=PathBuf::from(next_argument(&mut args,"held-out coding/reasoning/tool suite JSON")?);
+            let output_dir=PathBuf::from(next_argument(&mut args,"existing output directory")?);
+            let mut options=ojon_backend::QuantParityOptions::default();
+            let(mut confirmed,mut json)=(false,false);
+            while let Some(opt)=args.next() {
+                match opt.to_str(){
+                    Some("--precisions")=>{
+                        let raw=next_argument(&mut args,"comma-separated precisions")?;
+                        let text=raw.to_str().ok_or_else(||invalid("precision types must be UTF-8"))?;
+                        options.precisions=text.split(',').map(|s|s.parse::<Precision>().map_err(invalid))
+                            .collect::<std::io::Result<Vec<_>>>()?;
+                    }
+                    Some("--imatrix")=>options.imatrix=Some(PathBuf::from(next_argument(&mut args,"imatrix path")?)),
+                    Some("--quantizer")=>options.quantizer=PathBuf::from(next_argument(&mut args,"llama-quantize path")?),
+                    Some("--eval-tool")=>options.eval_tool=PathBuf::from(next_argument(&mut args,"llama-cli path")?),
+                    Some("--threads")=>{
+                        options.threads=next_argument(&mut args,"threads")?.to_string_lossy()
+                            .parse().map_err(|_|invalid("threads must be an integer"))?;
+                    }
+                    Some("--max-buffer-mib")=>{
+                        options.max_buffer_mib=Some(next_argument(&mut args,"quantizer slab buffer MiB")?
+                            .to_string_lossy().parse().map_err(|_|invalid("buffer size must be an integer"))?);
+                    }
+                    Some("--no-buffer-limit")=>options.max_buffer_mib=None,
+                    Some("--gpu-layers")=>{
+                        options.gpu_layers=next_argument(&mut args,"GPU layers")?.to_string_lossy()
+                            .parse().map_err(|_|invalid("GPU layers must be an integer"))?;
+                    }
+                    Some("--device")=>options.device=Some(next_argument(&mut args,"device")?.to_string_lossy().to_string()),
+                    Some("--tokens")=>{
+                        options.tokens=next_argument(&mut args,"tokens")?.to_string_lossy()
+                            .parse().map_err(|_|invalid("tokens must be an integer"))?;
+                    }
+                    Some("--max-loss-points")=>{
+                        options.max_loss_points=next_argument(&mut args,"maximum capability loss points")?
+                            .to_string_lossy().parse().map_err(|_|invalid("loss must be numeric"))?;
+                    }
+                    Some("--min-saving-percent")=>{
+                        options.min_saving_percent=next_argument(&mut args,"minimum saving percent")?
+                            .to_string_lossy().parse().map_err(|_|invalid("saving must be numeric"))?;
+                    }
+                    Some("--vision-suite")=>{
+                        options.vision_suite=Some(PathBuf::from(next_argument(&mut args,"vision suite JSON")?));
+                    }
+                    Some("--mmproj")=>{
+                        options.mmproj=Some(PathBuf::from(next_argument(&mut args,"matching vision projector GGUF")?));
+                    }
+                    Some("--json")=>json=true,
+                    Some("--confirm")=>confirmed=true,
+                    _=>return Err(invalid(format!("unknown quant-parity option: {}",opt.to_string_lossy())))
+                }
+            }
+            if confirmed&&!execute{return Err(invalid("--confirm is only valid for quant-parity-run"));}
+            let plan=ojon_backend::prepare_quant_parity(&source,&baseline,&suite,&output_dir,options)?;
+            if execute{
+                if !confirmed{return Err(invalid("quant-parity-run requires --confirm"));}
+                let report=ojon_backend::run_quant_parity(&plan,|msg|eprintln!("{msg}"))?;
+                if json{println!("{report}");}
+                else{
+                    println!("reference: {}",baseline.display());
+                    println!("candidate_results: {}",report["results"]);
+                    println!("provisional_smallest_task_parity_candidate: {}",
+                        report["provisional_smallest_measured_candidate"]);
+                    println!("proof_of_lossless_quality: NO (limited tests only)");
+                }
+            }else if json{println!("{}",plan.as_json());}
+            else{println!("{}",plan.as_json());}
         }
         Some("adaptive-plan") | Some("adaptive-run") => {
             let execute=cmd=="adaptive-run";
