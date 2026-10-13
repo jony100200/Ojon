@@ -296,7 +296,8 @@ pub fn run_adaptive(plan:&AdaptivePlan,mut log:impl FnMut(&str))->io::Result<Val
                         for metric in ["coding_accuracy","reasoning_accuracy","tool_call_accuracy"] {
                             let b=base[metric].as_f64().unwrap_or(0.0);
                             let c=cand[metric].as_f64().unwrap_or(0.0);
-                            let pass=c+1e-10>=b-plan.max_absolute_loss_pct;
+                            // A suite the baseline cannot solve is not evidence of preserved ability.
+                            let pass=b>0.0 && c+1e-10>=b-plan.max_absolute_loss_pct;
                             if !pass{passes=false;}
                             comparisons.push(json!({"metric":metric,"baseline":b,"candidate":c,
                                 "allowed_drop_points":plan.max_absolute_loss_pct,"pass":pass}));
