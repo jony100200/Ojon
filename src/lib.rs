@@ -22,6 +22,7 @@ pub mod options;
 pub mod research_routes;
 pub mod resource;
 pub mod benchmark;
+pub mod exl3;
 
 pub use discovery::{backend_specs, discover_backends, discovered_path, hf_python_path, open_official_download_page, BackendId, FoundBackend, Integration};
 pub use gguf::{inspect_gguf, GgufSummary};
@@ -54,3 +55,5 @@ pub use research_routes::{prepare_research, run_research, ResearchKind, Research
 pub use resource::{assess_resources, resource_plan, ResourceAssessment, ResourceMode};
 
 pub use benchmark::{prepare_bench, run_bench, compare_bench_files, BenchPlan};
+
+pub use exl3::{prepare_exl3, run_exl3, Exl3Plan};
