@@ -20,7 +20,7 @@ fn invalid(message: impl Into<String>) -> io::Error {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResourceMode {
-    Hqq, OpenVino, AutoRound, Gguf, Pack, Exl3,
+    Hqq, OpenVino, AutoRound, Gguf, Pack, Exl3, Heretic,
 }
 impl ResourceMode {
     pub fn parse(s: &str) -> io::Result<Self> {
@@ -31,7 +31,8 @@ impl ResourceMode {
             "gguf" => Ok(Self::Gguf),
             "pack" => Ok(Self::Pack),
             "exl3" => Ok(Self::Exl3),
-            _ => Err(invalid("mode must be hqq, openvino, autoround, gguf, pack or exl3")),
+            "heretic" => Ok(Self::Heretic),
+            _ => Err(invalid("mode must be hqq, openvino, autoround, gguf, pack, exl3 or heretic")),
         }
     }
     pub fn name(self) -> &'static str {
@@ -42,19 +43,20 @@ impl ResourceMode {
             Self::Gguf => "gguf",
             Self::Pack => "pack",
             Self::Exl3 => "exl3",
+            Self::Heretic => "heretic",
         }
     }
     // A minimum conservative OPERATOR POLICY budget, not estimated peak memory.
     fn memory_budget_multiplier(self) -> Option<u64> {
         match self {
-            Self::Hqq | Self::OpenVino | Self::AutoRound | Self::Exl3 => Some(1),
+            Self::Hqq | Self::OpenVino | Self::AutoRound | Self::Exl3 | Self::Heretic => Some(1),
             Self::Gguf => Some(0), // reserve host RAM only; tensor stream peak is unknown.
             Self::Pack => None, // packed pathways may stream tensors.
         }
     }
     fn disk_budget_multiplier(self) -> u64 {
         match self {
-            Self::AutoRound | Self::Gguf | Self::Exl3 => 2,
+            Self::AutoRound | Self::Gguf | Self::Exl3 | Self::Heretic => 2,
             Self::Hqq | Self::OpenVino | Self::Pack => 1,
         }
     }
