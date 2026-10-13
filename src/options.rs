@@ -95,6 +95,12 @@ fn plan_for(
             if autoround { "requires_compatibility_test" } else { "missing_tool" },
             ar_reason, "autoround-plan --bits 4|5 --format gguf:q4_k_m|gguf:q5_k_m"));
         if !multi {
+            options.push(candidate("hf_exl3", "exllamav3",
+                "QTIP-inspired trellis-coded fractional-bitrate quantization",
+                "EXL3 (NOT GGUF)", "ExLlamaV3 CUDA runtime; NVIDIA only, not Intel Arc",
+                "external_python_unverified",
+                "Requires user-installed ExLlamaV3 checkout, original safetensors, local CUDA and memory preflight; output and loader are not verified",
+                "exl3-plan <source> <new-output> <new-work> --checkout <exllamav3> --bits 3.5"));
             options.push(candidate("hf_hqq_q4", "dropbox_hqq",
                 "calibration-free half-quadratic weight quantization",
                 "HQQ native qmodel.pt (not GGUF)",
@@ -205,13 +211,14 @@ mod tests {
         let value = plan_for(&fixture("hf_checkpoint_directory", ModelCategory::Language),
             "xpu", &[], None).unwrap();
         let rows = value["options"].as_array().unwrap();
-        assert_eq!(rows.len(), 6);
+        assert_eq!(rows.len(), 7);
         assert_eq!(rows[0]["id"], "hf_gguf_q5");
         assert_eq!(rows[1]["id"], "hf_gguf_q4");
         assert_eq!(rows[2]["id"], "hf_autoround_4");
-        assert_eq!(rows[3]["id"], "hf_hqq_q4");
-        assert_eq!(rows[4]["id"], "hf_openvino_int4");
-        assert_eq!(rows[5]["id"], "hf_openvino_mixed");
+        assert_eq!(rows[3]["id"], "hf_exl3");
+        assert_eq!(rows[4]["id"], "hf_hqq_q4");
+        assert_eq!(rows[5]["id"], "hf_openvino_int4");
+        assert_eq!(rows[6]["id"], "hf_openvino_mixed");
         assert_eq!(rows[3]["runtime_load_verified"], false);
         assert!(value["recommendation"].is_null());
         assert_eq!(value["weights_loaded"], false);
