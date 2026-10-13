@@ -16,7 +16,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 fn invalid(s: impl Into<String>) -> io::Error { io::Error::new(ErrorKind::InvalidInput, s.into()) }
 const LIMIT: u64 = 2 * 1024 * 1024;
-const MAX_IMAGES: usize = 1;
 
 #[derive(Debug)]
 pub struct AdapterSmokePlan {
@@ -76,7 +75,7 @@ impl AdapterSmokePlan {
         cmd
     }
 }
-fn manifest_path(base:&Path, value:&str)->io::Result<PathBuf>{
+fn manifest_path(value:&str)->io::Result<PathBuf>{
     if value.trim().is_empty() {return Err(invalid("bundle referenced empty path"));}
     let p=Path::new(value);
     if !p.is_absolute() {return Err(invalid("bundle external model paths must be absolute"));}
@@ -111,7 +110,7 @@ pub fn prepare_adapter_smoke(
     if raw.get("schema").and_then(Value::as_str)!=Some("ojon.compressed_model_bundle.v1") {
         return Err(invalid("not an Ojon compressed model bundle"));
     }
-    let base=manifest_path(&bundle,raw.get("original_quantized_base")
+    let base=manifest_path(raw.get("original_quantized_base")
         .and_then(Value::as_str).ok_or_else(||invalid("manifest lacks base model path"))?)?;
     let base_summary=inspect_gguf(&base)?;
     if base_summary.tensor_count==0 || base_summary.split_count.unwrap_or(1)>1 {
@@ -141,7 +140,7 @@ pub fn prepare_adapter_smoke(
     }
     let mmproj=match raw.get("mmproj").and_then(Value::as_str) {
         Some(p) => {
-            let p=manifest_path(&bundle,p)?;
+            let p=manifest_path(p)?;
             if inspect_gguf(&p)?.tensor_count==0 {
                 return Err(invalid("mmproj GGUF has no tensors"));
             }
@@ -254,6 +253,61 @@ mod tests{
             runtime_exit_success:true,image_supplied:true};
         assert_eq!(result.as_json()["quality_evaluated"],false);
         assert_eq!(result.as_json()["image_understanding"],"NOT_EVALUATED");
+    }
+    fn tiny_gguf(path:&Path) {
+        let mut f=File::create(path).unwrap();
+        f.write_all(b"GGUF").unwrap();
+        f.write_all(&3u32.to_le_bytes()).unwrap();
+        f.write_all(&1u64.to_le_bytes()).unwrap();
+        f.write_all(&1u64.to_le_bytes()).unwrap();
+        fn strfield(f:&mut File,txt:&str){
+            f.write_all(&(txt.len() as u64).to_le_bytes()).unwrap();
+            f.write_all(txt.as_bytes()).unwrap();
+        }
+        strfield(&mut f,"general.architecture");
+        f.write_all(&8u32.to_le_bytes()).unwrap();
+        strfield(&mut f,"qwen3");
+        strfield(&mut f,"blk.0.attn_output.weight");
+        f.write_all(&2u32.to_le_bytes()).unwrap();
+        f.write_all(&2u64.to_le_bytes()).unwrap();
+        f.write_all(&2u64.to_le_bytes()).unwrap();
+        f.write_all(&2u32.to_le_bytes()).unwrap();
+        f.write_all(&0u64.to_le_bytes()).unwrap();
+        let pos=f.stream_position().unwrap();
+        let padding=(32-pos%32)%32;
+        f.write_all(&vec![0u8;padding as usize]).unwrap();
+        f.write_all(&[0u8;32]).unwrap();
+        f.sync_all().unwrap();
+    }
+    #[test]
+    fn adapter_bundle_preflight_needs_no_model_inference(){
+        use crate::compressed_edit::{prepare_compressed_edit,run_compressed_edit};
+        let stamp=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root=std::env::temp_dir().join(format!("ojon-adapter-smoke-{}-{stamp}",std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let base=root.join("quantized.gguf");
+        tiny_gguf(&base);
+        let recipe=root.join("recipe.json");
+        fs::write(&recipe,serde_json::to_vec(&json!({
+            "schema":"ojon.abliteration.v1","preserve_row_norms":false,
+            "edits":[{
+                "tensor":"model.layers.0.self_attn.o_proj.weight",
+                "strength":1.0,
+                "lora":{"a":[[1.0,0.0]],"b":[[0.0],[1.0]]}
+            }]
+        })).unwrap()).unwrap();
+        let bundle=root.join("adapter-bundle");
+        let edit_plan=prepare_compressed_edit(&base,&recipe,&bundle,None).unwrap();
+        run_compressed_edit(&edit_plan,|_|{}).unwrap();
+        let report=root.join("check.json");
+        let smoke=prepare_adapter_smoke(&bundle,&report,Path::new("llama-cli"),
+            0,None,None,None,32).unwrap();
+        assert_eq!(smoke.as_json()["adapter_tensors"],2);
+        assert_eq!(smoke.as_json()["status"],"PREFLIGHT_ONLY");
+        assert!(!report.exists());
+        assert!(prepare_adapter_smoke(&bundle,&report,Path::new("llama-cli"),
+            0,None,Some(&recipe),None,32).is_err(),"image without mmproj must fail");
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn rejects_blank_tool_and_invalid_backend_device(){
