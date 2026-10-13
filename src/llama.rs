@@ -6,6 +6,7 @@
 //! the resulting artifact only if the converter succeeds.
 
 use crate::gguf::{inspect_gguf, GgufSummary};
+use crate::resource::{assess_resources, ResourceMode};
 use crate::jobs::run_with_log;
 use std::ffi::OsString;
 use std::fmt;
@@ -121,6 +122,7 @@ pub fn prepare_gguf(
     if !canonical_source.is_file() { return Err(bad("source must be a regular GGUF file")); }
     let source_info = inspect_gguf(&canonical_source)?;
     if source_info.tensor_count == 0 { return Err(bad("source GGUF has no tensors")); }
+    validate_original_precision(source_info.file_type)?;
     if source_info.split_count.unwrap_or(1) > 1 {
         return Err(bad("this first adapter supports single-file GGUF only; multi-shard GGUF needs a dedicated recipe"));
     }
@@ -144,6 +146,15 @@ pub fn prepare_gguf(
         imatrix: None,
         source_info,
     })
+}
+
+/// Prevent accidental double quantization; unknown GGUF precision fails closed.
+/// GGUF general.file_type: 0=F32, 1=F16, 32=BF16.
+pub(crate) fn validate_original_precision(file_type: Option<u32>) -> io::Result<()> {
+    if !matches!(file_type, Some(0 | 1 | 32)) {
+        return Err(bad("source must be original F32/F16/BF16 GGUF with known general.file_type; refusing lossy requantization"));
+    }
+    Ok(())
 }
 
 impl QuantizePlan {
@@ -195,6 +206,10 @@ where F: FnMut(&str) {
     if plan.output.symlink_metadata().is_ok() {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, "output already exists"));
     }
+    validate_original_precision(inspect_gguf(&plan.source)?.file_type)?;
+    let parent = plan.output.parent().ok_or_else(|| bad("missing output directory"))?;
+    let resources = assess_resources(plan.source_info.file_bytes, parent, ResourceMode::Gguf, "cpu")?;
+    resources.enforce(false)?;
     let staging = make_staging_directory(&plan.output)?;
     let stage_file = staging.0.join("quantized.gguf");
     eprintln!("Ojon: launching configured llama.cpp quantizer; source weights are read-only.");
@@ -211,6 +226,12 @@ where F: FnMut(&str) {
     let info = inspect_gguf(&stage_file)?;
     if info.tensor_count == 0 {
         return Err(bad("converter output contains no tensors"));
+    }
+    if info.architecture != plan.source_info.architecture || info.tensor_count != plan.source_info.tensor_count {
+        return Err(bad("quantized output changed architecture or tensor count; refusing publication"));
+    }
+    if !matches!(info.file_type, Some(v) if !matches!(v, 0 | 1 | 32)) {
+        return Err(bad("converter did not produce an identifiable quantized GGUF; refusing publication"));
     }
     if info.split_count.unwrap_or(1) > 1 {
         return Err(bad("converter emitted a multi-shard model; this adapter cannot publish all shards safely yet"));
@@ -266,5 +287,19 @@ mod precision_tests {
             assert_eq!(Precision::from_str(variant.as_str()).unwrap(), variant);
         }
         assert!(Precision::from_str("Q8_0").is_err());
+    }
+}
+
+#[cfg(test)]
+mod conversion_safety_tests {
+    use super::*;
+    #[test]
+    fn originals_only() {
+        for ty in [Some(0), Some(1), Some(32)] {
+            assert!(validate_original_precision(ty).is_ok());
+        }
+        for ty in [None, Some(2), Some(7), Some(12), Some(40)] {
+            assert!(validate_original_precision(ty).is_err());
+        }
     }
 }
