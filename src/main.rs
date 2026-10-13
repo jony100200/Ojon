@@ -40,6 +40,8 @@ Commands:
   ojon recommend <quality-evidence.json> [--json]  Smallest verified model within tolerance
   ojon ara-fit <module-io-calibration.json> <new-lowrank-edit-recipe.json> --confirm [--json]
   ojon method-select <measured-quality-scores.json> [--json]
+  ojon compressed-ara-plan <already-quantized-base.gguf> <module-io-calibration.json> <new-adapter-folder> [--mmproj vision.gguf] [--json]
+  ojon compressed-ara-run <already-quantized-base.gguf> <module-io-calibration.json> <new-adapter-folder> [--mmproj vision.gguf] --confirm [--json]
   ojon compressed-edit-plan <already-quantized-base.gguf> <lowrank-recipe.json> <new-adapter-folder> [--mmproj vision.gguf] [--json]
   ojon compressed-edit-run <already-quantized-base.gguf> <lowrank-recipe.json> <new-adapter-folder> [--mmproj vision.gguf] --confirm [--json]
   ojon model-build-plan <original-HF-dir> <directions.json> <new-output-folder> --converter <convert_hf_to_gguf.py> [--python python] [--quantizer llama-quantize] [--precision Q4_K_M] [--threads N] [--json]
@@ -229,6 +231,47 @@ fn run() -> io::Result<()> {
             let result=ojon_backend::choose_edit_method_file(&path)?;
             if json{println!("{}",result.as_json());}
             else{println!("{}",result.as_json());}
+        }
+        Some("compressed-ara-plan") | Some("compressed-ara-run") => {
+            let execute=cmd=="compressed-ara-run";
+            let base=PathBuf::from(next_argument(&mut args,"already-quantized GGUF base")?);
+            let calibration=PathBuf::from(next_argument(&mut args,"recorded module I/O calibration")?);
+            let output=PathBuf::from(next_argument(&mut args,"new adapter folder")?);
+            let mut mmproj=None::<PathBuf>;
+            let(mut confirmed,mut json)=(false,false);
+            while let Some(option)=args.next(){
+                match option.to_str(){
+                    Some("--mmproj")=>mmproj=Some(PathBuf::from(next_argument(&mut args,"mmproj GGUF")?)),
+                    Some("--confirm")=>confirmed=true,
+                    Some("--json")=>json=true,
+                    _=>return Err(invalid(format!("unknown compressed ARA option: {}",option.to_string_lossy())))
+                }
+            }
+            let fitted=ojon_backend::fit_ara_file(&calibration)?;
+            let plan=ojon_backend::prepare_compressed_edit_with_recipe(
+                &base,&fitted.recipe,&output,mmproj.as_deref())?;
+            if execute {
+                if !confirmed{return Err(invalid("compressed-ara-run requires --confirm"));}
+                let result=ojon_backend::run_compressed_edit(&plan,|line|eprintln!("{line}"))?;
+                if json{
+                    println!("{}",serde_json::json!({
+                        "adapter":result.as_json(),
+                        "fit":{"initial_module_loss":fitted.initial_loss,"final_module_loss":fitted.final_loss,
+                        "rank":fitted.rank,"steps":fitted.steps,
+                        "refusal_rate":"NOT_EVALUATED","optimizer":"RUST_ADAM_PROXY"}
+                    }));
+                }else{
+                    println!("adapter: {}",result.output.join("adapter.gguf").display());
+                    println!("module_loss: {} -> {}",fitted.initial_loss,fitted.final_loss);
+                    println!("base GGUF unchanged; model load, refusal and vision tests NOT RUN");
+                }
+            }else if json{
+                println!("{}",serde_json::json!({"plan":plan.as_json(),
+                    "fit_module_loss":{"before":fitted.initial_loss,"after":fitted.final_loss},
+                    "refusal_quality":"NOT_EVALUATED"}));
+            }else{
+                println!("{}",plan.as_json());
+            }
         }
         Some("compressed-edit-plan") | Some("compressed-edit-run") => {
             let execute=cmd=="compressed-edit-run";
