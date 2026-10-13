@@ -159,6 +159,9 @@ fn show_plan(plan: &QuantizePlan) {
     println!("source_architecture: {}", plan.source_info.architecture.as_deref().unwrap_or("unknown; backend determines compatibility"));
     println!("output: {}", plan.output.display());
     println!("precision: {}", plan.precision);
+    if let Some(ot) = &plan.output_tensor_type { println!("output_tensor_type: {ot}"); }
+    if let Some(et) = &plan.token_embedding_type { println!("token_embedding_type: {et}"); }
+    if let Some(tf) = &plan.tensor_type_file { println!("tensor_type_file: {}", tf.display()); }
     println!("threads: {}", plan.threads);
     println!("importance_matrix: {}", plan.imatrix.as_ref().map(|p|p.display().to_string()).unwrap_or_else(||"none".into()));
     println!("tool: {}", plan.executable.display());
@@ -173,6 +176,10 @@ fn parse_plan(mut args: impl Iterator<Item = OsString>) -> io::Result<QuantizePl
     let output = PathBuf::from(next_argument(&mut args, "output GGUF file")?);
     let mut precision = Precision::default();
     let mut matrix: Option<PathBuf> = None;
+    let mut tensor_types: Option<PathBuf> = None;
+    let mut output_type: Option<String> = None;
+    let mut embed_type: Option<String> = None;
+    let mut max_buffer: Option<u32> = None;
     let mut tool = ojon_backend::discovered_path(BackendId::LlamaQuantize)
         .unwrap_or_else(|| PathBuf::from("llama-quantize"));
     let mut threads = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(4);
@@ -185,6 +192,20 @@ fn parse_plan(mut args: impl Iterator<Item = OsString>) -> io::Result<QuantizePl
             }
             Some("--tool") => tool = PathBuf::from(next_argument(&mut args, "quantizer executable path")?),
             Some("--imatrix") => matrix = Some(PathBuf::from(next_argument(&mut args, "importance matrix file")?)),
+            Some("--tensor-type-file") => tensor_types = Some(PathBuf::from(next_argument(&mut args, "tensor type file")?)),
+            Some("--output-tensor-type") => {
+                let val = next_argument(&mut args, "output tensor type")?;
+                output_type = Some(val.to_str().ok_or_else(|| invalid("invalid output tensor type"))?.to_owned());
+            }
+            Some("--token-embedding-type") => {
+                let val = next_argument(&mut args, "token embedding type")?;
+                embed_type = Some(val.to_str().ok_or_else(|| invalid("invalid token embedding type"))?.to_owned());
+            }
+            Some("--max-buffer-size") => {
+                let val = next_argument(&mut args, "max buffer size in MiB")?;
+                max_buffer = Some(val.to_str().ok_or_else(|| invalid("invalid buffer size"))?
+                    .parse().map_err(|_| invalid("invalid buffer size integer"))?);
+            }
             Some("--threads") => {
                 let value = next_argument(&mut args, "thread count")?;
                 let s = value.to_str().ok_or_else(|| invalid("thread count must be text"))?;
@@ -193,8 +214,13 @@ fn parse_plan(mut args: impl Iterator<Item = OsString>) -> io::Result<QuantizePl
             _ => return Err(invalid(format!("unknown option: {}", option.to_string_lossy()))),
         }
     }
-    let plan = prepare_gguf(&source, &output, &tool, precision, threads)?;
-    match matrix { Some(path) => plan.with_imatrix(&path), None => Ok(plan) }
+    let mut plan = prepare_gguf(&source, &output, &tool, precision, threads)?;
+    if let Some(path) = &matrix { plan = plan.with_imatrix(path)?; }
+    if let Some(path) = &tensor_types { plan = plan.with_tensor_type_file(path)?; }
+    if let Some(ot) = &output_type { plan = plan.with_output_tensor_type(ot)?; }
+    if let Some(et) = &embed_type { plan = plan.with_token_embedding_type(et)?; }
+    if let Some(mb) = max_buffer { plan = plan.with_max_buffer_mib(mb)?; }
+    Ok(plan)
 }
 fn run() -> io::Result<()> {
     let mut args = env::args_os().skip(1);

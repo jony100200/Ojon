@@ -23,10 +23,15 @@ fn bad(message: impl Into<String>) -> io::Error {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Precision {
+    Q3KL,
     Q3KM,
+    Q3KS,
     Q4KM,
+    Q4KS,
     Q5KM,
+    Q5KS,
     Q6K,
+    IQ4NL,
     IQ4XS,
     IQ3M,
     IQ3S,
@@ -42,10 +47,15 @@ impl Default for Precision {
 impl Precision {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Q3KL => "Q3_K_L",
             Self::Q3KM => "Q3_K_M",
+            Self::Q3KS => "Q3_K_S",
             Self::Q4KM => "Q4_K_M",
+            Self::Q4KS => "Q4_K_S",
             Self::Q5KM => "Q5_K_M",
+            Self::Q5KS => "Q5_K_S",
             Self::Q6K => "Q6_K",
+            Self::IQ4NL => "IQ4_NL",
             Self::IQ4XS => "IQ4_XS",
             Self::IQ3M => "IQ3_M",
             Self::IQ3S => "IQ3_S",
@@ -64,10 +74,15 @@ impl FromStr for Precision {
     type Err = String;
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         match input.to_ascii_uppercase().as_str() {
+            "Q3_K_L" => Ok(Self::Q3KL),
             "Q3_K_M" => Ok(Self::Q3KM),
+            "Q3_K_S" => Ok(Self::Q3KS),
             "Q4_K_M" => Ok(Self::Q4KM),
+            "Q4_K_S" => Ok(Self::Q4KS),
             "Q5_K_M" => Ok(Self::Q5KM),
+            "Q5_K_S" => Ok(Self::Q5KS),
             "Q6_K" => Ok(Self::Q6K),
+            "IQ4_NL" => Ok(Self::IQ4NL),
             "IQ4_XS" => Ok(Self::IQ4XS),
             "IQ3_M" => Ok(Self::IQ3M),
             "IQ3_S" => Ok(Self::IQ3S),
@@ -77,7 +92,7 @@ impl FromStr for Precision {
             "IQ2_XS" => Ok(Self::IQ2XS),
             "IQ2_XXS" => Ok(Self::IQ2XXS),
             other => Err(format!(
-                "unsupported GGUF precision: {other}; supported: Q3_K_M, Q4_K_M, Q5_K_M, Q6_K, IQ4_XS, IQ3_M, IQ3_S, IQ3_XS, IQ2_M, IQ2_S, IQ2_XS, IQ2_XXS"
+                "unsupported GGUF precision: {other}; supported: Q3_K_L, Q3_K_M, Q3_K_S, Q4_K_M, Q4_K_S, Q5_K_M, Q5_K_S, Q6_K, IQ4_NL, IQ4_XS, IQ3_M, IQ3_S, IQ3_XS, IQ2_M, IQ2_S, IQ2_XS, IQ2_XXS"
             )),
         }
     }
@@ -94,6 +109,8 @@ pub struct QuantizePlan {
     pub threads: usize,
     pub imatrix: Option<PathBuf>,
     pub tensor_type_file: Option<PathBuf>,
+    pub output_tensor_type: Option<String>,
+    pub token_embedding_type: Option<String>,
     /// Upstream llama-quantize slab-buffer cap (MiB); limits only a major
     /// quantization buffer, not total process RSS or disk usage.
     pub max_buffer_mib: Option<u32>,
@@ -149,6 +166,8 @@ pub fn prepare_gguf(
         threads,
         imatrix: None,
         tensor_type_file: None,
+        output_tensor_type: None,
+        token_embedding_type: None,
         max_buffer_mib: None,
         source_info,
     })
@@ -175,6 +194,24 @@ impl QuantizePlan {
             return Err(bad("tensor-type file must be 1 byte..1 MiB"));
         }
         self.tensor_type_file = Some(resolved);
+        Ok(self)
+    }
+    /// Selective override for output.weight (e.g. Q6_K, Q8_0, F16).
+    pub fn with_output_tensor_type(mut self, t: &str) -> io::Result<Self> {
+        let trimmed = t.trim();
+        if trimmed.is_empty() || trimmed.len() > 32 || !trimmed.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            return Err(bad("invalid output tensor type format"));
+        }
+        self.output_tensor_type = Some(trimmed.to_owned());
+        Ok(self)
+    }
+    /// Selective override for token embeddings (e.g. Q4_K, Q5_K, Q6_K).
+    pub fn with_token_embedding_type(mut self, t: &str) -> io::Result<Self> {
+        let trimmed = t.trim();
+        if trimmed.is_empty() || trimmed.len() > 32 || !trimmed.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            return Err(bad("invalid token embedding type format"));
+        }
+        self.token_embedding_type = Some(trimmed.to_owned());
         Ok(self)
     }
     /// Reduce per-tensor slab memory with recent llama.cpp --max-buffer-size.
@@ -248,6 +285,12 @@ where F: FnMut(&str) {
     if let Some(overrides) = &plan.tensor_type_file {
         cmd.arg("--tensor-type-file").arg(overrides);
     }
+    if let Some(output_type) = &plan.output_tensor_type {
+        cmd.arg("--output-tensor-type").arg(output_type);
+    }
+    if let Some(embed_type) = &plan.token_embedding_type {
+        cmd.arg("--token-embedding-type").arg(embed_type);
+    }
     cmd.arg(&plan.source)
         .arg(&stage_file)
         .arg(plan.precision.as_str())
@@ -296,6 +339,12 @@ fn write_receipt(plan: &QuantizePlan, info: &GgufSummary) -> io::Result<PathBuf>
     writeln!(file, "output={}", plan.output.display())?;
     writeln!(file, "output_bytes={}", info.file_bytes)?;
     writeln!(file, "precision={}", plan.precision)?;
+    if let Some(ot) = &plan.output_tensor_type {
+        writeln!(file, "output_tensor_type={ot}")?;
+    }
+    if let Some(et) = &plan.token_embedding_type {
+        writeln!(file, "token_embedding_type={et}")?;
+    }
     writeln!(file, "threads={}", plan.threads)?;
     writeln!(file, "imatrix={}", plan.imatrix.as_ref().map(|p|p.display().to_string()).unwrap_or_else(||"none".into()))?;
     writeln!(file, "output_tensors={}", info.tensor_count)?;
@@ -312,8 +361,11 @@ mod precision_tests {
     #[test]
     fn iq_and_k_precisions_round_trip() {
         for variant in [
-            Precision::Q3KM, Precision::Q4KM, Precision::Q5KM, Precision::Q6K,
-            Precision::IQ4XS, Precision::IQ3M, Precision::IQ3S, Precision::IQ3XS,
+            Precision::Q3KL, Precision::Q3KM, Precision::Q3KS,
+            Precision::Q4KM, Precision::Q4KS,
+            Precision::Q5KM, Precision::Q5KS, Precision::Q6K,
+            Precision::IQ4NL, Precision::IQ4XS,
+            Precision::IQ3M, Precision::IQ3S, Precision::IQ3XS,
             Precision::IQ2M, Precision::IQ2S, Precision::IQ2XS, Precision::IQ2XXS,
         ] {
             assert_eq!(Precision::from_str(variant.as_str()).unwrap(), variant);
