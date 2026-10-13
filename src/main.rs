@@ -12,6 +12,7 @@ use ojon_backend::{
     prepare_autoround_plan, run_autoround,
     prepare_research, ResearchKind,
     resource_plan, ResourceMode, prepare_bench, run_bench, compare_bench_files,
+    prepare_exl3, run_exl3,
 };
 use std::env;
 use std::ffi::OsString;
@@ -28,7 +29,7 @@ Commands:
   ojon backends [--json]     Detect installed engines and show official download links
   ojon probe <model-path> [--json]   Identify model format/family without loading weights
   ojon optimize-plan <model-path> [--device auto|cpu|cuda|xpu] [--json]   Compare candidate routes without converting
-  ojon resource-plan <model-path> <existing-output-parent> [--mode hqq|openvino|autoround|gguf|pack] [--device cpu|cuda|xpu|auto] [--json]
+  ojon resource-plan <model-path> <existing-output-parent> [--mode hqq|openvino|autoround|gguf|pack|exl3] [--device cpu|cuda|xpu|auto] [--json]
   ojon dataset-audit <dataset.jsonl> [--json]   Audit external dataset for drift, dead paths, staleness
   ojon distill-plan  <dataset.jsonl> <output-dir> [--min-score 0.5] [--json]  Curate SFT split
   ojon retrieve      <dataset.jsonl> <query> [--limit 5] [--min-score 0.4] [--json] [--markdown]
@@ -47,6 +48,8 @@ Commands:
   ojon pack-plan <original.safetensors> <output.ojonq> [--bits 4] [--group 64]
   ojon pack-run  <original.safetensors> <output.ojonq> [options] --confirm
   ojon unpack    <packed.ojonq> <restored.safetensors> --confirm
+  ojon exl3-plan <original-hf-dir> <new-output-dir> <new-work-dir> --checkout <exllamav3> [--bits 3.5] [--hq] [--python python] [--json]
+  ojon exl3-run <original-hf-dir> <new-output-dir> <work-dir> --checkout <exllamav3> [--bits 3.5] [--hq] [--python python] [--resume] --confirm [--allow-resource-risk]
   ojon research-plan <hqq|openvino> <original-hf-dir> <new-output-dir> [--bits 4] [--group 64|128] [--ratio 0.8|1.0] [--device cpu|cuda|xpu] [--tool python|optimum-cli] [--json]
   ojon research-run  <hqq|openvino> <original-hf-dir> <new-output-dir> [options] --confirm [--allow-resource-risk]
   ojon autoround-plan <model-dir> <output-dir> [--bits 4] [--format gguf:q4_k_m|gguf:q5_k_m] [--iters 0|200] [--dataset local.json] [--device xpu|cuda|cpu] [--python python] [--nsamples 128] [--seqlen 2048] [--json]
@@ -656,6 +659,49 @@ fn run() -> io::Result<()> {
                 println!("status: {}", result["status"]);
                 println!("note: budget is a conservative policy floor, not converter peak-memory prediction");
                 println!("note: Intel GPU free VRAM is measured only when installed xpu-smi returns a valid sample; otherwise UNKNOWN");
+            }
+        }
+        Some("exl3-plan") | Some("exl3-run") => {
+            let execute=cmd=="exl3-run";
+            let source=PathBuf::from(next_argument(&mut args,"local unquantized HF model directory")?);
+            let output=PathBuf::from(next_argument(&mut args,"new EXL3 output directory")?);
+            let work_dir=PathBuf::from(next_argument(&mut args,"dedicated EXL3 work directory")?);
+            let mut checkout:Option<PathBuf>=None;
+            let mut python=PathBuf::from("python");
+            let mut bits=3.5f64;
+            let mut high_quality=false;
+            let mut resume=false;
+            let mut confirm=false;
+            let mut allow_resource_risk=false;
+            let mut json=false;
+            while let Some(arg)=args.next() {
+                match arg.to_str() {
+                    Some("--checkout") => checkout=Some(PathBuf::from(next_argument(&mut args,"EXL3 checkout")?)),
+                    Some("--python") => python=PathBuf::from(next_argument(&mut args,"Python interpreter")?),
+                    Some("--bits") => bits=next_argument(&mut args,"target bitrate")?
+                        .to_str().ok_or_else(||invalid("bitrate must be text"))?
+                        .parse().map_err(|_|invalid("invalid EXL3 bitrate"))?,
+                    Some("--hq") => high_quality=true,
+                    Some("--resume") => resume=true,
+                    Some("--confirm") if execute => confirm=true,
+                    Some("--allow-resource-risk") if execute => allow_resource_risk=true,
+                    Some("--json") => json=true,
+                    _ => return Err(invalid(format!("unknown EXL3 option: {}",arg.to_string_lossy()))),
+                }
+            }
+            let checkout=checkout.ok_or_else(||invalid("EXL3 --checkout is required"))?;
+            let plan=prepare_exl3(&source,&output,&work_dir,&checkout,&python,bits,high_quality,resume)?;
+            if !execute {
+                if json { println!("{}",plan.as_json()); }
+                else {
+                    println!("backend: EXL3 / ExLlamaV3 (CUDA, not GGUF)");
+                    println!("plan: {}",plan.as_json());
+                }
+            } else {
+                if !confirm {return Err(invalid("EXL3 conversion writes model data; pass --confirm"));}
+                println!("{}",plan.as_json());
+                let result=run_exl3(&plan,allow_resource_risk)?;
+                println!("{}",result);
             }
         }
         Some("research-plan") | Some("research-run") => {
