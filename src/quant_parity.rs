@@ -8,6 +8,7 @@
 
 use crate::gguf::{inspect_gguf, inspect_gguf_tensors};
 use crate::llama::{prepare_gguf, quantize_gguf_with_log, Precision};
+use crate::ppl::{measure as measure_perplexity, PplSettings};
 use crate::task_eval::{parse_eval_suite, prepare_eval, run_eval};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
@@ -118,6 +119,11 @@ pub struct QuantParityOptions {
     pub min_saving_percent:f64,
     pub vision_suite:Option<PathBuf>,
     pub mmproj:Option<PathBuf>,
+    /// Optional same-corpus perplexity gate against the existing Q4 reference.
+    pub ppl_corpus:Option<PathBuf>,
+    pub ppl_tool:PathBuf,
+    pub ppl_context:u32,
+    pub max_ppl_regression_pct:f64,
 }
 impl Default for QuantParityOptions {
     fn default()->Self{
@@ -135,6 +141,10 @@ impl Default for QuantParityOptions {
             min_saving_percent:5.0,
             vision_suite:None,
             mmproj:None,
+            ppl_corpus:None,
+            ppl_tool:PathBuf::from("llama-perplexity"),
+            ppl_context:2048,
+            max_ppl_regression_pct:0.0,
         }
     }
 }
@@ -166,6 +176,8 @@ impl QuantParityPlan{
             "min_saving_percent":self.options.min_saving_percent,
             "vision_suite_tasks":self.vision.as_ref().map(|v|v.tasks.len()),
             "mmproj":self.options.mmproj.as_ref().map(|p|p.to_string_lossy().to_string()),
+            "ppl_corpus":self.options.ppl_corpus.as_ref().map(|p|p.to_string_lossy().to_string()),
+            "max_relative_ppl_regression_pct":self.options.max_ppl_regression_pct,
             "quality_claim":"NO_EXPERIMENT_RUN",
             "memory_claim":"NONE; max_buffer_mib limits only the upstream row-slab buffer",
             "status":"PLAN_ONLY"
@@ -232,6 +244,17 @@ pub fn prepare_quant_parity(
         }
         None
     };
+    if let Some(p)=options.ppl_corpus.take(){
+        let p=p.canonicalize()?;
+        let cfg=PplSettings{
+            tool:options.ppl_tool.clone(),corpus:p.clone(),
+            gpu_layers:options.gpu_layers.max(0) as u32,
+            context:options.ppl_context,
+            max_relative_degradation_pct:options.max_ppl_regression_pct,
+        };
+        cfg.validate()?;
+        options.ppl_corpus=Some(p);
+    }
     if options.quantizer.as_os_str().is_empty()||options.eval_tool.as_os_str().is_empty(){
         return Err(invalid("quantizer and evaluation CLI paths must be nonempty"));
     }
@@ -305,6 +328,7 @@ pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Res
     let mut rows=Vec::new();
     let mut best:Option<(PathBuf,u64)>=None;
     let mut base_vision:Option<Value>=None;
+    let mut baseline_ppl:Option<f64>=None;
     for(ordinal,precision)in plan.options.precisions.iter().enumerate(){
         let key=format!("{prefix}-{:02}-{}",ordinal,precision.as_str());
         let output=plan.output_dir.join(format!("{key}.gguf"));
@@ -374,7 +398,40 @@ pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Res
                 }
             }
         }
-        let measured_pass=task_pass&&vision_pass;
+        let mut ppl_pass=true;
+        let mut ppl_evidence=Value::Null;
+        if task_pass&&vision_pass {
+            if let Some(corpus)=&plan.options.ppl_corpus {
+                let settings=PplSettings{
+                    tool:plan.options.ppl_tool.clone(),corpus:corpus.clone(),
+                    gpu_layers:plan.options.gpu_layers.max(0) as u32,
+                    context:plan.options.ppl_context,
+                    max_relative_degradation_pct:plan.options.max_ppl_regression_pct,
+                };
+                let measured=(||{
+                    if baseline_ppl.is_none(){
+                        baseline_ppl=Some(measure_perplexity(&plan.baseline,&settings,&mut log)?.0);
+                    }
+                    measure_perplexity(&output,&settings,&mut log)
+                })();
+                match measured{
+                    Ok((candidate,seconds))=>{
+                        let reference=baseline_ppl.unwrap();
+                        let regression_pct=100.0*(candidate/reference-1.0);
+                        ppl_pass=regression_pct<=plan.options.max_ppl_regression_pct+1e-10;
+                        ppl_evidence=json!({"baseline_perplexity":reference,
+                            "candidate_perplexity":candidate,
+                            "relative_regression_pct":regression_pct,
+                            "elapsed_seconds":seconds,"pass":ppl_pass});
+                    }
+                    Err(e)=>{
+                        ppl_pass=false;
+                        ppl_evidence=json!({"status":"PPL_EVALUATION_FAILED","error":e.to_string()});
+                    }
+                }
+            }
+        }
+        let measured_pass=task_pass&&vision_pass&&ppl_pass;
         let scope=if plan.vision.is_some(){
             "TEXT_AND_VISION_TASK_SUITE_ONLY"
         }else{"TEXT_TASK_SUITE_ONLY_VISION_NOT_VERIFIED"};
@@ -386,6 +443,7 @@ pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Res
             "output":output.to_string_lossy(),"bytes":size,
             "savings_pct":savings,"reference_bytes":plan.baseline_bytes,
             "text_tasks":task_metrics,"vision":vision_evidence,
+            "perplexity":ppl_evidence,
             "evidence_scope":scope,"task_report":evidence.to_string_lossy(),
             "candidate_verified_lossless":false}));
     }
@@ -396,6 +454,8 @@ pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Res
         "reference_bytes":plan.baseline_bytes,
         "heldout_suite":plan.suite.to_string_lossy(),
         "imatrix":plan.options.imatrix.as_ref().map(|p|p.to_string_lossy().to_string()),
+        "ppl_corpus":plan.options.ppl_corpus.as_ref().map(|p|p.to_string_lossy().to_string()),
+        "baseline_perplexity":baseline_ppl,
         "vision_suite_count":plan.vision.as_ref().map(|x|x.tasks.len()),
         "results":rows,
         "provisional_smallest_measured_candidate":best.as_ref()
