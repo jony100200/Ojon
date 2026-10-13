@@ -51,7 +51,7 @@ impl PplSettings {
         Ok(())
     }
 }
-fn measure<F>(model:&Path, settings:&PplSettings,log:&mut F)->io::Result<(f64,f64)>
+pub(crate) fn measure<F>(model:&Path, settings:&PplSettings,log:&mut F)->io::Result<(f64,f64)>
 where F:FnMut(&str) {
     let info=inspect_gguf(model)?;
     if info.tensor_count==0{return Err(invalid("empty GGUF tensor catalog"));}
