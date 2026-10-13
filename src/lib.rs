@@ -63,3 +63,6 @@ pub use task_eval::{parse_eval_suite, prepare_eval, run_eval, EvalPlan, EvalSuit
 
 pub mod adaptive;
 pub use adaptive::{allocate_bits, parse_tensor_sensitivity, extract_sensitivity_from_imatrix, prepare_adaptive, run_adaptive, AdaptivePlan, TensorScore};
+
+pub mod heretic;
+pub use heretic::{prepare_heretic, run_heretic, HereticPlan, HereticPrompts, HereticExport};
