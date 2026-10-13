@@ -10,6 +10,34 @@ Ojon brings existing, independent model tools under one roof. Install only the p
 
 ## What works today
 
+### Automatic optimization front door (read-only)
+
+Ojon now offers a metadata-only decision layer for the Kathamo Optimize UI
+and agent clients. It inspects a selected model, current quantized quality
+baseline, available smaller GGUF candidates and held-out test suite, then
+identifies the **next valid existing command** without executing anything.
+
+```powershell
+# Your current Q4 is the reference. Compare a smaller candidate when ready:
+ojon optimize-workflow-plan 'D:\Models\current-Q4_K_M.gguf' --candidate iq3='D:\Models\smaller-IQ3_M.gguf' --suite 'D:\Bench\coding-suite.json' --output-dir 'D:\Bench' --goal smallest --json
+
+# To try creating new candidates, use an original F16/BF16 GGUF source:
+ojon optimize-workflow-plan 'D:\Models\original-F16.gguf' --baseline 'D:\Models\current-Q4_K_M.gguf' --suite 'D:\Bench\coding-suite.json' --output-dir 'D:\Bench' --goal balanced --json
+```
+
+The plan gives the proposed action, blocking prerequisites, ordered stages,
+and an **argument-array** command for a separate user-approved execution.
+The planner does not run converters, import Python, allocate a GPU, download
+models or write output. Discovered llama.cpp executables and GGUF architecture
+matching are **not** proof of runtime or checkpoint identity.
+The plan intentionally blocks automatic full-quality claims for VLMs until
+image suites and projector validation are wired into the guided workflow;
+the existing advanced CLI workflows can already accept separate vision tests.
+True automatic end-to-end optimization, measured runtime Pareto selection,
+quantization-error LoRA recovery and autonomous refusal-reduction remain
+separate work. The initial UX can consume this stable JSON without showing
+users the internal quantization options.
+
 - Inspect GGUF files, Hugging Face checkpoint folders, and standalone safetensors metadata without loading all model weights.
 - Detect installed public conversion and inference executables, with links to their official projects.
 - Convert compatible original Hugging Face checkpoints to GGUF using public llama.cpp's Python script.
