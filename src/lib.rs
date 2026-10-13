@@ -19,6 +19,8 @@ pub mod packed;
 pub mod distill;
 pub mod autoround;
 pub mod options;
+pub mod optimize_workflow;
+pub use optimize_workflow::{plan_optimize_workflow, OptimizeWorkflowRequest, OptimizeGoal};
 pub mod research_routes;
 pub mod resource;
 pub mod benchmark;
