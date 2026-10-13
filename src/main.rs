@@ -37,6 +37,8 @@ Commands:
   ojon train-plan <config.yaml> [--tool <llamafactory-cli>] [--json]
   ojon train-run  <config.yaml> [--tool <llamafactory-cli>] --confirm
   ojon recommend <quality-evidence.json> [--json]  Smallest verified model within tolerance
+  ojon abliterate-plan <original-shard.safetensors> <direction-recipe.json> <new-shard.safetensors> [--json]
+  ojon abliterate-run <original-shard.safetensors> <direction-recipe.json> <new-shard.safetensors> --confirm [--json]
   ojon sensitivity-extract <original.gguf> <calibration.imatrix> <new-tensor-sensitivity.json> --confirm
   ojon adaptive-plan <original.gguf> <tensor-sensitivity.json> <existing-output-dir> <suite.json> [--targets 3.0,3.5,4.0] [--quantizer llama-quantize] [--eval-tool llama-cli] [--imatrix path] [--device Vulkan2] [--gpu-layers 99] [--max-loss 1.0] [--json]
   ojon adaptive-run <original.gguf> <tensor-sensitivity.json> <existing-output-dir> <suite.json> [options] --confirm
@@ -179,6 +181,36 @@ fn run() -> io::Result<()> {
     let mut args = env::args_os().skip(1);
     let cmd = args.next().unwrap_or_else(|| OsString::from("--help"));
     match cmd.to_str() {
+        Some("abliterate-plan") | Some("abliterate-run") => {
+            let execute = cmd == "abliterate-run";
+            let source = PathBuf::from(next_argument(&mut args, "original safetensors shard")?);
+            let recipe = PathBuf::from(next_argument(&mut args, "direction recipe JSON")?);
+            let output = PathBuf::from(next_argument(&mut args, "new output safetensors shard")?);
+            let (mut confirmed, mut json) = (false, false);
+            while let Some(option) = args.next() {
+                match option.to_str() {
+                    Some("--confirm") => confirmed = true,
+                    Some("--json") => json = true,
+                    _ => return Err(invalid(format!("unknown option: {}", option.to_string_lossy()))),
+                }
+            }
+            let plan = ojon_backend::prepare_abliteration(&source, &recipe, &output)?;
+            if execute {
+                if !confirmed { return Err(invalid("abliterate-run modifies model output and requires --confirm")); }
+                let result = ojon_backend::run_abliteration(&plan, |line| eprintln!("{line}"))?;
+                if json { println!("{}", result.as_json()); }
+                else {
+                    println!("output: {}", result.destination.display());
+                    println!("edited_tensors: {}", result.edited_tensors);
+                    println!("output_bytes: {}", result.bytes);
+                    println!("model_load: NOT_TESTED");
+                    println!("refusal_rate: NOT_EVALUATED");
+                    println!("vision_qa: NOT_EVALUATED");
+                    println!("artifact: single safetensors shard, not a complete HF checkpoint");
+                }
+            } else if json { println!("{}", plan.as_json()); }
+            else { println!("{}", serde_json::to_string_pretty(&plan.as_json())?); }
+        }
         Some("bench-plan") | Some("bench-run") => {
             let execute=cmd=="bench-run";
             let model=PathBuf::from(next_argument(&mut args,"GGUF model for performance measurement")?);
