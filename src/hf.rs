@@ -3,6 +3,7 @@
 //! Large intermediates may require significant RAM and free disk space.
 
 use crate::gguf::{inspect_gguf, GgufSummary};
+use crate::resource::{assess_resources, ResourceMode};
 use crate::llama::{prepare_gguf, quantize_gguf_with_log, Precision};
 use crate::jobs::run_with_log;
 use std::ffi::OsString;
@@ -126,6 +127,8 @@ where F: FnMut(&str) {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, "output exists"));
     }
     let parent = plan.output.parent().ok_or_else(|| invalid("missing output parent"))?;
+    let resources = assess_resources(plan.source.source_weight_bytes, parent, ResourceMode::Gguf, "cpu")?;
+    resources.enforce(false)?;
     let stage = create_stage(parent)?;
     let intermediate = stage.0.join("intermediate.gguf");
     let reduced = stage.0.join("quantized.gguf");
@@ -135,7 +138,7 @@ where F: FnMut(&str) {
         .arg("--outfile").arg(&intermediate).arg("--outtype").arg("auto");
     run_with_log(&mut convert, |line| on_log(line))?;
     let interim = inspect_gguf(&intermediate)?;
-    if interim.tensor_count == 0 || interim.split_count.unwrap_or(1) > 1 {
+    if interim.tensor_count == 0 || !matches!(interim.file_type, Some(0 | 1 | 32)) || interim.split_count.unwrap_or(1) > 1 {
         return Err(invalid("unsupported GGUF intermediate (empty or split)"));
     }
     eprintln!("Ojon: running installed GGUF quantizer.");
