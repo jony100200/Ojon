@@ -9,7 +9,7 @@ use crate::gguf::{inspect_gguf, inspect_gguf_tensors};
 use crate::jobs::run_with_log;
 use serde_json::{json, Value};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
