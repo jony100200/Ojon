@@ -322,6 +322,42 @@ impl Workstation {
             let _ = tx.send(WorkerEvent::Planned(res));
         });
     }
+    fn start_optimizer_advice(&mut self) {
+        if self.busy { return; }
+        if self.inspected_source.as_deref()!=Some(self.source.as_str()) || self.source.trim().is_empty(){
+            self.status="Inspect model metadata first. The optimization assistant will not load any weights.".into();
+            self.needs_redraw=true;
+            return;
+        }
+        let model=PathBuf::from(self.source.trim());
+        let output=self.output.clone();
+        let tools=self.backends.clone();
+        let tx=self.tx.clone();
+        self.busy=true;
+        self.started_at=Some(Instant::now());
+        self.status="Finding next supported optimization step (metadata only; GPU not used)...".into();
+        self.needs_redraw=true;
+        std::thread::spawn(move || {
+            let mut request=ojon_backend::OptimizeWorkflowRequest::new(model);
+            let dest=Path::new(output.trim());
+            let parent=dest.parent().filter(|p|!p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            if parent.is_dir() {request.output_dir=Some(parent.to_path_buf());}
+            let result=ojon_backend::plan_optimize_workflow(&request,&tools)
+                .map(|plan|{
+                    let route=plan["route"].as_str().unwrap_or("not_available");
+                    let step=plan["next_user_step"].as_str()
+                        .unwrap_or("Choose an original high-precision model and a tested quantization format");
+                    let blockers=plan["checks"].as_array()
+                        .map(|checks|checks.iter()
+                            .filter_map(|v|v.as_str()).take(2)
+                            .collect::<Vec<_>>().join(" | "))
+                        .unwrap_or_default();
+                    format!("Ojon advisor [{route}]: {step}. {blockers}. Read-only: no quantization, GPU allocation, quality claim or file writes.")
+                }).map_err(|e|e.to_string());
+            let _=tx.send(WorkerEvent::Planned(result));
+        });
+    }
     fn ready_to_convert(&self) -> bool {
         self.format_tab == 0
             && self.inspected_source.as_deref() == Some(self.source.as_str())
@@ -595,7 +631,7 @@ impl Workstation {
         let mut rescan = false;
         let mut download: Option<BackendId> = None;
         let mut new_focus = self.focus;
-        let (mut inspect, mut plan, mut convert, mut smoke, mut bench) = (false, false, false, false, false);
+        let (mut inspect, mut plan, mut advise, mut convert, mut smoke, mut bench) = (false, false, false, false, false, false);
         {
             let mut ui = KathamoUi::new(&mut cmds, &mut self.icons, &palette, viewport, click_pointer);
 
@@ -761,6 +797,7 @@ impl Workstation {
                                 if actions.button_secondary("Check Safety & Plan").clicked() { plan = true; }
                                 if actions.button("Quantize Model").clicked() { convert = true; }
                             });
+                            if card.button_secondary("Recommend Best Route (No GPU)").clicked() { advise = true; }
                         });
 
                         col.glass_card(330.0, |card| {
@@ -844,6 +881,7 @@ impl Workstation {
         // The action runs on a worker thread; rendering never blocks on model I/O.
         if inspect { self.start_inspect(); }
         else if plan { self.start_plan(); }
+        else if advise { self.start_optimizer_advice(); }
         else if convert { self.start_quantize(); }
         else if smoke { self.start_smoke(); }
         else if bench { self.start_bench(); }
