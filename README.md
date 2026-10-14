@@ -25,6 +25,27 @@ ojon optimize-workflow-plan 'D:\Models\current-Q4_K_M.gguf' --candidate iq3='D:\
 ojon optimize-workflow-plan 'D:\Models\original-F16.gguf' --baseline 'D:\Models\current-Q4_K_M.gguf' --suite 'D:\Bench\coding-suite.json' --output-dir 'D:\Bench' --goal balanced --json
 ```
 
+An approved CPU-only run uses the **same validated Rust adapters**, without executing a
+shell string. Both steps require a real held-out task suite and a current Q4 reference.
+The run does not overwrite originals or silently allocate a GPU.
+
+```powershell
+# First inspect the proposal (read-only):
+ojon optimize-workflow-plan 'D:\Models\original-F16.gguf' --baseline 'D:\Models\current-Q4_K_M.gguf' --suite 'D:\Bench\coding-suite.json' --output-dir 'D:\Bench' --imatrix 'D:\Bench\calibration.imatrix' --ppl-corpus 'D:\Bench\heldout.txt' --goal balanced --json
+
+# Explicit user approval: real quantization + matched task/PPL evaluation
+ojon optimize-workflow-run 'D:\Models\original-F16.gguf' --baseline 'D:\Models\current-Q4_K_M.gguf' --suite 'D:\Bench\coding-suite.json' --output-dir 'D:\Bench' --imatrix 'D:\Bench\calibration.imatrix' --ppl-corpus 'D:\Bench\heldout.txt' --goal balanced --confirm --json
+```
+
+Existing smaller community quants can instead be provided with `--candidate name=path.gguf`
+and the quantized Q4 reference as the first positional model; this compares weights
+without recompressing them. If the evaluation or perplexity backend is unavailable,
+a requested gate blocks execution rather than silently disappearing.
+Only `balanced` and `smallest` are currently runnable from the guided workflow;
+`fastest` requires separate **real hardware throughput** measurements and is not
+yet an automatic winner selector. CUDA/XPU execution remains in the advanced
+device-specific commands until compatibility and hardware availability are verified.
+Passing the configured task/PPL checks is **not proof of general zero-loss quality**.
 The plan gives the proposed action, blocking prerequisites, ordered stages,
 and an **argument-array** command for a separate user-approved execution.
 The planner does not run converters, import Python, allocate a GPU, download
