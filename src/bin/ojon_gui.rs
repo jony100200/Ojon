@@ -167,6 +167,9 @@ impl Workstation {
             }
         }
         let output = default_output(&source, Precision::default());
+        let initial_opt_output=Path::new(&output).parent()
+            .filter(|p|!p.as_os_str().is_empty())
+            .map(|p|p.to_string_lossy().into_owned()).unwrap_or_default();
         Self {
             source, output, quantizer, converter, runtime, benchmark,
             prompt: "Explain in one sentence what a quantized language model is.".into(),
@@ -178,9 +181,7 @@ impl Workstation {
             opt_baseline: String::new(),
             opt_candidate: String::new(),
             opt_suite: String::new(),
-            opt_output: Path::new(&output).parent()
-                .filter(|p|!p.as_os_str().is_empty())
-                .map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),
+            opt_output: initial_opt_output,
             opt_imatrix: String::new(),
             opt_ppl: String::new(),
             opt_min_saving: "5".into(),
@@ -729,6 +730,8 @@ impl Workstation {
         self.needs_redraw = true;
     }
     fn render(&mut self, width: f32, height: f32) -> CommandBuffer {
+        let optimizer_plan_current=self.opt_planned.as_ref().is_some_and(|(prior,_)|
+            self.optimize_request().is_ok_and(|now|now==*prior));
         let source_is_current = self.inspected_source.as_deref() == Some(self.source.as_str());
         let previous_precision = self.precision();
         let auto_generated_output = self.output == default_output(&self.source, previous_precision);
@@ -910,7 +913,7 @@ impl Workstation {
                             bar.tabs(&["Automatic Optimize","Manual Tools"], workspace_tab);
                         });
                         if *workspace_tab==0 {
-                            col.glass_card(414.0, |card|{
+                            col.glass_card(398.0, |card|{
                                 card.heading("02   AUTOMATIC MODEL OPTIMIZATION");
                                 card.label("Find a smaller GGUF without measured task regression.");
                                 card.tabs(&["Model & Tasks","Quality Controls"], optimize_settings_tab);
@@ -959,31 +962,12 @@ impl Workstation {
                                 }
                                 card.label("CPU-only default; other backends require explicit verified hardware setup.");
                             });
-                            col.card(266.0, |card|{
+                            col.card(252.0, |card|{
                                 card.heading("03   REVIEW, APPROVE & RESULTS");
                                 if card.button_secondary("1. Inspect Optimization Plan (No GPU)").clicked(){
                                     advise=true;
                                 }
-                                let preview=opt_planned.map(|(req,plan)|{
-                                    let editable=Path::new(source.trim())==req.model.as_path()
-                                        && opt_goal.eq(&if req.goal==OptimizeGoal::Smallest{1usize}else{0usize})
-                                        && opt_baseline.trim()==req.current_baseline.as_ref()
-                                            .map(|x|x.to_string_lossy().to_string()).unwrap_or_default()
-                                        && opt_candidate.trim()==req.candidates.first()
-                                            .map(|x|x.1.to_string_lossy().to_string()).unwrap_or_default()
-                                        && opt_suite.trim()==req.suite.as_ref()
-                                            .map(|x|x.to_string_lossy().to_string()).unwrap_or_default()
-                                        && opt_output.trim()==req.output_dir.as_ref()
-                                            .map(|x|x.to_string_lossy().to_string()).unwrap_or_default()
-                                        && opt_imatrix.trim()==req.imatrix.as_ref()
-                                            .map(|x|x.to_string_lossy().to_string()).unwrap_or_default()
-                                        && opt_ppl.trim()==req.ppl_corpus.as_ref()
-                                            .map(|x|x.to_string_lossy().to_string()).unwrap_or_default()
-                                        && opt_min_saving.trim()==req.min_saving_percent.to_string()
-                                        && opt_max_loss.trim()==req.max_loss_points.to_string()
-                                        && opt_max_ppl.trim()==req.max_ppl_regression_pct.to_string();
-                                    (plan,editable)
-                                });
+                                let preview=opt_planned.map(|(_,plan)| (plan,optimizer_plan_current));
                                 if let Some((review,unchanged))=preview {
                                     let route=review["route"].as_str().unwrap_or("unknown");
                                     let valid=review["ready_for_user_approved_execution"]==true;
