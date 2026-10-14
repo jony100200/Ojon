@@ -1,6 +1,10 @@
-//! Ojon's Kathamo-powered desktop frontend.
-//! UI logic lives here; the bin target only launches the application.
+//! Kathamo desktop frontend for Ojon.
+//! Business logic lives in ojon_backend; this module owns the user interface.
+//! Cargo exposes the GUI through a minimal src/bin/ launcher.
 
 mod workstation;
 
-pub(crate) use workstation::run;
+/// Entry point used by the ojon-gui Cargo executable.
+pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
+    workstation::run()
+}
