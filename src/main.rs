@@ -31,7 +31,7 @@ Commands:
   ojon backends [--json]     Detect installed engines and show official download links
   ojon probe <model-path> [--json]   Identify model format/family without loading weights
   ojon optimize-workflow-run <model-path> [--baseline Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--imatrix calibration.imatrix] [--tensor-sensitivity scores.json] [--ppl-corpus heldout.txt] [--max-ppl-regression-pct 0] [--goal balanced|smallest] --confirm [--json]
-  ojon optimize-workflow-plan <model-path> [--baseline current-Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--goal balanced|smallest|fastest] [--device auto|cpu|cuda|xpu] [--min-saving-percent 5] [--max-loss-points 0] [--json]
+  ojon optimize-workflow-plan <model-path> [--baseline current-Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--goal balanced|smallest|fastest] [--device auto|cpu|cuda|xpu] [--runtime-device SYCL0|CUDA0] [--gpu-layers 99] [--min-saving-percent 5] [--max-loss-points 0] [--json]
   ojon optimize-plan <model-path> [--device auto|cpu|cuda|xpu] [--json]   Compare candidate routes without converting
   ojon resource-plan <model-path> <existing-output-parent> [--mode hqq|openvino|autoround|gguf|pack|exl3] [--device cpu|cuda|xpu|auto] [--json]
   ojon dataset-audit <dataset.jsonl> [--json]   Audit external dataset for drift, dead paths, staleness
@@ -1518,6 +1518,11 @@ fn run() -> io::Result<()> {
                     }
                     Some("--device")=>input.device=next_argument(&mut args,"device")?
                         .to_str().ok_or_else(||invalid("device must be UTF-8"))?.to_owned(),
+                    Some("--runtime-device")=>input.runtime_device=Some(
+                        next_argument(&mut args,"llama.cpp device name, e.g. SYCL0 or CUDA0")?
+                            .to_string_lossy().into_owned()),
+                    Some("--gpu-layers")=>input.gpu_layers=next_argument(&mut args,"GPU offload layers")?
+                        .to_string_lossy().parse().map_err(|_|invalid("GPU layers must be integer"))?,
                     Some("--min-saving-percent")=>{
                         input.min_saving_percent=next_argument(&mut args,"minimum size saving percent")?
                             .to_string_lossy().parse().map_err(|_|invalid("saving must be numeric"))?;

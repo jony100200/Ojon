@@ -58,11 +58,19 @@ pub struct SmokeCapture {
 /// Runs the installed CLI and captures its real output for the Kathamo Test pane.
 /// Keep token count small: Command::output buffers the child's output in RAM.
 pub fn smoke_gguf_capture(
+    model:&Path,runtime:&Path,prompt:&str,tokens:u32,gpu_layers:u32
+)->io::Result<SmokeCapture>{
+    smoke_gguf_capture_with_device(model,runtime,prompt,tokens,gpu_layers,None)
+}
+/// Explicit device ID is passed straight to the selected llama-cli. A success
+/// proves this specific backend/device ran, not free VRAM or model quality.
+pub fn smoke_gguf_capture_with_device(
     model: &Path,
     runtime: &Path,
     prompt: &str,
     tokens: u32,
     gpu_layers: u32,
+    device:Option<&str>,
 ) -> io::Result<SmokeCapture> {
     if !(1..=128).contains(&tokens) {
         return Err(io::Error::new(ErrorKind::InvalidInput, "capture mode allows 1..=128 tokens"));
@@ -83,6 +91,12 @@ pub fn smoke_gguf_capture(
         .arg("--simple-io")
         .arg("-st")
         ;
+    if let Some(device)=device{
+        if device.is_empty()||device.len()>80||!device.bytes().all(|b|
+            b.is_ascii_alphanumeric()||matches!(b,b'_'|b'-'|b'/'))
+        {return Err(io::Error::new(ErrorKind::InvalidInput,"invalid explicit backend device")); }
+        cmd.arg("-dev").arg(device);
+    }
     let result=crate::jobs::capture_with_timeout(&mut cmd,128*1024,Duration::from_secs(600))?;
     let stderr = String::from_utf8_lossy(&result.stderr);
     if !result.status.success() {

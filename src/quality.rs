@@ -232,6 +232,33 @@ pub fn rank_quality_gated_candidates(kind:&str,result:&Value)->Vec<Value>{
     ranked.into_iter().map(|(_,row)|row).collect()
 }
 
+/// Choose a measured tradeoff after strict held-out gates and backend loading.
+/// Candidate list must be sorted smallest-first; benchmarks are from the SAME
+/// settings and observed device, as checked by compare_bench_files.
+/// Balanced policy: smallest variant within 85% of the best measured decode
+/// throughput; Fastest: highest measured decode throughput.
+pub fn select_workflow_goal(loadable:&[Value],benchmarks:&[Value],goal:&str)->(Value,&'static str){
+    if loadable.is_empty(){return (Value::Null,"no_loadable_quality_passing_candidate");}
+    if goal=="smallest"{return (loadable[0].clone(),"smallest_quality_passing_loadable");}
+    let measured:Vec<(&Value,f64)>=benchmarks.iter().filter_map(|bench|{
+        if bench["status"]!="MEASURED"{return None;}
+        let speed=bench["metrics"]["token_generation"]["tokens_per_second"].as_f64()?;
+        if speed>0.0&&speed.is_finite(){Some((bench,speed))}else{None}
+    }).collect();
+    if measured.is_empty(){
+        return if goal=="balanced"{(loadable[0].clone(),"size_only_no_comparable_speed_evidence")}
+            else{(Value::Null,"fastest_requires_measured_comparable_benchmarks")};
+    }
+    let max_decode=measured.iter().map(|(_,speed)|*speed).fold(0.0f64,f64::max);
+    let threshold=if goal=="fastest"{max_decode}else{max_decode*0.85};
+    let picked=loadable.iter().find(|candidate|{
+        measured.iter().any(|(bench,speed)|bench["path"]==candidate["path"]&&*speed+1e-9>=threshold)
+    });
+    (picked.cloned().unwrap_or(Value::Null),
+        if goal=="fastest"{"fastest_measured_decode_quality_passing"}
+        else{"smallest_within_85pct_of_fastest_measured_decode"})
+}
+
 pub fn recommend(report: &QualityReport) -> Value {
     let mut ranked=Vec::new();
     for candidate in &report.candidates {
