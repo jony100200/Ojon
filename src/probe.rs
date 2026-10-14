@@ -70,7 +70,8 @@ fn category_from(text: &str, has_vision_config: bool) -> (ModelCategory, &'stati
         .iter().any(|x| s.contains(x))
     { return (ModelCategory::VisionLanguage, "heuristic"); }
     if ["flux", "wan", "ltx", "diffusion", "dit", "unet", "stable_diffusion",
-        "hunyuanvideo", "hunyuan_video", "z_image", "qwen_image"]
+        "hunyuanvideo", "hunyuan_video", "z_image", "qwen_image",
+        "iris-3b", "hidream", "krea2", "krea_2", "llada_image", "sefi_image"]
         .iter().any(|x| s.contains(x))
     { return (ModelCategory::Diffusion, "heuristic"); }
     if ["whisper", "encodec", "wav2vec", "speecht5", "parler_tts",
@@ -79,6 +80,9 @@ fn category_from(text: &str, has_vision_config: bool) -> (ModelCategory, &'stati
     if ["reranker", "embedding", "sentence_transformer", "bge_", "e5_", "gte_"]
         .iter().any(|x| s.contains(x))
     { return (ModelCategory::EmbeddingOrReranker, "heuristic"); }
+    if s=="iris" || s=="krea" || s=="krea-2" || s=="sefi"{
+        return (ModelCategory::Diffusion,"architecture_hint");
+    }
     if !s.is_empty() && s != "unknown" {
         return (ModelCategory::Language, "weak_guess");
     }
@@ -283,8 +287,12 @@ pub fn probe_model(input: &Path) -> io::Result<ModelProbe> {
                 Ok(ModelProbe {
                     path,format:"gguf",category,identification:desc,confidence,
                     bytes:gguf.file_bytes,tensor_count:Some(gguf.tensor_count),
-                    conversion_route:"public_llama_cpp_llama_quantize",
-                    conversion_status:"candidate_only_requires_installed_backend_compatibility",
+                    conversion_route:if category==ModelCategory::Diffusion{
+                        "comfyui_gguf_loader_must_be_verified"
+                    }else{"public_llama_cpp_llama_quantize"},
+                    conversion_status:if category==ModelCategory::Diffusion{
+                        "diffusion_gguf_not_llama_cli_inference"
+                    }else{"candidate_only_requires_installed_backend_compatibility"},
                     notes:vec![
                         "GGUF header and tensor catalog inspected; tensor bytes and runtime compatibility not verified.".into(),
                         "Quantizing an already heavily quantized source may not be beneficial; prefer F16/BF16 input.".into(),
@@ -305,6 +313,8 @@ mod tests {
     fn categorize_without_promising_compatibility() {
         assert_eq!(category_from("Qwen3VLForConditionalGeneration", true).0, ModelCategory::VisionLanguage);
         assert_eq!(category_from("WanVideoModel", false).0, ModelCategory::Diffusion);
+        assert_eq!(category_from("iris", false).0, ModelCategory::Diffusion);
+        assert_eq!(category_from("Iris-3B", false).0, ModelCategory::Diffusion);
         assert_eq!(category_from("unknown", false).0, ModelCategory::Unknown);
     }
 }

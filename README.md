@@ -92,6 +92,47 @@ Corrupt or unsupported settings block implicit discovery and are not
 overwritten silently. Configuration files are preferences—not evidence of
 model compatibility. Quantization receipts remain separate.
 
+## Community image-model references (Rebel AI)
+
+Ojon includes an **offline, opt-in** catalog of the public Rebel AI Iris-3B
+diffusion quantizations. This is a community checkpoint reference, not bundled
+weights or a declaration that the user's ComfyUI supports them.
+
+```sh
+ojon image-models
+ojon image-fetch-plan iris-3b-q4 "/existing/models/diffusion_models"
+# After reviewing the current Apache-2.0 upstream model card and compatible
+# ComfyUI-Iris runtime, download explicitly with a local 'hf' CLI:
+ojon image-fetch-run iris-3b-q4 "/existing/models/diffusion_models" --confirm
+```
+
+The Q4_K_S checkpoint is documented at
+https://huggingface.co/realrebelai/iris-3b_GGUFs, with the architecture and
+original weights from https://huggingface.co/speridlabs/iris-3b.
+Iris-3B generates pixels directly; its text encoder/conditioning and
+ComfyUI loader are **not** included in a standalone GGUF.
+
+For an image quality trial, prepare an *independent* matched ComfyUI workflow
+and a recipe, e.g.:
+```json
+{"schema":"ojon.image_experiment.v1",
+ "prompt":"a coastal landscape at dawn",
+ "seeds":[42,137],"sampler":"euler","scheduler":"normal",
+ "steps":30,"cfg":1.0,"width":1024,"height":1024,
+ "text_encoder":"your-matched-text-encoder",
+ "vae":"none-for-Iris-pixel-space"}
+```
+Then inspect the plan with
+`ojon image-compare-plan baseline.safetensors candidate.gguf
+workflow.json matched.json`.
+This checks paths, format and experimental controls, but *does not* render,
+score or claim image quality. For pixel-space Iris, VAE should be marked
+as absent rather than fabricating a decoder. Other Rebel AI models may require
+an actual VAE, specialized sampler, and licensing restrictions.
+
+Ojon doesn't install RebelUI, download model weights without confirmation,
+or confuse diffusion GGUF with llama.cpp language-model inference.
+
 ## What works today
 
 ### Application code layout
