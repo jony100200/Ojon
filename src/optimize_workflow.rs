@@ -11,6 +11,7 @@ use crate::llama::Precision;
 use crate::quant_compare::run_existing_quant_comparison;
 use crate::quant_parity::run_quant_parity;
 use crate::probe::{probe_model, ModelCategory};
+use crate::resource::{assess_resources,ResourceMode};
 use crate::quant_compare::prepare_existing_quant_comparison;
 use crate::quant_parity::{prepare_quant_parity, QuantParityOptions};
 use crate::task_eval::parse_eval_suite;
@@ -193,6 +194,24 @@ pub fn plan_optimize_workflow(
     if input.imatrix.is_none() && original_gguf{
         checks.push("No calibrated importance matrix supplied; low-bit candidates will use uncalibrated recipes.".into());
     }
+    // Metadata + read-only host resource telemetry; never infer quantizer peak
+    // RSS from GGUF size. Unknown resources do not authorize automatic writes.
+    let mut capacity_pass=false;
+    let mut resource_snapshot=Value::Null;
+    if original_gguf && probe.category==ModelCategory::Language{
+        if let Some(parent)=out.as_deref(){
+            match assess_resources(probe.bytes,parent,ResourceMode::Gguf,"cpu"){
+                Ok(info)=>{
+                    capacity_pass=info.ram_safe==Some(true)&&info.disk_safe==Some(true);
+                    if !capacity_pass {
+                        checks.push(format!("Automatic quantization resource policy not verified: {}. Free at least the stated RAM and scratch budget; use advanced manual tools for explicitly accepted risks.",info.status()));
+                    }
+                    resource_snapshot=info.as_json();
+                },
+                Err(e)=>checks.push(format!("RAM/scratch resource preflight failed: {e}")),
+            }
+        }
+    }
     let base_text=baseline.as_ref().map(|p|path_text(p));
     let output_text=out.as_ref().map(|p|path_text(p));
     let mut next=None::<String>;
@@ -256,7 +275,9 @@ pub fn plan_optimize_workflow(
     }else if original_gguf {
         if let (Some(base),Some(suite),Some(out))=(&baseline,&suite,&out){
             route="quantize_and_compare";
-            if !quantizer_available||!evaluator_available {
+            if !capacity_pass {
+                // Never start an automatic 3-candidate sweep on unverified disk/RAM.
+            }else if !quantizer_available||!evaluator_available {
                 checks.push("Both llama-quantize and llama-cli must be discovered for end-to-end candidate search.".into());
             }else if input.ppl_corpus.is_some()
                 && executable(backends,BackendId::LlamaPerplexity).is_none(){
@@ -334,6 +355,7 @@ pub fn plan_optimize_workflow(
         "heldout_perplexity_corpus":input.ppl_corpus.as_ref().map(|p|path_text(p)),
         "max_relative_perplexity_regression_pct":input.max_ppl_regression_pct,
         "output_directory":output_text,
+        "minimum_cpu_resource_preflight":resource_snapshot,
         "goal":input.goal.label(),
         "target_device":input.device,
         "runtime_gpu_allocated":false,
@@ -420,12 +442,13 @@ pub fn run_optimize_workflow(
         "schema":"ojon.optimize_workflow_result.v1",
         "mode":"user_confirmed_cpu_only",
         "route":kind,
-        "status":"EXPERIMENT_COMPLETED",
+        "status":if candidate.is_null(){"NO_CANDIDATE_PASSED"}else{"PROVISIONAL_CANDIDATE_FOUND"},
         "model_source":request.model.to_string_lossy(),
         "goal":request.goal.label(),
         "quality_reference":decision["current_baseline"],
         "evaluated_tasks_only":true,
-        "perplexity_and_runtime_speed_not_automatically_tested":true,
+        "heldout_perplexity_requested":request.ppl_corpus.is_some(),
+        "runtime_speed_not_automatically_tested":true,
         "global_quality_lossless_proven":false,
         "hardware_peak_ram_vram_fit_proven":false,
         "provisional_candidate":candidate,
