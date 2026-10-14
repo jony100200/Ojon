@@ -41,7 +41,7 @@ impl OptimizeGoal {
         match self{Self::Smallest=>"smallest",Self::Balanced=>"balanced",Self::Fastest=>"fastest"}
     }
 }
-#[derive(Debug,Clone)]
+#[derive(Debug,Clone,PartialEq)]
 pub struct OptimizeWorkflowRequest {
     pub model:PathBuf,
     pub current_baseline:Option<PathBuf>,
