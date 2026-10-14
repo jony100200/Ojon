@@ -15,6 +15,7 @@ use crate::resource::{assess_resources,ResourceMode};
 use crate::quant_compare::prepare_existing_quant_comparison;
 use crate::quant_parity::{prepare_quant_parity, QuantParityOptions};
 use crate::task_eval::parse_eval_suite;
+use crate::smoke::smoke_gguf_capture;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::io::{self, ErrorKind};
@@ -448,9 +449,43 @@ pub fn run_optimize_workflow(
         },
         _=>return Err(invalid("unsupported execution route; no candidate work started")),
     };
-    let candidate=if kind=="existing_quant_comparison"{
+    let provisional=if kind=="existing_quant_comparison"{
         result["provisional_smallest_candidate"].clone()
     }else{result["provisional_smallest_measured_candidate"].clone()};
+    // Quality gates alone are not a deployment verdict. The chosen GGUF must
+    // also load through the installed runtime in a separate real smoke check.
+    // A failed loader check cannot silently retain a provisional winner.
+    let candidate_path=if kind=="existing_quant_comparison" {
+        provisional.get("path").and_then(Value::as_str)
+    } else {
+        provisional.as_str()
+    };
+    let (candidate,load_check)=if let Some(path)=candidate_path {
+        log("[ojon] Rechecking selected candidate with real CPU llama-cli loading");
+        match smoke_gguf_capture(
+            Path::new(path),&options.eval_tool,
+            "Reply with the single word READY.",16,0
+        ){
+            Ok(capture) if !capture.stdout.trim().is_empty()=>(
+                provisional,
+                json!({"status":"LOAD_AND_GENERATION_PASSED",
+                    "backend":"llama-cli","gpu_layers":0,
+                    "captured_output_chars":capture.stdout.chars().count(),
+                    "note":"Smoke only; held-out task evidence is separate"})
+            ),
+            Ok(_)=>(
+                Value::Null,
+                json!({"status":"LOAD_CHECK_FAILED",
+                    "reason":"Runtime exited successfully but generated no captured output"})
+            ),
+            Err(e)=>(
+                Value::Null,
+                json!({"status":"LOAD_CHECK_FAILED","reason":e.to_string()})
+            ),
+        }
+    }else{
+        (Value::Null,json!({"status":"NOT_RUN_NO_QUALITY_PASSING_CANDIDATE"}))
+    };
     Ok(json!({
         "schema":"ojon.optimize_workflow_result.v1",
         "mode":"user_confirmed_cpu_only",
@@ -465,6 +500,8 @@ pub fn run_optimize_workflow(
         "global_quality_lossless_proven":false,
         "hardware_peak_ram_vram_fit_proven":false,
         "provisional_candidate":candidate,
+        "selected_candidate_runtime_load":load_check,
+        "runtime_load_verified_on_cpu":load_check["status"]=="LOAD_AND_GENERATION_PASSED",
         "evidence":result,
         "note":"Inspect all candidate task scores, size, RAM, VRAM and latency before deploying. There may be no candidate that passes."
     }))
