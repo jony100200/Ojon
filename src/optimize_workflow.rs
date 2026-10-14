@@ -6,7 +6,10 @@
 //! models, allocate GPU memory, download dependencies or promise a winner.
 
 use crate::discovery::{BackendId, FoundBackend};
-use crate::gguf::{inspect_gguf, inspect_gguf_tensors};
+use crate::gguf::inspect_gguf;
+use crate::llama::Precision;
+use crate::quant_compare::run_existing_quant_comparison;
+use crate::quant_parity::run_quant_parity;
 use crate::probe::{probe_model, ModelCategory};
 use crate::quant_compare::prepare_existing_quant_comparison;
 use crate::quant_parity::{prepare_quant_parity, QuantParityOptions};
@@ -137,7 +140,12 @@ pub fn plan_optimize_workflow(
     let mut options=QuantParityOptions::default();
     options.min_saving_percent=input.min_saving_percent;
     options.max_loss_points=input.max_loss_points;
-    options.gpu_layers=0; // planning never consumes a GPU; testing defaults CPU too
+    options.gpu_layers=0; // Guided workflow currently runs CPU-only.
+    options.precisions=match input.goal {
+        OptimizeGoal::Smallest=>vec![Precision::IQ3M,Precision::Q3KM,Precision::IQ4XS],
+        OptimizeGoal::Balanced=>vec![Precision::IQ4XS,Precision::IQ3M,Precision::Q3KM],
+        OptimizeGoal::Fastest=>vec![Precision::Q3KM,Precision::IQ4XS,Precision::IQ3M],
+    };
     if let Some(bin)=executable(backends,BackendId::LlamaQuantize){options.quantizer=bin;}
     if let Some(bin)=executable(backends,BackendId::LlamaCli){options.eval_tool=bin;}
     let quantizer_available=executable(backends,BackendId::LlamaQuantize).is_some();
@@ -150,8 +158,8 @@ pub fn plan_optimize_workflow(
     if probe.category==ModelCategory::VisionLanguage{
         checks.push("Vision model: matching mmproj and image-input evaluation are mandatory before claiming quality parity. This basic workflow cannot yet automate those requirements.".into());
     }
-    if input.device!="cpu"{
-        checks.push("Selected GPU/backend availability, loaded VRAM, and supported kernels are NOT verified by metadata-only planning.".into());
+    if input.device=="cuda"||input.device=="xpu"{
+        checks.push("Guided execution is CPU-only. For GPU runs, select a verified physical device and use the advanced comparison CLI; requested GPU was NOT selected.".into());
     }
     if suite.is_none(){
         checks.push("No held-out test suite supplied; result cannot prove quality parity.".into());
@@ -168,6 +176,13 @@ pub fn plan_optimize_workflow(
     let text_like=probe.category==ModelCategory::Language;
     if !text_like {
         checks.push("No fully verified one-click quality optimization path for this model category. Use the individual model-family workflow.".into());
+    }else if input.goal==OptimizeGoal::Fastest {
+        route="speed_benchmark_required";
+        next=Some("Use matched latency and throughput benchmarks; task and size comparisons alone cannot choose a fastest model".into());
+        checks.push("Fastest goal is not implemented in automatic workflow: benchmarking must compare real prefill, decode, model loading and memory on the SAME device.".into());
+    }else if input.device=="cuda"||input.device=="xpu"{
+        route="explicit_gpu_selection_required";
+        next=Some("Use advanced quant-parity or quant-compare with a verified device identifier".into());
     }else if !input.candidates.is_empty(){
         route="existing_candidate_comparison";
         if let (Some(base),Some(suite),Some(out))=(&baseline,&suite,&out){
