@@ -767,7 +767,7 @@ mod tests{
     fn goals_and_limits_are_explicit(){
         assert_eq!(OptimizeGoal::parse("smallest").unwrap(),OptimizeGoal::Smallest);
         assert!(OptimizeGoal::parse("magical").is_err());
-        assert_eq!(types_for(OptimizeGoal::Smallest),"IQ3_M,Q3_K_M,IQ4_XS");
+        assert_eq!(types_for(OptimizeGoal::Smallest),"IQ3_M,Q3_K_M,Q3_K_L,IQ4_XS");
     }
     #[test]
     fn invalid_arguments_do_not_invent_a_plan(){

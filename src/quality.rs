@@ -337,6 +337,31 @@ mod tests {
     }
 
     #[test]
+    fn guided_selector_fails_closed_and_applies_measured_balanced_policy(){
+        let report=json!({"results":[
+            {"status":"FAILED_QUALITY_GATE","name":"bad","bytes":1,"path":"bad.gguf"},
+            {"status":"NO_DETECTED_TEST_REGRESSION","name":"small","bytes":100,"path":"small.gguf"},
+            {"status":"NO_DETECTED_TEST_REGRESSION","name":"faster","bytes":120,"path":"faster.gguf"}
+        ]});
+        let ranked=rank_quality_gated_candidates("existing_quant_comparison",&report);
+        assert_eq!(ranked.len(),2);
+        let measured=vec![
+            json!({"path":"small.gguf","status":"MEASURED",
+                "metrics":{"token_generation":{"tokens_per_second":80.0}}}),
+            json!({"path":"faster.gguf","status":"MEASURED",
+                "metrics":{"token_generation":{"tokens_per_second":100.0}}})
+        ];
+        assert_eq!(select_workflow_goal(&ranked,&measured,"smallest").0["path"],"small.gguf");
+        assert_eq!(select_workflow_goal(&ranked,&measured,"balanced").0["path"],"faster.gguf");
+        assert_eq!(select_workflow_goal(&ranked,&measured,"fastest").0["path"],"faster.gguf");
+        assert!(select_workflow_goal(&ranked,&[],"fastest").0.is_null());
+        let adaptive=json!({"candidates":[
+            {"output":"adaptive.gguf","bytes":80,"status":"measured_task_suite","task_quality_pass":true},
+            {"output":"failed.gguf","bytes":50,"status":"measured_task_suite","task_quality_pass":false}
+        ]});
+        assert_eq!(rank_quality_gated_candidates("adaptive_quant_comparison",&adaptive).len(),1);
+    }
+    #[test]
     fn reject_untested() {
         let mut r=report(vec![candidate("Q5",8,0.9)]);
         r.candidates[0].runtime_load_verified=false;

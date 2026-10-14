@@ -256,14 +256,18 @@ pub fn run_bench(plan: &BenchPlan, receipt: &Path) -> io::Result<Value> {
     if !parent.is_dir() { return Err(invalid("receipt parent directory must already exist")); }
     if target.exists() { return Err(io::Error::new(ErrorKind::AlreadyExists, "receipt already exists; refusing overwrite")); }
     eprintln!("Ojon: real llama-bench loads model weights. Results require an installed backend and sufficient real RAM/VRAM.");
-    let output = crate::jobs::capture_with_timeout(&mut plan.command(),MAX_BENCH_OUTPUT,Duration::from_secs(1200))?;
+    let captured=crate::jobs::capture_with_timeout_measured(
+        &mut plan.command(),MAX_BENCH_OUTPUT,Duration::from_secs(1200))?;
+    let output=captured.output;
     if !output.status.success() {
         let tail = String::from_utf8_lossy(&output.stderr).chars().take(1200).collect::<String>();
         return Err(io::Error::other(format!("llama-bench failed: {}: {tail}", output.status)));
     }
     if output.stdout.len() > MAX_BENCH_OUTPUT { return Err(invalid("llama-bench JSON exceeded 8 MiB")); }
     let stdout = String::from_utf8(output.stdout).map_err(|_| invalid("llama-bench JSON is not UTF-8"))?;
-    let parsed = parse_bench_json(&stdout, plan)?;
+    let mut parsed = parse_bench_json(&stdout, plan)?;
+    parsed["peak_ram_bytes"]=json!(captured.peak_ram_bytes);
+    parsed["peak_ram_metric"]=json!("observed_subprocess_peak_working_set; not total RAM, committed memory or GPU VRAM");
     // create_new is atomic with respect to collisions. No incomplete file is
     // reported as a successful receipt on a failed write.
     let bytes = serde_json::to_vec_pretty(&parsed).map_err(io::Error::other)?;
