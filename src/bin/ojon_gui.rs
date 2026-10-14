@@ -95,6 +95,7 @@ struct Workstation {
     format_tab: usize,
     workspace_tab: usize,
     optimize_settings_tab: usize,
+    optimize_review_tab: usize,
     opt_baseline: String,
     opt_candidate: String,
     opt_suite: String,
@@ -178,6 +179,7 @@ impl Workstation {
             format_tab: 0,
             workspace_tab: 0,
             optimize_settings_tab: 0,
+            optimize_review_tab: 0,
             opt_baseline: String::new(),
             opt_candidate: String::new(),
             opt_suite: String::new(),
@@ -411,6 +413,7 @@ impl Workstation {
         let tx=self.tx.clone();
         self.opt_planned=None;
         self.opt_result=None;
+        self.optimize_review_tab=0;
         self.busy=true;
         self.started_at=Some(Instant::now());
         self.status="Planning optimal quantization route (read-only; no model weights or GPU)".into();
@@ -443,6 +446,7 @@ impl Workstation {
         self.opt_planned=None; // one approved action per plan; never double-start
         self.opt_result=None;
         self.log_tail.clear();
+        self.optimize_review_tab=1;
         self.started_at=Some(Instant::now());
         self.last_elapsed=None;
         self.busy=true;
@@ -633,6 +637,7 @@ impl Workstation {
                         "Experiment finished, but no candidate passed the selected quality/size gates.".into()
                     };
                     self.opt_result=Some(value);
+                    self.optimize_review_tab=1;
                 }
                 WorkerEvent::OptimizerRun(Err(e))=>{
                     self.status=format!("Optimization failed: {e}");
@@ -753,6 +758,7 @@ impl Workstation {
         let format_tab = &mut self.format_tab;
         let workspace_tab=&mut self.workspace_tab;
         let optimize_settings_tab=&mut self.optimize_settings_tab;
+        let optimize_review_tab=&mut self.optimize_review_tab;
         let opt_baseline=&mut self.opt_baseline;
         let opt_candidate=&mut self.opt_candidate;
         let opt_suite=&mut self.opt_suite;
@@ -963,61 +969,73 @@ impl Workstation {
                                 card.label("CPU-only default; other backends require explicit verified hardware setup.");
                             });
                             col.card(252.0, |card|{
-                                card.heading("03   REVIEW, APPROVE & RESULTS");
-                                if card.button_secondary("1. Inspect Optimization Plan (No GPU)").clicked(){
-                                    advise=true;
-                                }
-                                let preview=opt_planned.map(|(_,plan)| (plan,optimizer_plan_current));
-                                if let Some((review,unchanged))=preview {
-                                    let route=review["route"].as_str().unwrap_or("unknown");
-                                    let valid=review["ready_for_user_approved_execution"]==true;
-                                    card.status_pill(
-                                        if valid&&unchanged{"Plan ready for approval"}
-                                        else if !unchanged {"Settings edited; replan required"}
-                                        else {"Requirements missing"},
-                                        valid&&unchanged);
-                                    card.label(&format!("Route: {route}"));
-                                    if let Some(step)=review["next_user_step"].as_str(){
-                                        card.label(&step.chars().take(100).collect::<String>());
+                                card.heading("03   OPTIMIZATION WORKFLOW");
+                                card.tabs(&["Review & Run","Results & Logs"],optimize_review_tab);
+                                if *optimize_review_tab==0{
+                                    if card.button_secondary("1. Build Read-Only Plan").clicked(){
+                                        advise=true;
                                     }
-                                    for note in review["checks"].as_array().into_iter().flatten().take(2){
-                                        if let Some(reason)=note.as_str(){
-                                            card.label(&reason.chars().take(92).collect::<String>());
+                                    let preview=opt_planned.map(|(_,plan)| (plan,optimizer_plan_current));
+                                    if let Some((review,unchanged))=preview {
+                                        let route=review["route"].as_str().unwrap_or("unavailable");
+                                        let valid=review["ready_for_user_approved_execution"]==true;
+                                        card.status_pill(if valid&&unchanged{"Ready for approval"}
+                                            else if !unchanged {"Replan: settings changed"}
+                                            else {"Requirements missing"},valid&&unchanged);
+                                        card.label(&format!("Route: {route}"));
+                                        if let Some(step)=review["next_user_step"].as_str(){
+                                            card.label(&step.chars().take(105).collect::<String>());
                                         }
-                                    }
-                                    if valid&&unchanged && !busy {
-                                        if card.button("2. Approve & Run Real CPU Optimization").clicked(){
-                                            opt_run=true;
+                                        if !valid {
+                                            for note in review["checks"].as_array().into_iter()
+                                                .flatten().take(2){
+                                                if let Some(reason)=note.as_str(){
+                                                    card.label(&reason.chars().take(92).collect::<String>());
+                                                }
+                                            }
                                         }
+                                        if valid&&unchanged&&!busy{
+                                            if card.button("2. Approve & Run on CPU").clicked(){
+                                                opt_run=true;
+                                            }
+                                        }
+                                    }else{
+                                        card.label("Inspect a model, enter the reference and task suite,");
+                                        card.label("then build a plan. Only approval starts real work.");
                                     }
+                                    card.label(&status.chars().take(115).collect::<String>());
                                 }else{
-                                    card.label("Review a read-only plan before any quantization or inference.");
-                                }
-                                if busy {
-                                    card.label("CPU work in progress; no estimated completion percentage.");
+                                    if let Some(result)=opt_result{
+                                        let passed=result["status"].as_str()==Some("PROVISIONAL_CANDIDATE_FOUND");
+                                        card.status_pill(if passed{"Candidate passed configured gates"}
+                                            else{"No candidate passed selected gates"},passed);
+                                        let selected=&result["provisional_candidate"];
+                                        let candidate=selected.as_str()
+                                            .or_else(||selected["path"].as_str()).unwrap_or("None");
+                                        card.label(&format!("Candidate: {}",
+                                            candidate.chars().take(94).collect::<String>()));
+                                        let evidence=&result["evidence"];
+                                        for item in evidence["results"].as_array().into_iter()
+                                            .flatten().take(2){
+                                            let name=item["name"].as_str()
+                                                .or_else(||item["type"].as_str()).unwrap_or("candidate");
+                                            let state=item["status"].as_str().unwrap_or("unknown");
+                                            let saving=item["savings_pct"].as_f64().map(|v|format!("{v:.1}%"))
+                                                .unwrap_or_else(||"unmeasured".into());
+                                            card.label(&format!("{name}: {state}; file saving {saving}"));
+                                        }
+                                        card.label("Task-specific evidence; full hardware fit remains unverified.");
+                                    }else{
+                                        card.label(if busy {"Real optimization running; no predicted progress"}
+                                            else {"No optimization result yet"});
+                                        card.label(&status.chars().take(110).collect::<String>());
+                                    }
+                                    if let Some(elapsed)=job_elapsed{
+                                        card.label(&format!("Measured elapsed: {:.1}s",elapsed.as_secs_f64()));
+                                    }
                                     for line in log_tail.iter().rev().take(2){
-                                        card.label(&line.chars().take(92).collect::<String>());
+                                        card.label(&line.chars().take(100).collect::<String>());
                                     }
-                                }
-                                if let Some(result)=opt_result {
-                                    let passed=result["status"].as_str()==Some("PROVISIONAL_CANDIDATE_FOUND");
-                                    card.status_pill(
-                                        if passed {"Provisional model passed selected gates"}
-                                        else {"No model passed selected gates"}, passed);
-                                    let chosen=&result["provisional_candidate"];
-                                    let candidate=chosen.as_str()
-                                        .or_else(||chosen["path"].as_str()).unwrap_or("None");
-                                    card.label(&format!("Candidate: {}",candidate.chars().take(92).collect::<String>()));
-                                    let evidence=&result["evidence"];
-                                    for item in evidence["results"].as_array().into_iter().flatten().take(3){
-                                        let name=item["name"].as_str()
-                                            .or_else(||item["type"].as_str()).unwrap_or("candidate");
-                                        let status=item["status"].as_str().unwrap_or("unknown");
-                                        let savings=item["savings_pct"].as_f64();
-                                        card.label(&format!("{name}: {status}; saving {}",
-                                            savings.map(|v|format!("{v:.1}%")).unwrap_or_else(||"unmeasured".into())));
-                                    }
-                                    card.label("Evidence is task-specific; speed and full hardware fit unverified.");
                                 }
                             });
                         }else{
