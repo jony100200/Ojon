@@ -486,7 +486,7 @@ mod tests{
     fn runtime_precision_choices_equal_planner_choices(){
         let input=OptimizeWorkflowRequest::new(PathBuf::new());
         let opt=configured_options(&input,&[]);
-        let types=opt.precisions.iter().map(Precision::as_str).collect::<Vec<_>>().join(",");
+        let types=opt.precisions.iter().map(|p|p.as_str()).collect::<Vec<_>>().join(",");
         assert_eq!(types,types_for(input.goal));
     }
     #[test]
