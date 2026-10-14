@@ -10,6 +10,38 @@ Ojon brings existing, independent model tools under one roof. Install only the p
 
 ## What works today
 
+### Application code layout
+
+Ojon keeps its CLI, backend and desktop frontend separate:
+
+```text
+src/
+  main.rs                  # ojon CLI binary entry point
+  lib.rs                   # ojon_backend library exports
+  bin/
+    ojon_gui.rs            # short Cargo launcher only
+  frontend/
+    mod.rs                 # desktop frontend entry point
+    workstation.rs         # Kathamo UI, state, interactions and rendering
+  optimize_workflow.rs     # backend plan/approve/run orchestration
+  quant_parity.rs          # measured quality-gated quantization
+  quant_compare.rs         # comparisons against existing GGUFs
+```
+
+`src/bin` is the conventional **Rust Cargo executable-target directory**;
+it never meant the graphical frontend belonged to a nested backend folder.
+The full Kathamo UI is in `src/frontend/`, with a minimal
+`ojon-gui` executable launcher under `src/bin/`. This preserves
+`cargo run --features gui --bin ojon-gui` and separate GUI-free
+`cargo run --bin ojon` workflows.
+
+The Kathamo workspace uses the pinned, up-to-date
+[`f3bed978`](https://github.com/jony100200/Kathamo/commit/f3bed97837edd2814c4b9e2ed345e9effab6f94d)
+framework revision, including its new collapsible panels. The tool-discovery
+section is collapsed by default so the automatic optimization workflow
+is more prominent. No framework dependency bump or Cargo.lock refresh is
+needed for this refactor.
+
 ### Guided model optimization (Kathamo UI and Rust CLI)
 
 Ojon provides a metadata-only decision layer and a separately approved CPU-only
