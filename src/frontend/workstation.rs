@@ -83,6 +83,7 @@ enum WorkerEvent {
     HfQuantized(Result<HfQuantizeResult, String>),
     Smoke(Result<SmokeCapture, String>),
     Bench(Result<(PathBuf, serde_json::Value), String>),
+    BackendCapabilities(serde_json::Value),
     Log(String),
 }
 
@@ -103,6 +104,7 @@ struct Workstation {
     optimize_settings_tab: usize,
     optimize_review_tab: usize,
     backends_expanded: bool,
+    backend_capabilities:Option<serde_json::Value>,
     opt_baseline: String,
     opt_candidate: String,
     opt_suite: String,
@@ -213,6 +215,7 @@ impl Workstation {
             optimize_settings_tab: 0,
             optimize_review_tab: 0,
             backends_expanded: false,
+            backend_capabilities:None,
             opt_baseline: String::new(),
             opt_candidate: String::new(),
             opt_suite: String::new(),
@@ -343,6 +346,7 @@ impl Workstation {
         }
     }
     fn rescan_backends(&mut self) {
+        self.backend_capabilities=None;
         self.backends = discover_backends();
         if self.converter.trim() == "convert_hf_to_gguf.py" || self.converter.trim().is_empty() {
             if let Some(path) = self.backends.iter()
@@ -368,6 +372,22 @@ impl Workstation {
         let installed = self.backends.iter().filter(|b| b.installed()).count();
         self.status = format!("{installed} known backend executable(s) detected. Discovery alone does not confirm compatibility.");
         self.needs_redraw = true;
+    }
+
+    /// Explicit bounded tool probes, never an implicit model load.
+    fn start_capability_probe(&mut self){
+        if self.busy{return;}
+        let tools=self.backends.clone();
+        let tx=self.tx.clone();
+        self.backend_capabilities=None;
+        self.busy=true;
+        self.started_at=Some(Instant::now());
+        self.status="Probing selected local executables (no model inference or quantization)...".into();
+        self.needs_redraw=true;
+        std::thread::spawn(move||{
+            let receipt=ojon_backend::probe_backend_capabilities(&tools);
+            let _=tx.send(WorkerEvent::BackendCapabilities(receipt));
+        });
     }
 
     #[allow(dead_code)]
@@ -788,12 +808,18 @@ impl Workstation {
                     self.model = None;
                     self.status = format!("Inspection failed: {e}");
                 }
+                WorkerEvent::BackendCapabilities(value)=>{
+                    let verified=value["probes"].as_array().map_or(0,|list|
+                        list.iter().filter(|r|r["status"]=="CAPABILITY_OUTPUT_PARSED").count());
+                    self.backend_capabilities=Some(value);
+                    self.status=format!("Parsed {verified} executable capability outputs; model/runtime compatibility remains unverified.");
+                }
                 WorkerEvent::OptimizerPlan(request,Ok(value))=>{
                     let route=value["route"].as_str().unwrap_or("unknown");
                     let step=value["next_user_step"].as_str().unwrap_or("See prerequisites");
                     let ready=value["ready_for_user_approved_execution"]==true;
                     self.status=format!("Optimization plan [{route}]: {step}. {}",
-                        if ready {"Review settings and approve a real CPU run."}
+                        if ready {"Review settings and approve the selected backend run."}
                         else {"Prerequisites not yet satisfied."});
                     self.opt_planned=Some((request,value));
                 }
@@ -967,10 +993,12 @@ impl Workstation {
         let status = &self.status;
         let busy = self.busy;
         let backends = &self.backends;
+        let backend_capabilities=self.backend_capabilities.as_ref();
         let last_output = if source_is_current { self.last_output.as_ref() } else { None };
         let log_tail = &self.log_tail;
         let job_elapsed = self.started_at.map(|t| t.elapsed()).or(self.last_elapsed);
         let mut rescan = false;
+        let mut probe_capabilities=false;
         let mut save_local_settings = false;
         let mut download: Option<BackendId> = None;
         let mut new_focus = self.focus;
@@ -1082,7 +1110,25 @@ impl Workstation {
                                 backends_expanded,
                                 |details| {
                             if details.button_secondary("Rescan Installed Tools").clicked() { rescan = true; }
+                            if details.button_secondary("Probe Device IDs & Quant Formats").clicked() {
+                                probe_capabilities=true;
+                            }
                             if details.button_secondary("Save Local Preferences").clicked(){save_local_settings=true;}
+                            if let Some(receipt)=backend_capabilities{
+                                for item in receipt["probes"].as_array().into_iter().flatten(){
+                                    if item["status"]=="CAPABILITY_OUTPUT_PARSED"{
+                                        let devices=item["device_ids"].as_array()
+                                            .map(|a|a.iter().filter_map(|v|v.as_str()).collect::<Vec<_>>().join(", "))
+                                            .unwrap_or_default();
+                                        let formats=item["precision_formats"].as_array()
+                                            .map(|a|a.iter().filter_map(|v|v.as_str()).take(6).collect::<Vec<_>>().join(", "))
+                                            .unwrap_or_default();
+                                        details.label(&format!("{}: {} {}",
+                                            item["name"].as_str().unwrap_or("runtime"),
+                                            devices,formats).chars().take(94).collect::<String>());
+                                    }
+                                }
+                            }
                             for backend in backends.iter() {
                                 let label = match backend.spec.id {
                                     BackendId::LlamaQuantize => "GGUF converter",
@@ -1405,6 +1451,7 @@ impl Workstation {
         self.focus = new_focus;
         if save_local_settings{self.persist_local_settings(true);}
         if rescan { self.rescan_backends(); }
+        if probe_capabilities{self.start_capability_probe();}
         if let Some(id) = download {
             if let Err(e) = open_official_download_page(id) {
                 self.status = format!("Could not open download page: {e}. See 'ojon backends' for publisher links.");
