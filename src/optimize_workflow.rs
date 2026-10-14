@@ -435,7 +435,7 @@ pub fn run_optimize_workflow(
             };
             let report=next_compare_report(out)?;
             let plan=prepare_existing_quant_comparison(
-                baseline,&request.candidates,suite,&report,options)?;
+                baseline,&request.candidates,suite,&report,options.clone())?;
             log("[ojon] Running real matched task comparisons; this does not generate new quantized weights");
             ("existing_quant_comparison",run_existing_quant_comparison(&plan,|line|log(line))?)
         },
@@ -443,7 +443,7 @@ pub fn run_optimize_workflow(
             let baseline=request.current_baseline.as_ref()
                 .ok_or_else(||invalid("quantization parity requires an existing Q4 reference"))?;
             let plan=prepare_quant_parity(
-                &request.model,baseline,suite,out,options)?;
+                &request.model,baseline,suite,out,options.clone())?;
             log("[ojon] Generating candidates from original high-precision weights, not from the Q4 reference");
             ("high_precision_quant_parity",run_quant_parity(&plan,|line|log(line))?)
         },
