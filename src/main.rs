@@ -312,7 +312,7 @@ fn run() -> io::Result<()> {
             let execute=cmd=="adapter-smoke-run";
             let bundle=PathBuf::from(next_argument(&mut args,"Ojon compressed adapter bundle folder")?);
             let report=PathBuf::from(next_argument(&mut args,"new JSON receipt file")?);
-            let mut tool=discovered_path(BackendId::LlamaCli).unwrap_or_else(||PathBuf::from("llama-cli"));
+            let mut tool=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaCli,"llama-cli")?;
             let mut gpu_layers=0i32; // GPU-free by default.
             let mut device=None::<String>;
             let mut image=None::<PathBuf>;
@@ -587,8 +587,7 @@ fn run() -> io::Result<()> {
             let receipt=if execute {
                 Some(PathBuf::from(next_argument(&mut args,"new JSON receipt path")?))
             } else { None };
-            let mut tool=discovered_path(BackendId::LlamaBench)
-                .unwrap_or_else(||PathBuf::from("llama-bench"));
+            let mut tool=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaBench,"llama-bench")?;
             let (mut prompt_tokens,mut gen_tokens,mut reps,mut gpu_layers)=(512u32,128u32,3u32,0i32);
             let mut confirmed=false;
             let mut device:Option<String>=None;
@@ -887,8 +886,7 @@ fn run() -> io::Result<()> {
             let model=PathBuf::from(next_argument(&mut args,"original F16/BF16 GGUF model")?);
             let corpus=PathBuf::from(next_argument(&mut args,"local UTF-8 calibration text")?);
             let output=PathBuf::from(next_argument(&mut args,"new imatrix.gguf output")?);
-            let mut tool=discovered_path(BackendId::LlamaImatrix)
-                .unwrap_or_else(||PathBuf::from("llama-imatrix"));
+            let mut tool=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaImatrix,"llama-imatrix")?;
             let mut gpu_layers=0u32;
             let mut context=2048u32;
             let mut confirmed=false;
@@ -971,8 +969,7 @@ fn run() -> io::Result<()> {
             let destination = PathBuf::from(next_argument(&mut args, "existing output directory")?);
             let mut formats = String::from("Q5_K_M,Q4_K_M,IQ4_XS,IQ3_M");
             let mut imatrix: Option<PathBuf> = None;
-            let mut tool = discovered_path(BackendId::LlamaQuantize)
-                .unwrap_or_else(|| PathBuf::from("llama-quantize"));
+            let mut tool = ojon_backend::discovery::resolve_backend_command(BackendId::LlamaQuantize,"llama-quantize")?;
             let mut threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(4);
             let mut confirm = false;
             while let Some(option) = args.next() {
@@ -1035,6 +1032,9 @@ fn run() -> io::Result<()> {
             let report=PathBuf::from(next_argument(&mut args,"new comparison report JSON")?);
             let mut candidates=Vec::<(String,PathBuf)>::new();
             let mut options=ojon_backend::QuantParityOptions::default();
+            options.quantizer=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaQuantize,"llama-quantize")?;
+            options.eval_tool=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaCli,"llama-cli")?;
+            options.ppl_tool=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaPerplexity,"llama-perplexity")?;
             let(mut confirmed,mut json)=(false,false);
             while let Some(option)=args.next(){
                 match option.to_str(){
@@ -1103,6 +1103,9 @@ fn run() -> io::Result<()> {
             let suite=PathBuf::from(next_argument(&mut args,"held-out coding/reasoning/tool suite JSON")?);
             let output_dir=PathBuf::from(next_argument(&mut args,"existing output directory")?);
             let mut options=ojon_backend::QuantParityOptions::default();
+            options.quantizer=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaQuantize,"llama-quantize")?;
+            options.eval_tool=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaCli,"llama-cli")?;
+            options.ppl_tool=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaPerplexity,"llama-perplexity")?;
             let(mut confirmed,mut json)=(false,false);
             while let Some(opt)=args.next() {
                 match opt.to_str(){
@@ -1189,8 +1192,8 @@ fn run() -> io::Result<()> {
             let output=PathBuf::from(next_argument(&mut args,"existing output directory")?);
             let suite=PathBuf::from(next_argument(&mut args,"held-out suite JSON")?);
             let mut targets=vec![3.0,3.5,4.0,4.5];
-            let mut quantizer=discovered_path(BackendId::LlamaQuantize).unwrap_or_else(||PathBuf::from("llama-quantize"));
-            let mut eval_tool=discovered_path(BackendId::LlamaCli).unwrap_or_else(||PathBuf::from("llama-cli"));
+            let mut quantizer=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaQuantize,"llama-quantize")?;
+            let mut eval_tool=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaCli,"llama-cli")?;
             let mut imatrix:Option<PathBuf>=None;
             let mut threads=std::thread::available_parallelism().map(|n|n.get()).unwrap_or(4);
             let mut gpu_layers=0i32;
@@ -1241,7 +1244,7 @@ fn run() -> io::Result<()> {
             let output=PathBuf::from(next_argument(&mut args,"new quality evidence JSON")?);
             let mut baseline:Option<PathBuf>=None;
             let mut candidates:Vec<(String,PathBuf)>=Vec::new();
-            let mut tool=discovered_path(BackendId::LlamaCli).unwrap_or_else(||PathBuf::from("llama-cli"));
+            let mut tool=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaCli,"llama-cli")?;
             let mut gpu_layers=0i32;
             let mut device:Option<String>=None;
             let mut tokens=128u32;

@@ -8,6 +8,35 @@ Ojon brings existing, independent model tools under one roof. Install only the p
 
 **Status:** pre-alpha. Windows CI compiles and tests the project, but individual models and backends still need practical testing on the intended hardware. Not all model families can be quantized by the same engine.
 
+## Per-user settings (portable installations)
+
+Ojon never ships developer-specific model or executable paths. CLI and Kathamo
+use the same local JSON file: `%APPDATA%\\Ojon\\settings.json` on Windows,
+`$XDG_CONFIG_HOME/ojon/settings.json` (or `~/.config/ojon/settings.json`) on
+Linux, and `~/Library/Application Support/Ojon/settings.json` on macOS.
+`OJON_SETTINGS_PATH` optionally sets an **absolute** custom settings file.
+A fresh installation uses defaults without writing any files.
+
+```sh
+ojon settings path
+ojon settings show --json
+ojon settings set backend.llama_cli "/path/to/llama-cli"
+ojon settings set backend.llama_quantize "/path/to/llama-quantize"
+ojon settings set optimization.goal smallest
+ojon settings clear backend.llama_cli
+```
+
+The GUI restores available saved model paths and tool preferences, and writes
+preferences when selecting a model or closing the window. The Backend Tools
+panel has **Save Local Preferences** for an explicit save. CLI command flags
+override preferences for the current invocation without modifying the file.
+The app retains invalid/missing selected executable paths for inspection
+instead of silently substituting another binary. Environment overrides
+(`OJON_LLAMA_CLI` etc.) have higher priority than local settings.
+Corrupt or unsupported settings block implicit discovery and are not
+overwritten silently. Configuration files are preferences—not evidence of
+model compatibility. Quantization receipts remain separate.
+
 ## What works today
 
 ### Application code layout

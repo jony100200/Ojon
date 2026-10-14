@@ -281,6 +281,16 @@ pub fn hf_python_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("python"))
 }
 
+/// Executable selection for actual CLI execution. An explicit environment or
+/// saved path must not silently fall back to a different PATH executable.
+pub fn resolve_backend_command(id:BackendId,fallback:&str)->std::io::Result<PathBuf>{
+    let spec=SPECS.iter().find(|spec|spec.id==id)
+        .ok_or_else(||std::io::Error::new(std::io::ErrorKind::InvalidInput,"unknown backend"))?;
+    if let Some(path)=env::var_os(spec.override_env){return Ok(PathBuf::from(path));}
+    let prefs=load_settings()?;
+    if let Some(path)=prefs.backend(spec.override_env){return Ok(PathBuf::from(path));}
+    Ok(discovered_path(id).unwrap_or_else(||PathBuf::from(fallback)))
+}
 pub fn discovered_path(id: BackendId) -> Option<PathBuf> {
     discover_backends().into_iter().find(|b| b.spec.id == id)?.executable
 }

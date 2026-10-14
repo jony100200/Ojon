@@ -166,7 +166,9 @@ impl LocalSettings{
             return Err(invalid("invalid quality or hardware preference"));
         }
         for value in self.backend_paths.values(){
-            if !valid_text(value){return Err(invalid("invalid backend path"));}
+            if !valid_text(value) || !Path::new(value).is_absolute(){
+                return Err(invalid("backend preference requires an absolute executable path"));
+            }
         }
         for value in [&self.last_model,&self.model_directory,&self.output_directory,&self.runtime_device]{
             if value.as_deref().is_some_and(|s|!valid_text(s)){return Err(invalid("invalid local path or runtime device"));}
@@ -326,7 +328,8 @@ mod tests{
         let path=fixture();
         assert_eq!(load_from_path(&path).unwrap(),LocalSettings::default());
         let mut settings=LocalSettings::default();
-        settings.set("backend.llama_cli","C:/runtime/llama-cli.exe").unwrap();
+        settings.set("backend.llama_cli",
+            &std::env::temp_dir().join("ojon-cli-test.exe").to_string_lossy()).unwrap();
         settings.set("last_model","C:/models/model.gguf").unwrap();
         settings.set("optimization.goal","smallest").unwrap();
         save_to_path(&path,&settings).unwrap();

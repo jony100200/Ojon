@@ -89,6 +89,7 @@ struct Workstation {
     source: String,
     output: String,
     local_settings: LocalSettings,
+    settings_load_failed:bool,
     quantizer: String,
     converter: String,
     runtime: String,
@@ -195,6 +196,7 @@ impl Workstation {
         Self {
             source, output, quantizer, converter, runtime, benchmark,
             local_settings:settings.clone(),
+            settings_load_failed:settings_problem.is_some(),
             prompt: "Explain in one sentence what a quantized language model is.".into(),
             gpu_layers: settings.gpu_layers.to_string(),
             recipe: 0,
@@ -244,6 +246,11 @@ impl Workstation {
     /// Save only user preferences. CLI overrides and inferred runtime
     /// capabilities are deliberately not treated as verified settings.
     fn persist_local_settings(&mut self,show_success:bool){
+        if self.settings_load_failed{
+            self.status="Settings file is invalid. Repair it with the CLI or restore a backup before saving GUI preferences.".into();
+            self.needs_redraw=true;
+            return;
+        }
         let mut next=self.local_settings.clone();
         next.last_model=Some(self.source.trim().to_string())
             .filter(|v|!v.is_empty());
