@@ -30,7 +30,8 @@ pub mod exl3;
 
 pub use discovery::{backend_specs, discover_backends, discovered_path,
     hf_python_path, open_official_download_page, BackendId, FoundBackend, Integration,
-    probe_backend_capabilities, probe_quantizer_formats,probe_runtime_devices};
+    probe_backend_capabilities, probe_quantizer_formats,probe_runtime_devices,
+    probe_quantizer_capabilities};
 pub use gguf::{inspect_gguf, GgufSummary};
 pub use hf::{inspect_hf_folder, prepare_hf, quantize_hf, quantize_hf_with_log, HfFolderInfo, HfQuantizePlan, HfQuantizeResult};
 pub use llama::{quantize_gguf, quantize_gguf_with_log, prepare_gguf, Precision, QuantizePlan, QuantizeResult};

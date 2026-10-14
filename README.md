@@ -52,6 +52,12 @@ Backend detection is separate from capability verification: `ojon backends
 device IDs and formats are **claims advertised by the installed executable**,
 not proof of model load or high-quality quantization. Planning still does not
 execute model tools; an approved optimization rechecks the relevant binary.
+If the installed quantizer advertises fewer formats than Ojon's default
+candidate list, the approved run omits unsupported default formats. Explicit
+user-selected unsupported formats fail closed. A GPU run additionally requires
+the requested device ID to appear in the *selected runtime's* device list;
+the hardware-vendor preference by itself does not establish which device a
+Vulkan or SYCL identifier represents.
 No capability probe is run merely because Ojon starts up.
 
 The GUI restores available saved model paths and tool preferences, and writes

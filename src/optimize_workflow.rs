@@ -5,7 +5,7 @@
 //! existing CLI routes. This does NOT run quantizers, load weights, benchmark
 //! models, allocate GPU memory, download dependencies or promise a winner.
 
-use crate::discovery::{BackendId, FoundBackend};
+use crate::discovery::{BackendId, FoundBackend,probe_quantizer_capabilities,probe_runtime_devices};
 use crate::gguf::inspect_gguf;
 use crate::llama::Precision;
 use crate::quant_compare::run_existing_quant_comparison;
@@ -148,10 +148,9 @@ pub fn plan_optimize_workflow(
             return Err(invalid("GPU optimization requires explicit --gpu-layers 1..512"));
         }
         let device=input.runtime_device.as_deref().unwrap_or("");
-        let prefix=if input.device=="cuda"{"CUDA"}else{"SYCL"};
-        if !device.starts_with(prefix)||device.len()>40
+        if device.is_empty()||device.len()>80
             ||!device.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'_'|b'-'|b'/'))
-        {return Err(invalid("GPU optimization requires explicit vendor-matched llama.cpp --runtime-device (CUDA0 or SYCL0); Vulkan device identity cannot be inferred")); }
+        {return Err(invalid("GPU optimization requires an explicitly selected runtime device ID (inspect with ojon backends --probe); device compatibility is checked at execution")); }
     }else if input.runtime_device.is_some()||input.gpu_layers!=0{
         return Err(invalid("CPU/auto guided optimization requires zero GPU layers and no runtime device"));
     }
@@ -522,8 +521,50 @@ pub fn run_optimize_workflow(
         .ok_or_else(||invalid("a held-out task suite is mandatory"))?;
     let out=request.output_dir.as_ref()
         .ok_or_else(||invalid("an existing output directory is mandatory"))?;
-    let options=configured_options(request,backends);
-    log("[ojon] User approved optimizer; running on the explicitly selected backend without touching original weights");
+    let mut options=configured_options(request,backends);
+    let gpu_target=matches!(request.device.as_str(),"cuda"|"xpu");
+    // Metadata-only planning never runs local binaries. Once approved, query
+    // the EXACT executable we will call; no vendor-to-device-ID guessing.
+    let runtime_device_evidence=if gpu_target{
+        let wanted=options.device.as_deref()
+            .ok_or_else(||invalid("explicit runtime device is required for GPU execution"))?;
+        let detected=probe_runtime_devices(&options.eval_tool)?;
+        if !detected.iter().any(|id|id==wanted){
+            return Err(invalid(format!("runtime '{}' does not advertise selected device '{wanted}'",
+                options.eval_tool.display())));
+        }
+        json!({"runtime":options.eval_tool.to_string_lossy(),
+            "selected_device":wanted,"advertised_device_ids":detected,
+            "device_id_advertised":true,
+            "physical_gpu_identity_verified":false})
+    }else{json!({"status":"CPU_ONLY_NO_GPU_DEVICE_NEEDED"})};
+    let action=decision["next_action"].as_str().unwrap_or("");
+    let quantizer_evidence=if matches!(action,"quantize_and_compare"|"adaptive_quantize_and_compare"){
+        let advertised=probe_quantizer_capabilities(&options.quantizer)?;
+        if options.imatrix.is_some() && advertised["supports_imatrix"]!=true{
+            return Err(invalid("selected quantizer did not advertise --imatrix; calibration cannot be silently skipped"));
+        }
+        if action=="adaptive_quantize_and_compare" && advertised["supports_tensor_type"]!=true{
+            return Err(invalid("selected quantizer did not advertise mixed-precision tensor controls"));
+        }
+        if action=="quantize_and_compare"{
+            let supported=advertised["precision_formats"].as_array()
+                .ok_or_else(||invalid("no quantizer format evidence"))?;
+            let original_count=options.precisions.len();
+            options.precisions.retain(|kind|supported.iter().any(|t|t.as_str()==Some(kind.as_str())));
+            if options.precisions.len()!=original_count && request.precision_candidates.is_some(){
+                return Err(invalid("a user-selected precision is not advertised by this installed quantizer"));
+            }
+            if options.precisions.is_empty(){
+                return Err(invalid("installed quantizer supports none of the permitted guided precisions"));
+            }
+            if options.precisions.len()!=original_count{
+                log("[ojon] Skipping candidate formats not advertised by the selected quantizer");
+            }
+        }
+        advertised
+    }else{json!({"status":"NOT_APPLICABLE_NO_NEW_QUANTIZATION"})};
+    log("[ojon] User approved optimizer; backend capabilities checked without loading model weights");
     let (kind,result)=match decision["next_action"].as_str(){
         Some("compare_existing_quants")=>{
             let baseline=match request.current_baseline.as_ref(){
@@ -561,7 +602,6 @@ pub fn run_optimize_workflow(
     let ranked=rank_quality_gated_candidates(kind,&result);
     let mut attempts=Vec::new();
     let mut loadable=Vec::new();
-    let gpu_target=matches!(request.device.as_str(),"cuda"|"xpu");
     for possible in &ranked{
         let Some(path)=possible["path"].as_str() else {continue;};
         log("[ojon] Checking measured-quality candidate against the actual selected llama.cpp backend");
@@ -652,6 +692,8 @@ pub fn run_optimize_workflow(
         "model_source":request.model.to_string_lossy(),
         "goal":request.goal.label(),
         "quality_reference":decision["current_baseline"],
+        "backend_capability_evidence":{"quantizer":quantizer_evidence,
+            "runtime_device":runtime_device_evidence},
         "source_provenance":{"source_path":request.model.to_string_lossy(),
             "reference_path":decision["current_baseline"],
             "sensitivity":request.tensor_sensitivity.as_ref().map(|p|p.to_string_lossy().to_string()),
@@ -671,7 +713,8 @@ pub fn run_optimize_workflow(
         "requested_backend_device":options.device,
         "requested_gpu_layers":options.gpu_layers,
         "selection_policy":selection_policy,
-        "precision_candidates":precisions_for(request).iter().map(|v|v.as_str()).collect::<Vec<_>>(),
+        "precision_candidates":options.precisions.iter().map(|v|v.as_str()).collect::<Vec<_>>(),
+        "requested_precisions":precisions_for(request).iter().map(|v|v.as_str()).collect::<Vec<_>>(),
         "benchmark_settings":{"prompt_tokens":request.bench_prompt_tokens,
             "generation_tokens":request.bench_generation_tokens,
             "repetitions":request.bench_repetitions,

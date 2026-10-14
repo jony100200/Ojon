@@ -376,13 +376,24 @@ pub fn probe_backend_capabilities(found:&[FoundBackend])->Value{
         "read_only_no_model_weights_loaded":true,
         "probes":found.iter().map(probe_binary).collect::<Vec<_>>()})
 }
-pub fn probe_quantizer_formats(executable:&Path)->std::io::Result<Vec<String>>{
-    let formats=quantizer_formats_from_help(&probe_help(executable,"--help")?);
+pub fn probe_quantizer_capabilities(executable:&Path)->std::io::Result<Value>{
+    let help=probe_help(executable,"--help")?;
+    let formats=quantizer_formats_from_help(&help);
     if formats.is_empty(){
         return Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
-            "installed quantizer did not advertise a parseable list of supported GGUF formats"));
+            "installed quantizer did not advertise supported GGUF formats; use manual workflow"));
     }
-    Ok(formats)
+    Ok(json!({"status":"PARSED_FROM_INSTALLED_QUANTIZER",
+        "executable":executable.to_string_lossy(),
+        "precision_formats":formats,
+        "supports_imatrix":help.contains("--imatrix"),
+        "supports_tensor_type":help.contains("--tensor-type"),
+        "model_compatibility_verified":false}))
+}
+pub fn probe_quantizer_formats(executable:&Path)->std::io::Result<Vec<String>>{
+    let result=probe_quantizer_capabilities(executable)?;
+    Ok(result["precision_formats"].as_array()
+        .into_iter().flatten().filter_map(|x|x.as_str().map(str::to_owned)).collect())
 }
 pub fn probe_runtime_devices(executable:&Path)->std::io::Result<Vec<String>>{
     let devices=runtime_devices_from_list(&probe_help(executable,"--list-devices")?);
