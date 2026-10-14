@@ -17,7 +17,6 @@ pub mod ppl;
 pub mod calibration;
 pub mod advanced;
 pub mod diffusion;
-pub mod image_models;
 pub mod packed;
 pub mod distill;
 pub mod autoround;

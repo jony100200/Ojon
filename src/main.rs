@@ -73,10 +73,6 @@ Commands:
   ojon eval-sweep <sweep-manifest.json> <held-out-corpus.txt> [--tool llama-perplexity] [--gpu-layers N] [--context 2048] [--max-degradation 1.0] --confirm
   ojon imatrix-plan <original-f16.gguf> <calibration.txt> <new-imatrix.gguf> [--gpu-layers 0] [--context 2048] [--tool path]
   ojon imatrix-run  <original-f16.gguf> <calibration.txt> <new-imatrix.gguf> [options] --confirm
-  ojon image-models         List selected public Rebel AI image weights (no download)
-  ojon image-fetch-plan <model-id> <existing-output-folder>
-  ojon image-fetch-run <model-id> <existing-output-folder> --confirm
-  ojon image-compare-plan <baseline> <quantized> <comfy-workflow.json> <matched-recipe.json>
   ojon diffusion-plan <local-source> <output.safetensors> --checkout <upstream> [--backend svdq] [--kind image|video] [--format int4] [--python python] [--samples 32]
   ojon pack-plan <original.safetensors> <output.ojonq> [--bits 4] [--group 64]
   ojon pack-run  <original.safetensors> <output.ojonq> [options] --confirm
@@ -822,39 +818,6 @@ fn run() -> io::Result<()> {
             let saved=unpack(&src,&out)?;
             println!("restored_safetensors: {}",saved.display());
             println!("warning: model weights are lossily reconstructed; no full task-quality claim");
-        }
-        Some("image-models")=>{
-            if args.next().is_some(){return Err(invalid("image-models accepts no arguments"));}
-            println!("{}",ojon_backend::image_models::catalog());
-        }
-        Some("image-fetch-plan") | Some("image-fetch-run")=>{
-            let execute=cmd=="image-fetch-run";
-            let id=next_argument(&mut args,"community model ID")?;
-            let id=id.to_str().ok_or_else(||invalid("model ID must be text"))?;
-            let out=PathBuf::from(next_argument(&mut args,"existing image model destination folder")?);
-            let mut tool=PathBuf::from("hf");
-            let mut confirm=false;
-            for option in args {
-                match option.to_str(){
-                    Some("--hf-tool")=>return Err(invalid("--hf-tool needs a value; put it before the model ID or use default hf")),
-                    Some("--confirm") if execute=>confirm=true,
-                    _=>return Err(invalid("image-fetch accepts only --confirm; install hf CLI on PATH"))
-                }
-            }
-            if execute{
-                let receipt=ojon_backend::image_models::fetch_image(id,&out,&tool,confirm,
-                    |line|eprintln!("{line}"))?;
-                println!("{receipt}");
-            }else{println!("{}",ojon_backend::image_models::fetch_plan(id,&out,&tool)?);}
-        }
-        Some("image-compare-plan")=>{
-            let baseline=PathBuf::from(next_argument(&mut args,"original diffusion checkpoint")?);
-            let candidate=PathBuf::from(next_argument(&mut args,"quantized diffusion checkpoint")?);
-            let workflow=PathBuf::from(next_argument(&mut args,"ComfyUI workflow JSON")?);
-            let recipe=PathBuf::from(next_argument(&mut args,"matched image experiment recipe JSON")?);
-            if args.next().is_some(){return Err(invalid("image-compare-plan expects four paths"));}
-            println!("{}",ojon_backend::image_models::image_comparison_plan(
-                &baseline,&candidate,&workflow,&recipe)?);
         }
         Some("diffusion-plan") | Some("diffusion-inspect") | Some("diffusion-run") => {
             let stage = cmd.to_string_lossy().to_string();
