@@ -203,6 +203,35 @@ fn hardware_checks(
     checks
 }
 
+/// All runners apply their held-out task/vision/PPL gates before reaching this
+/// selector. Never permit status-only artifacts from unsupported routes.
+pub fn rank_quality_gated_candidates(kind:&str,result:&Value)->Vec<Value>{
+    let rows=if kind=="adaptive_quant_comparison"{&result["candidates"]}
+        else{&result["results"]};
+    let mut ranked=Vec::<(u64,Value)>::new();
+    if let Some(rows)=rows.as_array(){
+        for row in rows{
+            let passed=match kind{
+                "existing_quant_comparison"=>row["status"]=="NO_DETECTED_TEST_REGRESSION",
+                "high_precision_quant_parity"=>row["status"]=="NO_DETECTED_TASK_REGRESSION",
+                "adaptive_quant_comparison"=>row["status"]=="measured_task_suite"&&row["task_quality_pass"]==true,
+                _=>false
+            };
+            if !passed{continue;}
+            let path=if kind=="existing_quant_comparison"{row["path"].as_str()}
+                else{row["output"].as_str()};
+            if let (Some(path),Some(bytes))=(path,row["bytes"].as_u64()){
+                if bytes>0&&!path.is_empty(){
+                    ranked.push((bytes,json!({"name":row["name"].as_str().or_else(||row["type"].as_str()).unwrap_or("candidate"),
+                        "path":path,"bytes":bytes})));
+                }
+            }
+        }
+    }
+    ranked.sort_by(|a,b|a.0.cmp(&b.0).then_with(||a.1["path"].as_str().cmp(&b.1["path"].as_str())));
+    ranked.into_iter().map(|(_,row)|row).collect()
+}
+
 pub fn recommend(report: &QualityReport) -> Value {
     let mut ranked=Vec::new();
     for candidate in &report.candidates {

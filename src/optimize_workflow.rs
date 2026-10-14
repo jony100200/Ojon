@@ -17,6 +17,8 @@ use crate::quant_parity::{prepare_quant_parity, QuantParityOptions};
 use crate::task_eval::parse_eval_suite;
 use crate::smoke::smoke_gguf_capture;
 use crate::benchmark::{prepare_bench,run_bench};
+use crate::quality::rank_quality_gated_candidates;
+use crate::adaptive::{prepare_adaptive_against_reference,run_adaptive};
 use std::time::{SystemTime,UNIX_EPOCH};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -53,6 +55,7 @@ pub struct OptimizeWorkflowRequest {
     pub output_dir:Option<PathBuf>,
     /// Optional calibration; used only when producing new quantizations.
     pub imatrix:Option<PathBuf>,
+    pub tensor_sensitivity:Option<PathBuf>,
     /// Held-out corpus for a second independent quantitative quality gate.
     pub ppl_corpus:Option<PathBuf>,
     pub max_ppl_regression_pct:f64,
@@ -65,7 +68,7 @@ impl OptimizeWorkflowRequest{
     pub fn new(model:PathBuf)->Self{
         Self{
             model,current_baseline:None,candidates:Vec::new(),suite:None,
-            output_dir:None,imatrix:None,ppl_corpus:None,max_ppl_regression_pct:0.0,
+            output_dir:None,imatrix:None,tensor_sensitivity:None,ppl_corpus:None,max_ppl_regression_pct:0.0,
             goal:OptimizeGoal::Balanced,device:"auto".into(),
             min_saving_percent:5.0,max_loss_points:0.0
         }
@@ -95,9 +98,9 @@ fn next_compare_report(folder:&Path)->io::Result<PathBuf>{
 
 fn types_for(goal:OptimizeGoal)->&'static str{
     match goal {
-        OptimizeGoal::Smallest=>"IQ3_M,Q3_K_M,IQ4_XS",
-        OptimizeGoal::Balanced=>"IQ4_XS,IQ3_M,Q3_K_M",
-        OptimizeGoal::Fastest=>"Q3_K_M,IQ4_XS,IQ3_M",
+        OptimizeGoal::Smallest=>"IQ3_M,Q3_K_M,Q3_K_L,IQ4_XS",
+        OptimizeGoal::Balanced=>"IQ4_XS,Q3_K_L,IQ3_M,Q3_K_M",
+        OptimizeGoal::Fastest=>"Q3_K_M,Q3_K_L,IQ4_XS,IQ3_M",
     }
 }
 /// Resolved settings shared by planning and execution; no tool invocation here.
@@ -111,9 +114,9 @@ fn configured_options(input:&OptimizeWorkflowRequest,backends:&[FoundBackend])->
     if let Some(bin)=executable(backends,BackendId::LlamaPerplexity){options.ppl_tool=bin;}
     options.gpu_layers=0; // Never automatically use occupied local GPUs.
     options.precisions=match input.goal {
-        OptimizeGoal::Smallest=>vec![Precision::IQ3M,Precision::Q3KM,Precision::IQ4XS],
-        OptimizeGoal::Balanced=>vec![Precision::IQ4XS,Precision::IQ3M,Precision::Q3KM],
-        OptimizeGoal::Fastest=>vec![Precision::Q3KM,Precision::IQ4XS,Precision::IQ3M],
+        OptimizeGoal::Smallest=>vec![Precision::IQ3M,Precision::Q3KM,Precision::Q3KL,Precision::IQ4XS],
+        OptimizeGoal::Balanced=>vec![Precision::IQ4XS,Precision::Q3KL,Precision::IQ3M,Precision::Q3KM],
+        OptimizeGoal::Fastest=>vec![Precision::Q3KM,Precision::Q3KL,Precision::IQ4XS,Precision::IQ3M],
     };
     if let Some(bin)=executable(backends,BackendId::LlamaQuantize){options.quantizer=bin;}
     if let Some(bin)=executable(backends,BackendId::LlamaCli){options.eval_tool=bin;}
@@ -288,6 +291,31 @@ pub fn plan_optimize_workflow(
         }else{
             checks.push("To compare existing quants, provide current Q4 baseline, held-out suite and output directory.".into());
         }
+    }else if original_gguf && input.tensor_sensitivity.is_some() {
+        route="adaptive_quantize_and_compare";
+        if let (Some(base),Some(suite),Some(out),Some(scores))=
+            (&baseline,&suite,&out,&input.tensor_sensitivity)
+        {
+            if !capacity_pass{
+                checks.push("Adaptive workflow requires verified host RAM/scratch budgets.".into());
+            }else if input.ppl_corpus.is_some(){
+                checks.push("Adaptive runner cannot evaluate the requested PPL gate; use ordinary parity comparison.".into());
+            }else if !quantizer_available||!evaluator_available{
+                checks.push("Adaptive workflow requires installed quantizer and llama-cli.".into());
+            }else{
+                match prepare_adaptive_against_reference(
+                    &source,base,scores,out,suite,&options.quantizer,&options.eval_tool,
+                    options.imatrix.as_deref(),&[3.0,3.5,4.0],options.threads,0,None,
+                    options.tokens,input.max_loss_points)
+                {
+                    Ok(_)=>{permitted=true;action="adaptive_quantize_and_compare";
+                        next=Some("Run native tensor-specific adaptive quantization with Q4-referenced held-out tasks".into());},
+                    Err(e)=>checks.push(format!("Adaptive workflow preflight blocked: {e}")),
+                }
+            }
+        }else{
+            checks.push("Adaptive workflow requires high-precision original, Q4 baseline, tensor sensitivity, suite and output directory.".into());
+        }
     }else if original_gguf {
         if let (Some(base),Some(suite),Some(out))=(&baseline,&suite,&out){
             route="quantize_and_compare";
@@ -368,6 +396,7 @@ pub fn plan_optimize_workflow(
         "current_baseline":base_text,
         "heldout_suite":suite.map(|p|path_text(&p)),
         "calibration_imatrix":input.imatrix.as_ref().map(|p|path_text(p)),
+        "tensor_sensitivity":input.tensor_sensitivity.as_ref().map(|p|path_text(p)),
         "heldout_perplexity_corpus":input.ppl_corpus.as_ref().map(|p|path_text(p)),
         "max_relative_perplexity_regression_pct":input.max_ppl_regression_pct,
         "output_directory":output_text,
@@ -397,35 +426,6 @@ pub fn plan_optimize_workflow(
 /// Execute the exact existing Ojon quantization/verification adapters after
 /// explicit approval. Unlike invoking the suggested command in a shell,
 /// this calls typed Rust APIs directly; filenames never become shell syntax.
-/// Extract only candidates that passed the actual held-out quality gates.
-/// Prefer the smallest first; use a larger passing candidate if its runtime
-/// cannot load the smaller one. Never infer pass from its filename or file size.
-fn ranked_quality_candidates(kind:&str,result:&Value)->Vec<Value>{
-    let mut ranked=Vec::<(u64,Value)>::new();
-    if let Some(rows)=result["results"].as_array(){
-        for row in rows{
-            let status=row["status"].as_str().unwrap_or("");
-            let passed=if kind=="existing_quant_comparison"{
-                status=="NO_DETECTED_TEST_REGRESSION"
-            }else{status=="NO_DETECTED_TASK_REGRESSION"};
-            if !passed{continue;}
-            let path=if kind=="existing_quant_comparison"{
-                row["path"].as_str()
-            }else{row["output"].as_str()};
-            if let (Some(path),Some(bytes))=(path,row["bytes"].as_u64()){
-                if bytes>0 && !path.is_empty(){
-                    ranked.push((bytes,json!({
-                        "name":row["name"].as_str().or_else(||row["type"].as_str()).unwrap_or("candidate"),
-                        "path":path,"bytes":bytes
-                    })));
-                }
-            }
-        }
-    }
-    ranked.sort_by(|a,b|a.0.cmp(&b.0).then_with(||a.1["path"].as_str().cmp(&b.1["path"].as_str())));
-    ranked.into_iter().map(|(_,row)|row).collect()
-}
-
 /// The original model, reference GGUF and candidate files remain unchanged.
 /// The upstream runners write evidence with exclusive-create semantics.
 pub fn run_optimize_workflow(
@@ -470,6 +470,17 @@ pub fn run_optimize_workflow(
             log("[ojon] Running real matched task comparisons; this does not generate new quantized weights");
             ("existing_quant_comparison",run_existing_quant_comparison(&plan,|line|log(line))?)
         },
+        Some("adaptive_quantize_and_compare")=>{
+            let baseline=request.current_baseline.as_ref()
+                .ok_or_else(||invalid("adaptive workflow needs a current Q4 baseline"))?;
+            let scores=request.tensor_sensitivity.as_ref()
+                .ok_or_else(||invalid("adaptive workflow needs sensitivity data"))?;
+            let plan=prepare_adaptive_against_reference(&request.model,baseline,scores,out,suite,
+                &options.quantizer,&options.eval_tool,options.imatrix.as_deref(),
+                &[3.0,3.5,4.0],options.threads,0,None,options.tokens,request.max_loss_points)?;
+            log("[ojon] Using existing adaptive allocator, Q4-referenced quality evaluation and tensor recipes");
+            ("adaptive_quant_comparison",run_adaptive(&plan,|line|log(line))?)
+        },
         Some("quantize_and_compare")=>{
             let baseline=request.current_baseline.as_ref()
                 .ok_or_else(||invalid("quantization parity requires an existing Q4 reference"))?;
@@ -480,7 +491,7 @@ pub fn run_optimize_workflow(
         },
         _=>return Err(invalid("unsupported execution route; no candidate work started")),
     };
-    let ranked=ranked_quality_candidates(kind,&result);
+    let ranked=rank_quality_gated_candidates(kind,&result);
     let mut attempts=Vec::new();
     let mut candidate=Value::Null;
     let mut load_check=json!({"status":"NOT_RUN_NO_QUALITY_PASSING_CANDIDATE"});
@@ -538,6 +549,10 @@ pub fn run_optimize_workflow(
         "model_source":request.model.to_string_lossy(),
         "goal":request.goal.label(),
         "quality_reference":decision["current_baseline"],
+        "source_provenance":{"source_path":request.model.to_string_lossy(),
+            "reference_path":decision["current_baseline"],
+            "sensitivity":request.tensor_sensitivity.as_ref().map(|p|p.to_string_lossy().to_string()),
+            "revision_identity":"NOT_CRYPTOGRAPHICALLY_VERIFIED"},
         "evaluated_tasks_only":true,
         "heldout_perplexity_requested":request.ppl_corpus.is_some(),
         "runtime_speed_not_automatically_tested":performance["status"]!="MEASURED_CPU",
@@ -548,6 +563,7 @@ pub fn run_optimize_workflow(
         "candidate_load_attempts":attempts,
         "quality_passing_candidate_count":ranked.len(),
         "selected_candidate_performance":performance,
+        "selection_policy":"smallest_quality_passing_cpu_load_verified",
         "runtime_load_verified_on_cpu":load_check["status"]=="LOAD_AND_GENERATION_PASSED",
         "evidence":result,
         "note":"Inspect all candidate task scores, size, RAM, VRAM and latency before deploying. There may be no candidate that passes."
@@ -653,7 +669,7 @@ mod tests{
             {"name":"small","path":"small.gguf","bytes":100,
              "status":"NO_DETECTED_TEST_REGRESSION"}
         ]});
-        let ranked=ranked_quality_candidates("existing_quant_comparison",&report);
+        let ranked=rank_quality_gated_candidates("existing_quant_comparison",&report);
         assert_eq!(ranked.len(),2);
         assert_eq!(ranked[0]["path"],"small.gguf");
         assert_eq!(ranked[1]["path"],"large.gguf");
@@ -661,7 +677,7 @@ mod tests{
             {"type":"IQ3_M","output":"out.gguf","bytes":200,
              "status":"NO_DETECTED_TASK_REGRESSION"}
         ]});
-        assert_eq!(ranked_quality_candidates("high_precision_quant_parity",&generated)[0]["path"],"out.gguf");
+        assert_eq!(rank_quality_gated_candidates("high_precision_quant_parity",&generated)[0]["path"],"out.gguf");
     }
     #[test]
     fn execution_requires_explicit_approval_even_if_inputs_are_missing(){
