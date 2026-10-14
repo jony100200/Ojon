@@ -16,6 +16,8 @@ use crate::quant_compare::prepare_existing_quant_comparison;
 use crate::quant_parity::{prepare_quant_parity, QuantParityOptions};
 use crate::task_eval::parse_eval_suite;
 use crate::smoke::smoke_gguf_capture;
+use crate::benchmark::{prepare_bench,run_bench};
+use std::time::{SystemTime,UNIX_EPOCH};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::io::{self, ErrorKind};
@@ -395,6 +397,35 @@ pub fn plan_optimize_workflow(
 /// Execute the exact existing Ojon quantization/verification adapters after
 /// explicit approval. Unlike invoking the suggested command in a shell,
 /// this calls typed Rust APIs directly; filenames never become shell syntax.
+/// Extract only candidates that passed the actual held-out quality gates.
+/// Prefer the smallest first; use a larger passing candidate if its runtime
+/// cannot load the smaller one. Never infer pass from its filename or file size.
+fn ranked_quality_candidates(kind:&str,result:&Value)->Vec<Value>{
+    let mut ranked=Vec::<(u64,Value)>::new();
+    if let Some(rows)=result["results"].as_array(){
+        for row in rows{
+            let status=row["status"].as_str().unwrap_or("");
+            let passed=if kind=="existing_quant_comparison"{
+                status=="NO_DETECTED_TEST_REGRESSION"
+            }else{status=="NO_DETECTED_TASK_REGRESSION"};
+            if !passed{continue;}
+            let path=if kind=="existing_quant_comparison"{
+                row["path"].as_str()
+            }else{row["output"].as_str()};
+            if let (Some(path),Some(bytes))=(path,row["bytes"].as_u64()){
+                if bytes>0 && !path.is_empty(){
+                    ranked.push((bytes,json!({
+                        "name":row["name"].as_str().or_else(||row["type"].as_str()).unwrap_or("candidate"),
+                        "path":path,"bytes":bytes
+                    })));
+                }
+            }
+        }
+    }
+    ranked.sort_by(|a,b|a.0.cmp(&b.0).then_with(||a.1["path"].as_str().cmp(&b.1["path"].as_str())));
+    ranked.into_iter().map(|(_,row)|row).collect()
+}
+
 /// The original model, reference GGUF and candidate files remain unchanged.
 /// The upstream runners write evidence with exclusive-create semantics.
 pub fn run_optimize_workflow(
@@ -449,43 +480,56 @@ pub fn run_optimize_workflow(
         },
         _=>return Err(invalid("unsupported execution route; no candidate work started")),
     };
-    let provisional=if kind=="existing_quant_comparison"{
-        result["provisional_smallest_candidate"].clone()
-    }else{result["provisional_smallest_measured_candidate"].clone()};
-    // Quality gates alone are not a deployment verdict. The chosen GGUF must
-    // also load through the installed runtime in a separate real smoke check.
-    // A failed loader check cannot silently retain a provisional winner.
-    let candidate_path=if kind=="existing_quant_comparison" {
-        provisional.get("path").and_then(Value::as_str)
-    } else {
-        provisional.as_str()
-    };
-    let (candidate,load_check)=if let Some(path)=candidate_path {
-        log("[ojon] Rechecking selected candidate with real CPU llama-cli loading");
-        match smoke_gguf_capture(
+    let ranked=ranked_quality_candidates(kind,&result);
+    let mut attempts=Vec::new();
+    let mut candidate=Value::Null;
+    let mut load_check=json!({"status":"NOT_RUN_NO_QUALITY_PASSING_CANDIDATE"});
+    for possible in &ranked{
+        let Some(path)=possible["path"].as_str() else {continue;};
+        log("[ojon] Verifying quality-passing candidate with real CPU llama-cli");
+        let attempt=match smoke_gguf_capture(
             Path::new(path),&options.eval_tool,
             "Reply with the single word READY.",16,0
         ){
-            Ok(capture) if !capture.stdout.trim().is_empty()=>(
-                provisional,
-                json!({"status":"LOAD_AND_GENERATION_PASSED",
-                    "backend":"llama-cli","gpu_layers":0,
-                    "captured_output_chars":capture.stdout.chars().count(),
-                    "note":"Smoke only; held-out task evidence is separate"})
-            ),
-            Ok(_)=>(
-                Value::Null,
-                json!({"status":"LOAD_CHECK_FAILED",
-                    "reason":"Runtime exited successfully but generated no captured output"})
-            ),
-            Err(e)=>(
-                Value::Null,
-                json!({"status":"LOAD_CHECK_FAILED","reason":e.to_string()})
-            ),
+            Ok(capture) if !capture.stdout.trim().is_empty()=>json!({
+                "path":path,"status":"LOAD_AND_GENERATION_PASSED",
+                "backend":"llama-cli","gpu_layers":0,
+                "captured_output_chars":capture.stdout.chars().count()
+            }),
+            Ok(_)=>json!({"path":path,"status":"LOAD_CHECK_FAILED",
+                "reason":"runtime exited with empty output"}),
+            Err(e)=>json!({"path":path,"status":"LOAD_CHECK_FAILED","reason":e.to_string()}),
+        };
+        let passed=attempt["status"]=="LOAD_AND_GENERATION_PASSED";
+        attempts.push(attempt.clone());
+        if passed{
+            candidate=possible.clone();
+            load_check=attempt;
+            break;
         }
-    }else{
-        (Value::Null,json!({"status":"NOT_RUN_NO_QUALITY_PASSING_CANDIDATE"}))
-    };
+    }
+    if candidate.is_null() && !attempts.is_empty(){
+        load_check=json!({"status":"ALL_QUALITY_PASSING_CANDIDATES_FAILED_TO_LOAD"});
+    }
+    // A successful load check proves executable CPU inference, not a
+    // particular device's performance. Run measured pp/tg on the selected
+    // candidate if the optional llama-bench executable is installed.
+    let performance=if let Some(path)=candidate["path"].as_str(){
+        if let Some(tool)=executable(backends,BackendId::LlamaBench){
+            let stamp=SystemTime::now().duration_since(UNIX_EPOCH)
+                .map(|d|d.as_nanos()).unwrap_or(0);
+            let report=out.join(format!("ojon-selected-bench-{}-{stamp}.json",std::process::id()));
+            log("[ojon] Measuring selected candidate CPU prefill and decode throughput");
+            match prepare_bench(Path::new(path),&tool,512,128,3,0,None)
+                .and_then(|plan|run_bench(&plan,&report)){
+                Ok(metrics)=>json!({"status":"MEASURED_CPU","receipt":report.to_string_lossy(),
+                    "metrics":metrics}),
+                Err(e)=>json!({"status":"BENCHMARK_FAILED","reason":e.to_string()}),
+            }
+        }else{
+            json!({"status":"NOT_RUN_LLAMA_BENCH_UNAVAILABLE"})
+        }
+    }else{json!({"status":"NOT_RUN_NO_LOADABLE_CANDIDATE"})};
     Ok(json!({
         "schema":"ojon.optimize_workflow_result.v1",
         "mode":"user_confirmed_cpu_only",
@@ -496,11 +540,14 @@ pub fn run_optimize_workflow(
         "quality_reference":decision["current_baseline"],
         "evaluated_tasks_only":true,
         "heldout_perplexity_requested":request.ppl_corpus.is_some(),
-        "runtime_speed_not_automatically_tested":true,
+        "runtime_speed_not_automatically_tested":performance["status"]!="MEASURED_CPU",
         "global_quality_lossless_proven":false,
         "hardware_peak_ram_vram_fit_proven":false,
         "provisional_candidate":candidate,
         "selected_candidate_runtime_load":load_check,
+        "candidate_load_attempts":attempts,
+        "quality_passing_candidate_count":ranked.len(),
+        "selected_candidate_performance":performance,
         "runtime_load_verified_on_cpu":load_check["status"]=="LOAD_AND_GENERATION_PASSED",
         "evidence":result,
         "note":"Inspect all candidate task scores, size, RAM, VRAM and latency before deploying. There may be no candidate that passes."
@@ -595,6 +642,26 @@ mod tests{
         assert_eq!(result["result"],"NOT_TESTED");
         assert!(!dir.join("ojon-quant-comparison.json").exists());
         fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn ranked_candidates_skip_failures_and_prefer_smallest(){
+        let report=json!({"results":[
+            {"name":"failed","path":"bad.gguf","bytes":1,
+             "status":"FAILED_QUALITY_GATE"},
+            {"name":"large","path":"large.gguf","bytes":300,
+             "status":"NO_DETECTED_TEST_REGRESSION"},
+            {"name":"small","path":"small.gguf","bytes":100,
+             "status":"NO_DETECTED_TEST_REGRESSION"}
+        ]});
+        let ranked=ranked_quality_candidates("existing_quant_comparison",&report);
+        assert_eq!(ranked.len(),2);
+        assert_eq!(ranked[0]["path"],"small.gguf");
+        assert_eq!(ranked[1]["path"],"large.gguf");
+        let generated=json!({"results":[
+            {"type":"IQ3_M","output":"out.gguf","bytes":200,
+             "status":"NO_DETECTED_TASK_REGRESSION"}
+        ]});
+        assert_eq!(ranked_quality_candidates("high_precision_quant_parity",&generated)[0]["path"],"out.gguf");
     }
     #[test]
     fn execution_requires_explicit_approval_even_if_inputs_are_missing(){
