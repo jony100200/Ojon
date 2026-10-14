@@ -77,6 +77,22 @@ fn types_for(goal:OptimizeGoal)->&'static str{
         OptimizeGoal::Fastest=>"Q3_K_M,IQ4_XS,IQ3_M",
     }
 }
+/// Resolved settings shared by planning and execution; no tool invocation here.
+fn configured_options(input:&OptimizeWorkflowRequest,backends:&[FoundBackend])->QuantParityOptions {
+    let mut options=QuantParityOptions::default();
+    options.min_saving_percent=input.min_saving_percent;
+    options.max_loss_points=input.max_loss_points;
+    options.gpu_layers=0; // Never automatically use occupied local GPUs.
+    options.precisions=match input.goal {
+        OptimizeGoal::Smallest=>vec![Precision::IQ3M,Precision::Q3KM,Precision::IQ4XS],
+        OptimizeGoal::Balanced=>vec![Precision::IQ4XS,Precision::IQ3M,Precision::Q3KM],
+        OptimizeGoal::Fastest=>vec![Precision::Q3KM,Precision::IQ4XS,Precision::IQ3M],
+    };
+    if let Some(bin)=executable(backends,BackendId::LlamaQuantize){options.quantizer=bin;}
+    if let Some(bin)=executable(backends,BackendId::LlamaCli){options.eval_tool=bin;}
+    options
+}
+
 /// A read-only front door for the existing pipeline. No shell command runs.
 pub fn plan_optimize_workflow(
     input:&OptimizeWorkflowRequest,backends:&[FoundBackend],
@@ -137,17 +153,7 @@ pub fn plan_optimize_workflow(
         }
         None=>None
     };
-    let mut options=QuantParityOptions::default();
-    options.min_saving_percent=input.min_saving_percent;
-    options.max_loss_points=input.max_loss_points;
-    options.gpu_layers=0; // Guided workflow currently runs CPU-only.
-    options.precisions=match input.goal {
-        OptimizeGoal::Smallest=>vec![Precision::IQ3M,Precision::Q3KM,Precision::IQ4XS],
-        OptimizeGoal::Balanced=>vec![Precision::IQ4XS,Precision::IQ3M,Precision::Q3KM],
-        OptimizeGoal::Fastest=>vec![Precision::Q3KM,Precision::IQ4XS,Precision::IQ3M],
-    };
-    if let Some(bin)=executable(backends,BackendId::LlamaQuantize){options.quantizer=bin;}
-    if let Some(bin)=executable(backends,BackendId::LlamaCli){options.eval_tool=bin;}
+    let options=configured_options(input,backends);
     let quantizer_available=executable(backends,BackendId::LlamaQuantize).is_some();
     let evaluator_available=executable(backends,BackendId::LlamaCli).is_some();
     let mut stages=vec![
@@ -303,6 +309,84 @@ pub fn plan_optimize_workflow(
     }))
 }
 
+/// Execute the exact existing Ojon quantization/verification adapters after
+/// explicit approval. Unlike invoking the suggested command in a shell,
+/// this calls typed Rust APIs directly; filenames never become shell syntax.
+/// The original model, reference GGUF and candidate files remain unchanged.
+/// The upstream runners write evidence with exclusive-create semantics.
+pub fn run_optimize_workflow(
+    request:&OptimizeWorkflowRequest,
+    backends:&[FoundBackend],
+    approved:bool,
+    mut log:impl FnMut(&str),
+)->io::Result<Value>{
+    if !approved{
+        return Err(io::Error::new(ErrorKind::PermissionDenied,
+            "optimizer execution requires explicit --confirm; no model or GPU touched"));
+    }
+    let decision=plan_optimize_workflow(request,backends)?;
+    if decision["ready_for_user_approved_execution"]!=true{
+        return Err(invalid(format!(
+            "optimizer cannot run: {}; prerequisites: {}",
+            decision["route"],
+            decision["checks"]
+        )));
+    }
+    // The guided path uses CPU-only tools. Advanced per-device offloading
+    // requires explicit model/backend/VRAM verification in lower-level commands.
+    if !matches!(request.device.as_str(),"cpu"|"auto"){
+        return Err(invalid("automatic workflow currently supports CPU-only execution"));
+    }
+    let suite=request.suite.as_ref()
+        .ok_or_else(||invalid("a held-out task suite is mandatory"))?;
+    let out=request.output_dir.as_ref()
+        .ok_or_else(||invalid("an existing output directory is mandatory"))?;
+    let mut options=configured_options(request,backends);
+    options.gpu_layers=0;
+    log("[ojon] User approved CPU-only optimizer; reconfirming inputs and untouched original weights");
+    let (kind,result)=match decision["next_action"].as_str(){
+        Some("compare_existing_quants")=>{
+            let baseline=match request.current_baseline.as_ref(){
+                Some(path)=>path,
+                None=>&request.model,
+            };
+            let report=out.join("ojon-quant-comparison.json");
+            let plan=prepare_existing_quant_comparison(
+                baseline,&request.candidates,suite,&report,options)?;
+            log("[ojon] Running real matched task comparisons; this does not generate new quantized weights");
+            ("existing_quant_comparison",run_existing_quant_comparison(&plan,|line|log(line))?)
+        },
+        Some("quantize_and_compare")=>{
+            let baseline=request.current_baseline.as_ref()
+                .ok_or_else(||invalid("quantization parity requires an existing Q4 reference"))?;
+            let plan=prepare_quant_parity(
+                &request.model,baseline,suite,out,options)?;
+            log("[ojon] Generating candidates from original high-precision weights, not from the Q4 reference");
+            ("high_precision_quant_parity",run_quant_parity(&plan,|line|log(line))?)
+        },
+        _=>return Err(invalid("unsupported execution route; no candidate work started")),
+    };
+    let candidate=if kind=="existing_quant_comparison"{
+        result["provisional_smallest_candidate"].clone()
+    }else{result["provisional_smallest_measured_candidate"].clone()};
+    Ok(json!({
+        "schema":"ojon.optimize_workflow_result.v1",
+        "mode":"user_confirmed_cpu_only",
+        "route":kind,
+        "status":"EXPERIMENT_COMPLETED",
+        "model_source":request.model.to_string_lossy(),
+        "goal":request.goal.label(),
+        "quality_reference":decision["current_baseline"],
+        "evaluated_tasks_only":true,
+        "perplexity_and_runtime_speed_not_automatically_tested":true,
+        "global_quality_lossless_proven":false,
+        "hardware_peak_ram_vram_fit_proven":false,
+        "provisional_candidate":candidate,
+        "evidence":result,
+        "note":"Inspect all candidate task scores, size, RAM, VRAM and latency before deploying. There may be no candidate that passes."
+    }))
+}
+
 #[cfg(test)]
 mod tests{
     use super::*;
@@ -391,6 +475,19 @@ mod tests{
         assert_eq!(result["result"],"NOT_TESTED");
         assert!(!dir.join("ojon-quant-comparison.json").exists());
         fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn execution_requires_explicit_approval_even_if_inputs_are_missing(){
+        let request=OptimizeWorkflowRequest::new(PathBuf::from("not-loaded.gguf"));
+        let error=run_optimize_workflow(&request,&[],false,|_|{}).unwrap_err();
+        assert_eq!(error.kind(),ErrorKind::PermissionDenied);
+    }
+    #[test]
+    fn runtime_precision_choices_equal_planner_choices(){
+        let input=OptimizeWorkflowRequest::new(PathBuf::new());
+        let opt=configured_options(&input,&[]);
+        let types=opt.precisions.iter().map(Precision::as_str).collect::<Vec<_>>().join(",");
+        assert_eq!(types,types_for(input.goal));
     }
     #[test]
     fn goals_and_limits_are_explicit(){
