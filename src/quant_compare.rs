@@ -3,7 +3,7 @@
 //! quantization process. Runtime tests run only with explicit confirmation.
 
 use crate::gguf::{inspect_gguf,inspect_gguf_tensors};
-use crate::task_eval::{parse_eval_suite,prepare_eval,run_eval};
+use crate::task_eval::{parse_eval_suite,prepare_eval,run_eval_reusing_baseline};
 use crate::quant_parity::{task_parity,vision_suite,vision_score,QuantParityOptions,VisionSuite};
 use crate::ppl::{measure as measure_perplexity,PplSettings};
 use serde_json::{json,Value};
@@ -140,6 +140,7 @@ pub fn run_existing_quant_comparison(
     let mut winner:Option<(String,PathBuf,u64)>=None;
     let mut baseline_vis:Option<Value>=None;
     let mut baseline_ppl:Option<f64>=None;
+    let mut baseline_tasks:Option<Value>=None;
     for(idx,(label,path,bytes))in plan.candidates.iter().enumerate(){
         let savings=100.0*(1.0-*bytes as f64/plan.baseline_bytes as f64);
         if *bytes>=plan.baseline_bytes||savings+1e-10<plan.options.min_saving_percent {
@@ -156,7 +157,7 @@ pub fn run_existing_quant_comparison(
             let v=vec![(label.clone(),path.clone())];
             let prep=prepare_eval(&plan.suite,&plan.baseline,&v,&plan.options.eval_tool,
                 plan.options.gpu_layers,plan.options.device.as_deref(),plan.options.tokens,&evidence)?;
-            run_eval(&prep,|msg|log(msg))
+            run_eval_reusing_baseline(&prep,baseline_tasks.as_ref(),|msg|log(msg))
         })();
         let scored=match test {
             Ok(v)=>v,
@@ -166,6 +167,7 @@ pub fn run_existing_quant_comparison(
                 continue;
             }
         };
+        if baseline_tasks.is_none(){baseline_tasks=Some(scored.clone());}
         let(text_pass,text_scores)=task_parity(&scored,plan.options.max_loss_points);
         let mut image_ok=true;let mut image_scores=Value::Null;
         if text_pass {

@@ -167,8 +167,26 @@ fn evaluate_one(plan:&EvalPlan,model:&Path,log:&mut impl FnMut(&str))->io::Resul
     }
     Ok(json!({"metrics":metrics,"results":detail,"correct":passed,"total":counts}))
 }
-pub fn run_eval(plan:&EvalPlan,mut log:impl FnMut(&str))->io::Result<Value>{
-    let baseline=evaluate_one(plan,&plan.baseline,&mut log)?;
+pub fn run_eval(plan:&EvalPlan,log:impl FnMut(&str))->io::Result<Value>{
+    run_eval_reusing_baseline(plan,None,log)
+}
+/// Only reuse evidence within this invocation, after checking the canonical
+/// baseline model and all task generation parameters. Never trust a disk receipt.
+pub(crate) fn run_eval_reusing_baseline(
+    plan:&EvalPlan,prior:Option<&Value>,mut log:impl FnMut(&str)
+)->io::Result<Value>{
+    let config=json!({"tool":plan.tool.to_string_lossy(),
+        "gpu_layers":plan.gpu_layers,"device":plan.device,
+        "tokens":plan.tokens,"task_count":plan.suite.tasks.len()});
+    let baseline=if let Some(cached)=prior{
+        if cached["baseline"]["model"]!=json!(plan.baseline.to_string_lossy())
+            ||cached["evaluation_suite"]!=json!(plan.suite.id)
+            ||cached["evaluation_config"]!=config
+            ||!cached["baseline"]["tests"]["metrics"].is_object()
+        {return Err(invalid("same-run baseline cache is not compatible"));}
+        log("[ojon] Reusing matched baseline tests; no repeated baseline model launches");
+        cached["baseline"]["tests"].clone()
+    }else{evaluate_one(plan,&plan.baseline,&mut log)?};
     let mut candidates=Vec::new();let mut details=Vec::new();
     for (name,path) in &plan.candidates{
         let tests=evaluate_one(plan,path,&mut log)?;
@@ -182,6 +200,7 @@ pub fn run_eval(plan:&EvalPlan,mut log:impl FnMut(&str))->io::Result<Value>{
         .collect::<Vec<_>>();
     let result=json!({
         "schema":"ojon.quality_evidence.v1","evaluation_suite":plan.suite.id,
+        "evaluation_config":config,"baseline_reused":prior.is_some(),
         "baseline":{"model":plan.baseline.to_string_lossy(),"metrics":baseline["metrics"],"tests":baseline},
         "requirements":requirements,
         "candidates":candidates,"detailed_candidate_results":details,

@@ -3,7 +3,7 @@
 //! no heuristic guess is described as observed activation sensitivity.
 use crate::gguf::{inspect_gguf, inspect_gguf_tensors, read_imatrix_energy};
 use crate::llama::{prepare_gguf, quantize_gguf_with_log, Precision};
-use crate::task_eval::{prepare_eval, run_eval};
+use crate::task_eval::{prepare_eval, run_eval_reusing_baseline};
 use serde_json::{json,Value};
 use std::collections::{HashMap,HashSet};
 use std::fs::{self,OpenOptions};
@@ -25,7 +25,8 @@ pub struct AdaptivePlan{
     pub output_dir:PathBuf,pub suite:PathBuf,pub quantizer:PathBuf,
     pub eval_tool:PathBuf,pub imatrix:Option<PathBuf>,pub targets:Vec<f64>,
     pub threads:usize,pub gpu_layers:i32,pub device:Option<String>,pub tokens:u32,
-    pub max_absolute_loss_pct:f64
+    pub max_absolute_loss_pct:f64,
+    pub reference:PathBuf,
 }
 
 /// Derive a ranked importance proxy directly from a real GGUF llama-imatrix.
@@ -205,11 +206,24 @@ pub fn prepare_adaptive(
             return Err(invalid("invalid device"));
         }
     }
-    Ok(AdaptivePlan{source,scores_file,scores:parsed,output_dir,suite,
+    Ok(AdaptivePlan{reference:source.clone(),source,scores_file,scores:parsed,output_dir,suite,
         quantizer:quantizer.into(),eval_tool:eval_tool.into(),imatrix,targets:bits,
         threads,gpu_layers,device:device.map(str::to_owned),tokens,max_absolute_loss_pct})
 }
 
+/// Guided searches use the existing quantized Q4 benchmark reference.
+pub fn prepare_adaptive_against_reference(
+    source:&Path,reference:&Path,scores:&Path,output_dir:&Path,suite:&Path,
+    quantizer:&Path,eval_tool:&Path,imatrix:Option<&Path>,
+    targets:&[f64],threads:usize,gpu_layers:i32,device:Option<&str>,tokens:u32,
+    max_absolute_loss_pct:f64
+)->io::Result<AdaptivePlan>{
+    let mut plan=prepare_adaptive(source,scores,output_dir,suite,quantizer,eval_tool,
+        imatrix,targets,threads,gpu_layers,device,tokens,max_absolute_loss_pct)?;
+    let (_,matched,_)=crate::quant_parity::inspect_compatible_models(source,reference)?;
+    plan.reference=matched;
+    Ok(plan)
+}
 impl AdaptivePlan{
     pub fn as_json(&self)->Value{
         json!({
@@ -218,6 +232,7 @@ impl AdaptivePlan{
             "sensitivity_verified_by_ojon":false,
             "output_dir":self.output_dir.to_string_lossy(),
             "suite":self.suite.to_string_lossy(),
+            "quality_reference":self.reference.to_string_lossy(),
             "targets":self.targets.iter().map(|&t|allocate_bits(&self.scores,t).unwrap_or(Value::Null)).collect::<Vec<_>>(),
             "default_format":"GGUF with upstream Q2_K through Q6_K tensor overrides",
             "quality_tolerance_absolute_percentage_points":self.max_absolute_loss_pct,
@@ -258,6 +273,7 @@ pub fn run_adaptive(plan:&AdaptivePlan,mut log:impl FnMut(&str))->io::Result<Val
     let session=format!("ojon-adaptive-{}-{started}",std::process::id());
     let mut rows=Vec::new();
     let mut best:Option<(String,u64)>=None;
+    let mut baseline_tasks:Option<Value>=None;
     for (idx,target) in plan.targets.iter().enumerate(){
         let label=format!("adaptive_{idx}");
         let prefix=format!("{session}-{:03}",(target*100.0).round() as u32);
@@ -281,15 +297,16 @@ pub fn run_adaptive(plan:&AdaptivePlan,mut log:impl FnMut(&str))->io::Result<Val
             Ok(done)=>{
                 let candidate=vec![(label.clone(),output.clone())];
                 let evaluated=(||{
-                    let test=prepare_eval(&plan.suite,&plan.source,&candidate,&plan.eval_tool,
+                    let test=prepare_eval(&plan.suite,&plan.reference,&candidate,&plan.eval_tool,
                         plan.gpu_layers,plan.device.as_deref(),plan.tokens,&evidence)?;
-                    run_eval(&test,|line|log(line))
+                    run_eval_reusing_baseline(&test,baseline_tasks.as_ref(),|line|log(line))
                 })();
                 match evaluated{
                     Err(e)=>rows.push(json!({"target":target,"status":"quality_evaluation_failed",
                         "reason":e.to_string(),"bytes":done.output_info.file_bytes,
                         "output":output.to_string_lossy()})),
                     Ok(report)=>{
+                        if baseline_tasks.is_none(){baseline_tasks=Some(report.clone());}
                         let base=&report["baseline"]["metrics"];
                         let cand=&report["candidates"][0]["metrics"];
                         let mut comparisons=Vec::new();let mut passes=true;
@@ -316,7 +333,7 @@ pub fn run_adaptive(plan:&AdaptivePlan,mut log:impl FnMut(&str))->io::Result<Val
         }
     }
     let report=json!({"schema":"ojon.adaptive_search_result.v1",
-        "source":plan.source.to_string_lossy(),"suite":plan.suite.to_string_lossy(),
+        "source":plan.source.to_string_lossy(),"quality_reference":plan.reference.to_string_lossy(),"suite":plan.suite.to_string_lossy(),
         "candidates":rows,"provisional_smallest_task_passing_output":best.as_ref().map(|p|p.0.clone()),
         "provisional_smallest_bytes":best.map(|p|p.1),
         "hardware_residency_verified":false,"near_lossless_generalization_verified":false,

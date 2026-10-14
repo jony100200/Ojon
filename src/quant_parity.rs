@@ -9,7 +9,7 @@
 use crate::gguf::{inspect_gguf, inspect_gguf_tensors};
 use crate::llama::{prepare_gguf, quantize_gguf_with_log, Precision};
 use crate::ppl::{measure as measure_perplexity, PplSettings};
-use crate::task_eval::{parse_eval_suite, prepare_eval, run_eval};
+use crate::task_eval::{parse_eval_suite, prepare_eval, run_eval_reusing_baseline};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -75,7 +75,7 @@ pub(crate) fn vision_suite(path:&Path)->io::Result<VisionSuite>{
     Ok(VisionSuite{tasks})
 }
 
-fn inspect_compatible_models(source:&Path,baseline:&Path)->io::Result<(PathBuf,PathBuf,u64)>{
+pub(crate) fn inspect_compatible_models(source:&Path,baseline:&Path)->io::Result<(PathBuf,PathBuf,u64)>{
     let source=source.canonicalize()?;
     let baseline=baseline.canonicalize()?;
     if source==baseline{return Err(invalid("original and Q4 reference paths must differ"));}
@@ -202,7 +202,7 @@ pub fn prepare_quant_parity(
     for precision in &options.precisions{
         if !seen.insert(precision.as_str()){return Err(invalid("duplicate candidate quantization")); }
         if !matches!(precision,
-            Precision::IQ4XS|Precision::IQ3M|Precision::Q3KM|
+            Precision::IQ4XS|Precision::IQ3M|Precision::Q3KM|Precision::Q3KL|
             Precision::IQ3S|Precision::IQ3XS) {
             return Err(invalid("quant-parity only accepts candidate formats normally smaller than Q4_K_M"));
         }
@@ -329,6 +329,7 @@ pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Res
     let mut best:Option<(PathBuf,u64)>=None;
     let mut base_vision:Option<Value>=None;
     let mut baseline_ppl:Option<f64>=None;
+    let mut baseline_tasks:Option<Value>=None;
     for(ordinal,precision)in plan.options.precisions.iter().enumerate(){
         let key=format!("{prefix}-{:02}-{}",ordinal,precision.as_str());
         let output=plan.output_dir.join(format!("{key}.gguf"));
@@ -363,7 +364,7 @@ pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Res
             let eval=prepare_eval(&plan.suite,&plan.baseline,&candidates,
                 &plan.options.eval_tool,plan.options.gpu_layers,
                 plan.options.device.as_deref(),plan.options.tokens,&evidence)?;
-            run_eval(&eval,|line|log(line))
+            run_eval_reusing_baseline(&eval,baseline_tasks.as_ref(),|line|log(line))
         })();
         let task_report=match results{
             Ok(r)=>r,
@@ -373,6 +374,7 @@ pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Res
                 continue;
             }
         };
+        if baseline_tasks.is_none(){baseline_tasks=Some(task_report.clone());}
         let(task_pass,task_metrics)=task_parity(&task_report,plan.options.max_loss_points);
         let mut vision_pass=true;
         let mut vision_evidence=Value::Null;
