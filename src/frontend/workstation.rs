@@ -1,7 +1,7 @@
 //! Kathamo desktop frontend for Ojon.
 //! Kept separate from src/bin (Cargo's executable entry-point convention).
 //! Ojon's native workstation shell, powered by Kathamo.
-//! This is an optional GUI binary, not a model quantization engine.
+//! This optional frontend depends on ojon_backend; it is not a quantization engine.
 //! All model details displayed here come from inspected files. No demo benchmarks.
 
 use ojon_backend::{inspect_gguf, prepare_gguf, quantize_gguf_with_log, inspect_hf_folder, prepare_hf, quantize_hf_with_log, hf_python_path, smoke_gguf_capture, probe_model};
