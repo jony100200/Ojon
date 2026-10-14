@@ -571,7 +571,7 @@ pub fn run_optimize_workflow(
                         .map(|reference|compare_bench_files(reference,&receipt))
                         .transpose();
                     match comparison{
-                        Ok(check) if check.as_ref().is_some_and(|v|v["comparable"]!=true)=>
+                        Ok(check) if check.as_ref().is_some_and(|v|v["benchmark_conditions_match"]!=true)=>
                             json!({"path":path,"status":"INCOMPARABLE_BENCHMARK","comparison":check}),
                         Err(e)=>json!({"path":path,"status":"BENCHMARK_COMPARISON_FAILED","reason":e.to_string()}),
                         _=>{

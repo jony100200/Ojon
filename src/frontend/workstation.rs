@@ -1048,20 +1048,21 @@ impl Workstation {
                                             card.label(&format!("{name}: {state}; file saving {saving}"));
                                         }
                                         let load=&result["selected_candidate_runtime_load"];
-                                        card.label(&format!("CPU load: {}",load["status"].as_str().unwrap_or("not tested")));
+                                        card.label(&format!("Backend load: {}",load["status"].as_str().unwrap_or("not tested")));
                                         let count=result["candidate_load_attempts"].as_array().map_or(0,|v|v.len());
                                         card.label(&format!("Actual loader checks: {count}"));
                                         let speed=&result["selected_candidate_performance"];
-                                        if speed["status"]=="MEASURED_CPU"{
+                                        if speed["status"]=="MEASURED"{
                                             let pp=speed["metrics"]["prompt_processing"]["tokens_per_second"].as_f64();
                                             let tg=speed["metrics"]["token_generation"]["tokens_per_second"].as_f64();
                                             if let (Some(pp),Some(tg))=(pp,tg){
-                                                card.label(&format!("Measured CPU: {pp:.1} prefill / {tg:.1} decode tok/s"));
+                                                card.label(&format!("Measured: {pp:.1} prefill / {tg:.1} decode tok/s"));
                                             }
                                         }else{
                                             card.label(&format!("Speed: {}",speed["status"].as_str().unwrap_or("unverified")));
                                         }
-                                        card.label("Task-scoped evidence; GPU memory/fit still unverified.");
+                                        card.label(&format!("Selection: {}",result["selection_policy"].as_str().unwrap_or("unverified")));
+                                        card.label("Task-scoped evidence; true peak RAM/VRAM still unverified.");
                                     }else{
                                         card.label(if busy {"Real optimization running; no predicted progress"}
                                             else {"No optimization result yet"});
