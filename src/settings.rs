@@ -304,7 +304,14 @@ pub fn save_to_path(path:&Path,settings:&LocalSettings)->io::Result<()>{
     let base=path.file_name().ok_or_else(||invalid("settings filename missing"))?
         .to_string_lossy();
     let temp=parent.join(format!(".{base}.{}.{stamp}.tmp",std::process::id()));
-    let mut file=OpenOptions::new().write(true).create_new(true).open(&temp)?;
+    let mut options=OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file=options.open(&temp)?;
     let result=(||{
         file.write_all(&payload)?;
         file.sync_all()?;

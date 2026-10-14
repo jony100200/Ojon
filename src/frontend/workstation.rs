@@ -215,7 +215,9 @@ impl Workstation {
             opt_min_saving: settings.min_saving_percent.to_string(),
             opt_max_loss: settings.max_loss_points.to_string(),
             opt_max_ppl: settings.max_ppl_regression_pct.to_string(),
-            opt_goal: if settings.optimization_goal=="smallest"{1}else{0},
+            opt_goal: match settings.optimization_goal.as_str(){
+                "smallest"=>1,"fastest"=>2,_=>0
+            },
             opt_planned: None,
             opt_result: None,
             focus: None,
@@ -273,7 +275,9 @@ impl Workstation {
                 next.backend_paths.insert(key.to_owned(),value.to_owned());
             }
         }
-        next.optimization_goal=if self.opt_goal==1{"smallest"}else{"balanced"}.into();
+        next.optimization_goal=match self.opt_goal{
+            1=>"smallest",2=>"fastest",_=>"balanced"
+        }.into();
         let parsed=(||{
             next.min_saving_percent=self.opt_min_saving.trim().parse::<f64>()
                 .map_err(|_|"Invalid minimum size saving")?;
@@ -463,7 +467,11 @@ impl Workstation {
         let source=self.source.trim();
         if source.is_empty(){return Err("Choose a model first".into());}
         let mut req=OptimizeWorkflowRequest::new(PathBuf::from(source));
-        req.goal=if self.opt_goal==1 {OptimizeGoal::Smallest}else{OptimizeGoal::Balanced};
+        req.goal=match self.opt_goal{
+            1=>OptimizeGoal::Smallest,
+            2=>OptimizeGoal::Fastest,
+            _=>OptimizeGoal::Balanced
+        };
         req.device="cpu".into();
         let baseline=self.opt_baseline.trim();
         if !baseline.is_empty(){req.current_baseline=Some(PathBuf::from(baseline));}
@@ -1048,7 +1056,9 @@ impl Workstation {
                                     }
                                     card.label("Goal");
                                     card.dropdown("Optimize for",opt_goal,&[
-                                        "Balanced: protect quality","Smallest: stronger compression"
+                                        "Balanced: quality / measured speed",
+                                        "Smallest: stronger compression",
+                                        "Fastest: measured decode throughput"
                                     ]);
                                 }else{
                                     card.label("Importance matrix from separate calibration (optional)");
