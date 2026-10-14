@@ -78,6 +78,8 @@ pub fn smoke_gguf_capture(
         .arg("-p").arg(prompt)
         .arg("-n").arg(tokens.to_string())
         .arg("-ngl").arg(gpu_layers.to_string())
+        .arg("--no-display-prompt")
+        .arg("--simple-io")
         .arg("-st")
         .stdin(Stdio::null()).output()?;
     let stderr = String::from_utf8_lossy(&result.stderr);

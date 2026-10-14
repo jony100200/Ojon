@@ -66,7 +66,7 @@ fn clipboard_text() -> Option<String> { None }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Model, Output, Quantizer, Converter, Runtime, Benchmark, Prompt, GpuLayers,
-    OptBaseline, OptCandidate, OptSuite, OptOutput, OptImatrix, OptPpl,
+    OptBaseline, OptCandidate, OptSuite, OptOutput, OptImatrix, OptSensitivity, OptPpl,
     OptMinSaving, OptMaxLoss, OptMaxPpl,
 }
 
@@ -104,6 +104,7 @@ struct Workstation {
     opt_suite: String,
     opt_output: String,
     opt_imatrix: String,
+    opt_sensitivity: String,
     opt_ppl: String,
     opt_min_saving: String,
     opt_max_loss: String,
@@ -189,6 +190,7 @@ impl Workstation {
             opt_suite: String::new(),
             opt_output: initial_opt_output,
             opt_imatrix: String::new(),
+            opt_sensitivity: String::new(),
             opt_ppl: String::new(),
             opt_min_saving: "5".into(),
             opt_max_loss: "0".into(),
@@ -390,6 +392,8 @@ impl Workstation {
         }else{
             req.output_dir=Path::new(source).parent().map(Path::to_path_buf);
         }
+        let sensitivity=self.opt_sensitivity.trim();
+        if !sensitivity.is_empty(){req.tensor_sensitivity=Some(PathBuf::from(sensitivity));}
         let imatrix=self.opt_imatrix.trim();
         if !imatrix.is_empty(){req.imatrix=Some(PathBuf::from(imatrix));}
         let ppl=self.opt_ppl.trim();
@@ -702,6 +706,7 @@ impl Workstation {
             Focus::OptSuite => &mut self.opt_suite,
             Focus::OptOutput => &mut self.opt_output,
             Focus::OptImatrix => &mut self.opt_imatrix,
+            Focus::OptSensitivity => &mut self.opt_sensitivity,
             Focus::OptPpl => &mut self.opt_ppl,
             Focus::OptMinSaving => &mut self.opt_min_saving,
             Focus::OptMaxLoss => &mut self.opt_max_loss,
@@ -769,6 +774,7 @@ impl Workstation {
         let opt_suite=&mut self.opt_suite;
         let opt_output=&mut self.opt_output;
         let opt_imatrix=&mut self.opt_imatrix;
+        let opt_sensitivity=&mut self.opt_sensitivity;
         let opt_ppl=&mut self.opt_ppl;
         let opt_min_saving=&mut self.opt_min_saving;
         let opt_max_loss=&mut self.opt_max_loss;
@@ -962,6 +968,10 @@ impl Workstation {
                                     if card.text_input(opt_imatrix,"Calibration imatrix path...").clicked(){
                                         new_focus=Some(Focus::OptImatrix);
                                     }
+                                    card.label("Adaptive tensor sensitivity scores JSON (optional)");
+                                    if card.text_input(opt_sensitivity,"Tensor sensitivity scores path...").clicked(){
+                                        new_focus=Some(Focus::OptSensitivity);
+                                    }
                                     card.label("Independent held-out perplexity corpus (recommended)");
                                     if card.text_input(opt_ppl,"PPL corpus text path...").clicked(){
                                         new_focus=Some(Focus::OptPpl);
@@ -1037,7 +1047,21 @@ impl Workstation {
                                                 .unwrap_or_else(||"unmeasured".into());
                                             card.label(&format!("{name}: {state}; file saving {saving}"));
                                         }
-                                        card.label("Task-specific evidence; full hardware fit remains unverified.");
+                                        let load=&result["selected_candidate_runtime_load"];
+                                        card.label(&format!("CPU load: {}",load["status"].as_str().unwrap_or("not tested")));
+                                        let count=result["candidate_load_attempts"].as_array().map_or(0,|v|v.len());
+                                        card.label(&format!("Actual loader checks: {count}"));
+                                        let speed=&result["selected_candidate_performance"];
+                                        if speed["status"]=="MEASURED_CPU"{
+                                            let pp=speed["metrics"]["prompt_processing"]["tokens_per_second"].as_f64();
+                                            let tg=speed["metrics"]["token_generation"]["tokens_per_second"].as_f64();
+                                            if let (Some(pp),Some(tg))=(pp,tg){
+                                                card.label(&format!("Measured CPU: {pp:.1} prefill / {tg:.1} decode tok/s"));
+                                            }
+                                        }else{
+                                            card.label(&format!("Speed: {}",speed["status"].as_str().unwrap_or("unverified")));
+                                        }
+                                        card.label("Task-scoped evidence; GPU memory/fit still unverified.");
                                     }else{
                                         card.label(if busy {"Real optimization running; no predicted progress"}
                                             else {"No optimization result yet"});
