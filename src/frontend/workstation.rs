@@ -6,6 +6,7 @@
 
 use ojon_backend::{inspect_gguf, prepare_gguf, quantize_gguf_with_log, inspect_hf_folder, prepare_hf, quantize_hf_with_log, hf_python_path, smoke_gguf_capture, probe_model};
 use ojon_backend::{resource_plan, ResourceMode, prepare_bench, run_bench};
+use ojon_backend::{LocalSettings,load_settings,save_settings};
 use ojon_backend::{OptimizeWorkflowRequest, OptimizeGoal, plan_optimize_workflow, run_optimize_workflow};
 use ojon_backend::{GgufSummary, HfFolderInfo, ModelProbe, HfQuantizeResult, SmokeCapture, Precision, QuantizeResult, FoundBackend, BackendId, discover_backends, open_official_download_page};
 use std::path::{Path, PathBuf};
@@ -87,6 +88,7 @@ enum WorkerEvent {
 struct Workstation {
     source: String,
     output: String,
+    local_settings: LocalSettings,
     quantizer: String,
     converter: String,
     runtime: String,
@@ -139,27 +141,42 @@ struct Workstation {
 impl Workstation {
     fn new() -> Self {
         let (tx, rx) = mpsc::channel();
-        let mut source = String::new();
-        let backends = discover_backends();
+        let (settings,settings_problem)=match load_settings(){
+            Ok(value)=>(value,None),
+            Err(e)=>(LocalSettings::default(),Some(e.to_string())),
+        };
+        let mut source=settings.last_model.as_deref()
+            .filter(|path|Path::new(path).exists()).unwrap_or("").to_string();
+        let backends=if settings_problem.is_none(){
+            ojon_backend::discovery::discover_backends_with_settings(&settings)
+        }else{
+            // Never silently pick a different executable if a preferences
+            // file exists but could not be parsed.
+            Vec::new()
+        };
         let mut quantizer = backends.iter()
             .find(|b| b.spec.id == BackendId::LlamaQuantize)
             .and_then(|b| b.executable.as_ref())
             .map(|p| p.to_string_lossy().into_owned())
+            .or_else(||settings.backend("OJON_LLAMA_QUANTIZE").map(str::to_owned))
             .unwrap_or_else(|| "llama-quantize".to_owned());
         let mut converter = backends.iter()
             .find(|b| b.spec.id == BackendId::HfConverter)
             .and_then(|b| b.executable.as_ref())
             .map(|p| p.to_string_lossy().into_owned())
+            .or_else(||settings.backend("OJON_CONVERT_HF").map(str::to_owned))
             .unwrap_or_else(|| "convert_hf_to_gguf.py".to_owned());
         let mut runtime = backends.iter()
             .find(|b| b.spec.id == BackendId::LlamaCli)
             .and_then(|b| b.executable.as_ref())
             .map(|p| p.to_string_lossy().into_owned())
+            .or_else(||settings.backend("OJON_LLAMA_CLI").map(str::to_owned))
             .unwrap_or_else(|| "llama-cli".to_owned());
         let benchmark = backends.iter()
             .find(|b| b.spec.id == BackendId::LlamaBench)
             .and_then(|b| b.executable.as_ref())
             .map(|p| p.to_string_lossy().into_owned())
+            .or_else(||settings.backend("OJON_LLAMA_BENCH").map(str::to_owned))
             .unwrap_or_else(|| "llama-bench".to_owned());
         let mut args = std::env::args_os().skip(1);
         while let Some(key) = args.next() {
@@ -172,13 +189,14 @@ impl Workstation {
             }
         }
         let output = default_output(&source, Precision::default());
-        let initial_opt_output=Path::new(&output).parent()
-            .filter(|p|!p.as_os_str().is_empty())
-            .map(|p|p.to_string_lossy().into_owned()).unwrap_or_default();
+        let initial_opt_output=settings.output_directory.clone().unwrap_or_else(||
+            Path::new(&output).parent().filter(|p|!p.as_os_str().is_empty())
+                .map(|p|p.to_string_lossy().into_owned()).unwrap_or_default());
         Self {
             source, output, quantizer, converter, runtime, benchmark,
+            local_settings:settings.clone(),
             prompt: "Explain in one sentence what a quantized language model is.".into(),
-            gpu_layers: "0".into(),
+            gpu_layers: settings.gpu_layers.to_string(),
             recipe: 0,
             format_tab: 0,
             workspace_tab: 0,
@@ -192,10 +210,10 @@ impl Workstation {
             opt_imatrix: String::new(),
             opt_sensitivity: String::new(),
             opt_ppl: String::new(),
-            opt_min_saving: "5".into(),
-            opt_max_loss: "0".into(),
-            opt_max_ppl: "0".into(),
-            opt_goal: 0,
+            opt_min_saving: settings.min_saving_percent.to_string(),
+            opt_max_loss: settings.max_loss_points.to_string(),
+            opt_max_ppl: settings.max_ppl_regression_pct.to_string(),
+            opt_goal: if settings.optimization_goal=="smallest"{1}else{0},
             opt_planned: None,
             opt_result: None,
             focus: None,
@@ -209,7 +227,9 @@ impl Workstation {
             started_at: None,
             last_elapsed: None,
             log_tail: VecDeque::new(),
-            status: "Drop a GGUF file or HF model folder here, or enter a path.".into(),
+            status:settings_problem.map(|e|format!(
+                "Local settings could not be loaded: {e}. Check ojon settings show; original file untouched."
+            )).unwrap_or_else(||"Drop a GGUF file or HF model folder here, or enter a path.".into()),
             busy: false,
             tx, rx,
             icons: IconAtlas::new(),
@@ -219,6 +239,63 @@ impl Workstation {
             control_held: false,
             select_all: false,
             needs_redraw: true,
+        }
+    }
+    /// Save only user preferences. CLI overrides and inferred runtime
+    /// capabilities are deliberately not treated as verified settings.
+    fn persist_local_settings(&mut self,show_success:bool){
+        let mut next=self.local_settings.clone();
+        next.last_model=Some(self.source.trim().to_string())
+            .filter(|v|!v.is_empty());
+        next.model_directory=next.last_model.as_deref()
+            .and_then(|v|Path::new(v).parent())
+            .filter(|v|!v.as_os_str().is_empty())
+            .map(|v|v.to_string_lossy().into_owned())
+            .or_else(||next.model_directory.clone());
+        next.output_directory=Some(self.opt_output.trim().to_string())
+            .filter(|v|!v.is_empty());
+        for (key,value,default) in [
+            ("OJON_LLAMA_QUANTIZE",self.quantizer.trim(),"llama-quantize"),
+            ("OJON_CONVERT_HF",self.converter.trim(),"convert_hf_to_gguf.py"),
+            ("OJON_LLAMA_CLI",self.runtime.trim(),"llama-cli"),
+            ("OJON_LLAMA_BENCH",self.benchmark.trim(),"llama-bench"),
+        ]{
+            if value.is_empty()||value==default{
+                next.backend_paths.remove(key);
+            }else{
+                next.backend_paths.insert(key.to_owned(),value.to_owned());
+            }
+        }
+        next.optimization_goal=if self.opt_goal==1{"smallest"}else{"balanced"}.into();
+        let parsed=(||{
+            next.min_saving_percent=self.opt_min_saving.trim().parse::<f64>()
+                .map_err(|_|"Invalid minimum size saving")?;
+            next.max_loss_points=self.opt_max_loss.trim().parse::<f64>()
+                .map_err(|_|"Invalid maximum task quality loss")?;
+            next.max_ppl_regression_pct=self.opt_max_ppl.trim().parse::<f64>()
+                .map_err(|_|"Invalid maximum PPL regression")?;
+            next.gpu_layers=self.gpu_layers.trim().parse::<u32>()
+                .map_err(|_|"Invalid GPU layer count")?;
+            next.validate().map_err(|_|"Invalid preference value")
+        })();
+        if let Err(error)=parsed{
+            self.status=format!("Preferences not saved: {error}");
+            self.needs_redraw=true;
+            return;
+        }
+        match save_settings(&next){
+            Ok(path)=>{
+                self.local_settings=next;
+                if show_success{
+                    self.status=format!("Local preferences saved: {}",path.display());
+                    self.needs_redraw=true;
+                }
+            },
+            Err(e)=>{
+                self.status=format!("Cannot save local preferences: {e}");
+                self.needs_redraw=true;
+                eprintln!("Ojon local settings save failed: {e}");
+            }
         }
     }
     fn rescan_backends(&mut self) {
@@ -279,6 +356,7 @@ impl Workstation {
             .map(|p|p.to_string_lossy().into_owned()).unwrap_or_default();
         self.status = "Model selected. Inspect it before converting.".into();
         self.needs_redraw = true;
+        self.persist_local_settings(false);
         self.start_inspect();
     }
     fn start_inspect(&mut self) {
@@ -794,6 +872,7 @@ impl Workstation {
         let log_tail = &self.log_tail;
         let job_elapsed = self.started_at.map(|t| t.elapsed()).or(self.last_elapsed);
         let mut rescan = false;
+        let mut save_local_settings = false;
         let mut download: Option<BackendId> = None;
         let mut new_focus = self.focus;
         let (mut inspect, mut plan, mut advise, mut opt_run, mut convert, mut smoke, mut bench) =
@@ -904,6 +983,7 @@ impl Workstation {
                                 backends_expanded,
                                 |details| {
                             if details.button_secondary("Rescan Installed Tools").clicked() { rescan = true; }
+                            if details.button_secondary("Save Local Preferences").clicked(){save_local_settings=true;}
                             for backend in backends.iter() {
                                 let label = match backend.spec.id {
                                     BackendId::LlamaQuantize => "GGUF converter",
@@ -1186,6 +1266,7 @@ impl Workstation {
         }
         if self.focus != new_focus { self.select_all = false; }
         self.focus = new_focus;
+        if save_local_settings{self.persist_local_settings(true);}
         if rescan { self.rescan_backends(); }
         if let Some(id) = download {
             if let Err(e) = open_official_download_page(id) {
@@ -1303,7 +1384,10 @@ impl ApplicationHandler for DesktopApp {
     fn window_event(&mut self, loop_: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(win) = self.window.as_ref().cloned() else { return; };
         match event {
-            WindowEvent::CloseRequested => loop_.exit(),
+            WindowEvent::CloseRequested => {
+                self.ui.persist_local_settings(false);
+                loop_.exit();
+            },
             WindowEvent::Resized(size) => {
                 self.physical = (size.width, size.height);
                 win.request_redraw();
