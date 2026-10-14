@@ -17,7 +17,7 @@ use crate::quant_parity::{prepare_quant_parity, QuantParityOptions};
 use crate::task_eval::parse_eval_suite;
 use crate::smoke::smoke_gguf_capture_with_device;
 use crate::benchmark::{prepare_bench,run_bench,compare_bench_files};
-use crate::quality::{rank_quality_gated_candidates,select_workflow_goal};
+use crate::quality::{rank_quality_gated_candidates,select_workflow_goal_with_ratio};
 use crate::adaptive::{prepare_adaptive_against_reference,run_adaptive};
 use std::time::{SystemTime,UNIX_EPOCH};
 use serde_json::{json, Value};
@@ -66,6 +66,12 @@ pub struct OptimizeWorkflowRequest {
     pub gpu_layers:i32,
     pub min_saving_percent:f64,
     pub max_loss_points:f64,
+    /// Optional user-selected order, restricted to the existing Q4 parity formats.
+    pub precision_candidates:Option<Vec<Precision>>,
+    pub bench_prompt_tokens:u32,
+    pub bench_generation_tokens:u32,
+    pub bench_repetitions:u32,
+    pub balanced_min_speed_ratio:f64,
 }
 impl OptimizeWorkflowRequest{
     pub fn new(model:PathBuf)->Self{
@@ -73,7 +79,9 @@ impl OptimizeWorkflowRequest{
             model,current_baseline:None,candidates:Vec::new(),suite:None,
             output_dir:None,imatrix:None,tensor_sensitivity:None,ppl_corpus:None,max_ppl_regression_pct:0.0,
             goal:OptimizeGoal::Balanced,device:"auto".into(),runtime_device:None,gpu_layers:0,
-            min_saving_percent:5.0,max_loss_points:0.0
+            min_saving_percent:5.0,max_loss_points:0.0,
+            precision_candidates:None,bench_prompt_tokens:512,bench_generation_tokens:128,
+            bench_repetitions:3,balanced_min_speed_ratio:0.85
         }
     }
 }
@@ -106,6 +114,17 @@ fn types_for(goal:OptimizeGoal)->&'static str{
         OptimizeGoal::Fastest=>"Q3_K_M,Q3_K_L,IQ4_XS,IQ3_M",
     }
 }
+/// Resolve the one candidate list shared by planning, generation and receipts.
+fn precisions_for(input:&OptimizeWorkflowRequest)->Vec<Precision>{
+    input.precision_candidates.clone().unwrap_or_else(||match input.goal{
+        OptimizeGoal::Smallest=>vec![Precision::IQ3M,Precision::Q3KM,Precision::Q3KL,Precision::IQ4XS],
+        OptimizeGoal::Balanced=>vec![Precision::IQ4XS,Precision::Q3KL,Precision::IQ3M,Precision::Q3KM],
+        OptimizeGoal::Fastest=>vec![Precision::Q3KM,Precision::Q3KL,Precision::IQ4XS,Precision::IQ3M],
+    })
+}
+fn precision_csv(input:&OptimizeWorkflowRequest)->String{
+    precisions_for(input).iter().map(|p|p.as_str()).collect::<Vec<_>>().join(",")
+}
 /// Resolved settings shared by planning and execution; no tool invocation here.
 fn configured_options(input:&OptimizeWorkflowRequest,backends:&[FoundBackend])->QuantParityOptions {
     let mut options=QuantParityOptions::default();
@@ -117,11 +136,7 @@ fn configured_options(input:&OptimizeWorkflowRequest,backends:&[FoundBackend])->
     if let Some(bin)=executable(backends,BackendId::LlamaPerplexity){options.ppl_tool=bin;}
     options.gpu_layers=input.gpu_layers;
     options.device=input.runtime_device.clone();
-    options.precisions=match input.goal {
-        OptimizeGoal::Smallest=>vec![Precision::IQ3M,Precision::Q3KM,Precision::Q3KL,Precision::IQ4XS],
-        OptimizeGoal::Balanced=>vec![Precision::IQ4XS,Precision::Q3KL,Precision::IQ3M,Precision::Q3KM],
-        OptimizeGoal::Fastest=>vec![Precision::Q3KM,Precision::Q3KL,Precision::IQ4XS,Precision::IQ3M],
-    };
+    options.precisions=precisions_for(input);
     if let Some(bin)=executable(backends,BackendId::LlamaQuantize){options.quantizer=bin;}
     if let Some(bin)=executable(backends,BackendId::LlamaCli){options.eval_tool=bin;}
     options
@@ -160,6 +175,24 @@ pub fn plan_optimize_workflow(
         return Err(invalid("maximum relative perplexity regression must be 0..100 percent"));
     }
     if input.candidates.len()>6{return Err(invalid("at most six existing candidate GGUFs"));}
+    let formats=precisions_for(input);
+    if formats.is_empty()||formats.len()>6{
+        return Err(invalid("guided search requires 1..=6 precision candidates"));
+    }
+    let mut unique=HashSet::new();
+    for precision in &formats{
+        if !crate::quant_parity::allowed_parity_precision(*precision)
+            ||!unique.insert(precision.as_str()){
+            return Err(invalid("guided precisions must be distinct smaller-than-Q4 parity formats"));
+        }
+    }
+    if !(16..=8192).contains(&input.bench_prompt_tokens)
+        ||!(16..=2048).contains(&input.bench_generation_tokens)
+        ||!(1..=10).contains(&input.bench_repetitions)
+        ||!input.balanced_min_speed_ratio.is_finite()
+        ||!(0.50..=1.0).contains(&input.balanced_min_speed_ratio){
+        return Err(invalid("invalid benchmark length, repetitions, or Balanced speed fraction"));
+    }
     let mut names=HashSet::new();
     for(label,_)in &input.candidates{
         if label.is_empty()||label.len()>80||
@@ -367,13 +400,16 @@ pub fn plan_optimize_workflow(
                     Ok(_)=>{
                         let mut cmd=vec!["ojon".into(),"quant-parity-run".into(),
                             path_text(&source),path_text(base),path_text(suite),path_text(out),
-                            "--precisions".into(),types_for(input.goal).into(),
+                            "--precisions".into(),precision_csv(input),
                             "--quantizer".into(),path_text(&options.quantizer),
                             "--eval-tool".into(),path_text(&options.eval_tool),
                             "--max-buffer-mib".into(),"512".into(),
                             "--min-saving-percent".into(),input.min_saving_percent.to_string(),
                             "--max-loss-points".into(),input.max_loss_points.to_string(),
-                            "--gpu-layers".into(),"0".into()];
+                            "--gpu-layers".into(),options.gpu_layers.to_string()]; 
+                        if let Some(device)=options.device.as_deref(){
+                            cmd.extend(["--device".into(),device.into()]);
+                        }
                         if let Some(imatrix)=options.imatrix.as_ref(){
                             cmd.extend(["--imatrix".into(),path_text(imatrix)]);
                         }
@@ -447,7 +483,12 @@ pub fn plan_optimize_workflow(
         "next_user_step":next,
         "ready_for_user_approved_execution":permitted,
         "recommended_command_argv":argv,
-        "recommended_precision_order":types_for(input.goal).split(',').collect::<Vec<_>>(),
+        "recommended_precision_order":formats.iter().map(|v|v.as_str()).collect::<Vec<_>>(),
+        "precision_selection":if input.precision_candidates.is_some(){"user_configured"}else{"conservative_default"},
+        "benchmark_settings":{"prompt_tokens":input.bench_prompt_tokens,
+            "generation_tokens":input.bench_generation_tokens,
+            "repetitions":input.bench_repetitions,
+            "balanced_min_speed_ratio":input.balanced_min_speed_ratio},
         "quality_thresholds":{"max_loss_points":input.max_loss_points,
              "min_saving_percent":input.min_saving_percent},
         "stages":stages,
@@ -562,7 +603,9 @@ pub fn run_optimize_workflow(
                 .map(|d|d.as_nanos()).unwrap_or(0);
             let receipt=out.join(format!("ojon-bench-{}-{stamp}-{idx}.json",std::process::id()));
             log("[ojon] Measuring matched prefill/decode performance of quality-passing candidate");
-            let entry=match prepare_bench(Path::new(path),&tool,512,128,3,
+            let entry=match prepare_bench(Path::new(path),&tool,
+                request.bench_prompt_tokens,request.bench_generation_tokens,
+                request.bench_repetitions,
                 options.gpu_layers,options.device.as_deref())
                 .and_then(|plan|run_bench(&plan,&receipt))
             {
@@ -586,8 +629,9 @@ pub fn run_optimize_workflow(
             benchmark_results.push(entry);
         }
     }
-    let (mut candidate,selection_policy)=select_workflow_goal(
-        &loadable,&benchmark_results,request.goal.label());
+    let (mut candidate,selection_policy)=select_workflow_goal_with_ratio(
+        &loadable,&benchmark_results,request.goal.label(),
+        request.balanced_min_speed_ratio);
     // A GPU run without comparable measured throughput cannot claim the target
     // device was benchmark-certified. CPU smallest may run without llama-bench.
     if gpu_target && candidate["path"].as_str().is_some()
@@ -634,6 +678,11 @@ pub fn run_optimize_workflow(
         "requested_backend_device":options.device,
         "requested_gpu_layers":options.gpu_layers,
         "selection_policy":selection_policy,
+        "precision_candidates":precisions_for(request).iter().map(|v|v.as_str()).collect::<Vec<_>>(),
+        "benchmark_settings":{"prompt_tokens":request.bench_prompt_tokens,
+            "generation_tokens":request.bench_generation_tokens,
+            "repetitions":request.bench_repetitions,
+            "balanced_min_speed_ratio":request.balanced_min_speed_ratio},
         "runtime_load_verified_on_cpu":!gpu_target && load_check["status"]=="LOAD_AND_GENERATION_PASSED",
         "selected_backend_load_verified":load_check["status"]=="LOAD_AND_GENERATION_PASSED",
         "evidence":result,
@@ -783,6 +832,22 @@ mod tests{
         req.device="cpu".into();
         req.gpu_layers=99;
         assert!(plan_optimize_workflow(&req,&[]).is_err());
+    }
+    #[test]
+    fn rejects_unsupported_guided_precisions_and_benchmark_knobs_before_model_access(){
+        let mut request=OptimizeWorkflowRequest::new(PathBuf::from("missing.gguf"));
+        request.precision_candidates=Some(vec![Precision::Q5KM]);
+        assert!(plan_optimize_workflow(&request,&[]).is_err());
+        request.precision_candidates=Some(vec![Precision::IQ3M,Precision::IQ3M]);
+        assert!(plan_optimize_workflow(&request,&[]).is_err());
+        request.precision_candidates=Some(vec![Precision::IQ3M]);
+        request.bench_repetitions=0;
+        assert!(plan_optimize_workflow(&request,&[]).is_err());
+        request.bench_repetitions=3;
+        request.balanced_min_speed_ratio=f64::NAN;
+        assert!(plan_optimize_workflow(&request,&[]).is_err());
+        request.balanced_min_speed_ratio=0.90;
+        assert_eq!(precision_csv(&request),"IQ3_M");
     }
     #[test]
     fn invalid_arguments_do_not_invent_a_plan(){

@@ -31,7 +31,7 @@ Commands:
   ojon backends [--json]     Detect installed engines and show official download links\n  ojon settings path|show|set <key> <value>|clear <key>   Manage local per-user preferences
   ojon probe <model-path> [--json]   Identify model format/family without loading weights
   ojon optimize-workflow-run <model-path> [--baseline Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--imatrix calibration.imatrix] [--tensor-sensitivity scores.json] [--ppl-corpus heldout.txt] [--max-ppl-regression-pct 0] [--goal balanced|smallest] --confirm [--json]
-  ojon optimize-workflow-plan <model-path> [--baseline current-Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--goal balanced|smallest|fastest] [--device auto|cpu|cuda|xpu] [--runtime-device SYCL0|CUDA0] [--gpu-layers 99] [--min-saving-percent 5] [--max-loss-points 0] [--json]
+  ojon optimize-workflow-plan <model-path> [--baseline current-Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--goal balanced|smallest|fastest] [--precisions IQ4_XS,Q3_K_M] [--bench-prompt-tokens 512] [--bench-gen-tokens 128] [--bench-repetitions 3] [--balanced-speed-ratio 0.85] [--device auto|cpu|cuda|xpu] [--runtime-device SYCL0|CUDA0] [--gpu-layers 99] [--min-saving-percent 5] [--max-loss-points 0] [--json]
   ojon optimize-plan <model-path> [--device auto|cpu|cuda|xpu] [--json]   Compare candidate routes without converting
   ojon resource-plan <model-path> <existing-output-parent> [--mode hqq|openvino|autoround|gguf|pack|exl3] [--device cpu|cuda|xpu|auto] [--json]
   ojon dataset-audit <dataset.jsonl> [--json]   Audit external dataset for drift, dead paths, staleness
@@ -1534,6 +1534,12 @@ fn run() -> io::Result<()> {
             input.min_saving_percent=prefs.min_saving_percent;
             input.max_loss_points=prefs.max_loss_points;
             input.max_ppl_regression_pct=prefs.max_ppl_regression_pct;
+            input.precision_candidates=prefs.precision_candidates.as_deref()
+                .map(ojon_backend::parse_precisions).transpose()?;
+            input.bench_prompt_tokens=prefs.bench_prompt_tokens;
+            input.bench_generation_tokens=prefs.bench_generation_tokens;
+            input.bench_repetitions=prefs.bench_repetitions;
+            input.balanced_min_speed_ratio=prefs.balanced_min_speed_ratio;
             input.device=prefs.preferred_device.clone();
             if matches!(input.device.as_str(),"cuda"|"xpu"){
                 input.runtime_device=prefs.runtime_device.clone();
@@ -1568,6 +1574,27 @@ fn run() -> io::Result<()> {
                             .to_string_lossy().parse()
                             .map_err(|_|invalid("PPL regression must be numeric"))?;
                     }
+                    Some("--precisions")=>{
+                        let spec=next_argument(&mut args,"comma separated guided GGUF formats")?;
+                        input.precision_candidates=Some(ojon_backend::parse_precisions(
+                            spec.to_str().ok_or_else(||invalid("precision list must be UTF-8"))?)?);
+                    },
+                    Some("--bench-prompt-tokens")=>{
+                        input.bench_prompt_tokens=next_argument(&mut args,"benchmark prefill tokens")?
+                            .to_string_lossy().parse().map_err(|_|invalid("invalid benchmark prompt tokens"))?;
+                    },
+                    Some("--bench-gen-tokens")=>{
+                        input.bench_generation_tokens=next_argument(&mut args,"benchmark decode tokens")?
+                            .to_string_lossy().parse().map_err(|_|invalid("invalid benchmark decode tokens"))?;
+                    },
+                    Some("--bench-repetitions")=>{
+                        input.bench_repetitions=next_argument(&mut args,"benchmark repetitions")?
+                            .to_string_lossy().parse().map_err(|_|invalid("invalid benchmark repetitions"))?;
+                    },
+                    Some("--balanced-speed-ratio")=>{
+                        input.balanced_min_speed_ratio=next_argument(&mut args,"Balanced speed ratio")?
+                            .to_string_lossy().parse().map_err(|_|invalid("invalid Balanced speed ratio"))?;
+                    },
                     Some("--goal")=>{
                         let name=next_argument(&mut args,"goal")?;
                         input.goal=ojon_backend::OptimizeGoal::parse(
@@ -1578,6 +1605,9 @@ fn run() -> io::Result<()> {
                             .to_str().ok_or_else(||invalid("device must be UTF-8"))?.to_owned();
                         if matches!(input.device.as_str(),"auto"|"cpu"){
                             input.runtime_device=None;input.gpu_layers=0;
+                        }else if input.device!=prefs.preferred_device{
+                            // Do not apply the saved device ID from a different vendor.
+                            input.runtime_device=None;
                         }
                     },
                     Some("--runtime-device")=>input.runtime_device=Some(

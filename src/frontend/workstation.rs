@@ -68,7 +68,8 @@ fn clipboard_text() -> Option<String> { None }
 enum Focus {
     Model, Output, Quantizer, Converter, Runtime, Benchmark, Prompt, GpuLayers,
     OptBaseline, OptCandidate, OptSuite, OptOutput, OptImatrix, OptSensitivity, OptPpl,
-    OptMinSaving, OptMaxLoss, OptMaxPpl,
+    OptMinSaving, OptMaxLoss, OptMaxPpl, OptRuntimeDevice, OptPrecisions,
+    OptBenchPrompt, OptBenchGeneration, OptBenchRepetitions, OptSpeedRatio,
 }
 
 enum WorkerEvent {
@@ -113,6 +114,13 @@ struct Workstation {
     opt_max_loss: String,
     opt_max_ppl: String,
     opt_goal: usize,
+    opt_device:usize,
+    opt_runtime_device:String,
+    opt_precisions:String,
+    opt_bench_prompt:String,
+    opt_bench_generation:String,
+    opt_bench_repetitions:String,
+    opt_speed_ratio:String,
     opt_planned: Option<(OptimizeWorkflowRequest,serde_json::Value)>,
     opt_result: Option<serde_json::Value>,
     focus: Option<Focus>,
@@ -218,6 +226,15 @@ impl Workstation {
             opt_goal: match settings.optimization_goal.as_str(){
                 "smallest"=>1,"fastest"=>2,_=>0
             },
+            opt_device:match settings.preferred_device.as_str(){
+                "cpu"=>1,"cuda"=>2,"xpu"=>3,_=>0
+            },
+            opt_runtime_device:settings.runtime_device.clone().unwrap_or_default(),
+            opt_precisions:settings.precision_candidates.clone().unwrap_or_default(),
+            opt_bench_prompt:settings.bench_prompt_tokens.to_string(),
+            opt_bench_generation:settings.bench_generation_tokens.to_string(),
+            opt_bench_repetitions:settings.bench_repetitions.to_string(),
+            opt_speed_ratio:settings.balanced_min_speed_ratio.to_string(),
             opt_planned: None,
             opt_result: None,
             focus: None,
@@ -278,6 +295,14 @@ impl Workstation {
         next.optimization_goal=match self.opt_goal{
             1=>"smallest",2=>"fastest",_=>"balanced"
         }.into();
+        next.preferred_device=match self.opt_device{
+            1=>"cpu",2=>"cuda",3=>"xpu",_=>"auto"
+        }.into();
+        next.runtime_device=if matches!(self.opt_device,2|3){
+            Some(self.opt_runtime_device.trim().to_string()).filter(|v|!v.is_empty())
+        }else{None};
+        next.precision_candidates=Some(self.opt_precisions.trim().to_string())
+            .filter(|v|!v.is_empty());
         let parsed=(||{
             next.min_saving_percent=self.opt_min_saving.trim().parse::<f64>()
                 .map_err(|_|"Invalid minimum size saving")?;
@@ -287,6 +312,14 @@ impl Workstation {
                 .map_err(|_|"Invalid maximum PPL regression")?;
             next.gpu_layers=self.gpu_layers.trim().parse::<u32>()
                 .map_err(|_|"Invalid GPU layer count")?;
+            next.bench_prompt_tokens=self.opt_bench_prompt.trim().parse::<u32>()
+                .map_err(|_|"Invalid benchmark prefill tokens")?;
+            next.bench_generation_tokens=self.opt_bench_generation.trim().parse::<u32>()
+                .map_err(|_|"Invalid benchmark decode tokens")?;
+            next.bench_repetitions=self.opt_bench_repetitions.trim().parse::<u32>()
+                .map_err(|_|"Invalid benchmark repetitions")?;
+            next.balanced_min_speed_ratio=self.opt_speed_ratio.trim().parse::<f64>()
+                .map_err(|_|"Invalid Balanced speed ratio")?;
             next.validate().map_err(|_|"Invalid preference value")
         })();
         if let Err(error)=parsed{
@@ -472,7 +505,28 @@ impl Workstation {
             2=>OptimizeGoal::Fastest,
             _=>OptimizeGoal::Balanced
         };
-        req.device="cpu".into();
+        req.device=match self.opt_device{
+            1=>"cpu",2=>"cuda",3=>"xpu",_=>"auto"
+        }.into();
+        if matches!(self.opt_device,2|3){
+            req.runtime_device=Some(self.opt_runtime_device.trim().to_string())
+                .filter(|v|!v.is_empty());
+            req.gpu_layers=self.gpu_layers.trim().parse::<i32>()
+                .map_err(|_|"GPU offload layers must be an integer")?;
+        }
+        let recipe=self.opt_precisions.trim();
+        if !recipe.is_empty(){
+            req.precision_candidates=Some(ojon_backend::parse_precisions(recipe)
+                .map_err(|e|format!("Guided precisions: {e}"))?);
+        }
+        req.bench_prompt_tokens=self.opt_bench_prompt.trim().parse()
+            .map_err(|_|"Benchmark prefill tokens must be an integer")?;
+        req.bench_generation_tokens=self.opt_bench_generation.trim().parse()
+            .map_err(|_|"Benchmark decode tokens must be an integer")?;
+        req.bench_repetitions=self.opt_bench_repetitions.trim().parse()
+            .map_err(|_|"Benchmark repetitions must be an integer")?;
+        req.balanced_min_speed_ratio=self.opt_speed_ratio.trim().parse()
+            .map_err(|_|"Balanced minimum speed ratio must be numeric")?;
         let baseline=self.opt_baseline.trim();
         if !baseline.is_empty(){req.current_baseline=Some(PathBuf::from(baseline));}
         let candidate=self.opt_candidate.trim();
@@ -551,7 +605,7 @@ impl Workstation {
         self.started_at=Some(Instant::now());
         self.last_elapsed=None;
         self.busy=true;
-        self.status="User-approved optimization running on CPU; actual backend logs below.".into();
+        self.status=format!("User-approved optimization running with {} backend; actual logs below.",request.device);
         self.needs_redraw=true;
         std::thread::spawn(move||{
             let logs=tx.clone();
@@ -804,6 +858,12 @@ impl Workstation {
             Focus::OptMinSaving => &mut self.opt_min_saving,
             Focus::OptMaxLoss => &mut self.opt_max_loss,
             Focus::OptMaxPpl => &mut self.opt_max_ppl,
+            Focus::OptRuntimeDevice => &mut self.opt_runtime_device,
+            Focus::OptPrecisions => &mut self.opt_precisions,
+            Focus::OptBenchPrompt => &mut self.opt_bench_prompt,
+            Focus::OptBenchGeneration => &mut self.opt_bench_generation,
+            Focus::OptBenchRepetitions => &mut self.opt_bench_repetitions,
+            Focus::OptSpeedRatio => &mut self.opt_speed_ratio,
         };
         if self.control_held {
             if let Key::Character(ref key) = event.logical_key {
@@ -873,6 +933,13 @@ impl Workstation {
         let opt_max_loss=&mut self.opt_max_loss;
         let opt_max_ppl=&mut self.opt_max_ppl;
         let opt_goal=&mut self.opt_goal;
+        let opt_device=&mut self.opt_device;
+        let opt_runtime_device=&mut self.opt_runtime_device;
+        let opt_precisions=&mut self.opt_precisions;
+        let opt_bench_prompt=&mut self.opt_bench_prompt;
+        let opt_bench_generation=&mut self.opt_bench_generation;
+        let opt_bench_repetitions=&mut self.opt_bench_repetitions;
+        let opt_speed_ratio=&mut self.opt_speed_ratio;
         let opt_planned=self.opt_planned.as_ref();
         let opt_result=self.opt_result.as_ref();
         let model = if source_is_current { self.model.as_ref() } else { None };
@@ -1036,7 +1103,7 @@ impl Workstation {
                             col.glass_card(398.0, |card|{
                                 card.heading("02   AUTOMATIC MODEL OPTIMIZATION");
                                 card.label("Find a smaller GGUF without measured task regression.");
-                                card.tabs(&["Model & Tasks","Quality Controls"], optimize_settings_tab);
+                                card.tabs(&["Model & Tasks","Quality Controls","Hardware & Search"], optimize_settings_tab);
                                 if *optimize_settings_tab==0 {
                                     card.label("Current Q4 reference GGUF (leave blank if selected model is Q4)");
                                     if card.text_input(opt_baseline,"Q4 baseline GGUF path...").clicked(){
@@ -1060,7 +1127,7 @@ impl Workstation {
                                         "Smallest: stronger compression",
                                         "Fastest: measured decode throughput"
                                     ]);
-                                }else{
+                                }else if *optimize_settings_tab==1{
                                     card.label("Importance matrix from separate calibration (optional)");
                                     if card.text_input(opt_imatrix,"Calibration imatrix path...").clicked(){
                                         new_focus=Some(Focus::OptImatrix);
@@ -1085,8 +1152,43 @@ impl Workstation {
                                     if card.text_input(opt_max_ppl,"Default: 0").clicked(){
                                         new_focus=Some(Focus::OptMaxPpl);
                                     }
+                                }else{
+                                    card.label("Runtime backend (Auto remains CPU-safe)");
+                                    card.dropdown("Choose runtime",opt_device,&[
+                                        "Auto (CPU safe)","CPU","CUDA backend","SYCL backend"
+                                    ]);
+                                    if matches!(*opt_device,2|3){
+                                        card.label("Exact device ID from your installed runtime");
+                                        if card.text_input(opt_runtime_device,"e.g. CUDA0 or SYCL0").clicked(){
+                                            new_focus=Some(Focus::OptRuntimeDevice);
+                                        }
+                                        card.label("GPU offload layers (>0 required)");
+                                        if card.text_input(gpu_layers,"GPU layers").clicked(){
+                                            new_focus=Some(Focus::GpuLayers);
+                                        }
+                                    }
+                                    card.label("Q4-parity candidate formats (blank = conservative defaults)");
+                                    if card.text_input(opt_precisions,"IQ4_XS,Q3_K_M,...").clicked(){
+                                        new_focus=Some(Focus::OptPrecisions);
+                                    }
+                                    card.label("Benchmark prefill tokens");
+                                    if card.text_input(opt_bench_prompt,"512").clicked(){
+                                        new_focus=Some(Focus::OptBenchPrompt);
+                                    }
+                                    card.label("Benchmark decode tokens");
+                                    if card.text_input(opt_bench_generation,"128").clicked(){
+                                        new_focus=Some(Focus::OptBenchGeneration);
+                                    }
+                                    card.label("Benchmark repetitions");
+                                    if card.text_input(opt_bench_repetitions,"3").clicked(){
+                                        new_focus=Some(Focus::OptBenchRepetitions);
+                                    }
+                                    card.label("Balanced minimum decode-speed fraction (0.50 to 1.00)");
+                                    if card.text_input(opt_speed_ratio,"0.85").clicked(){
+                                        new_focus=Some(Focus::OptSpeedRatio);
+                                    }
                                 }
-                                card.label("CPU-only default; other backends require explicit verified hardware setup.");
+                                card.label("Execution still requires real model, tool and hardware checks.");
                             });
                             col.card(252.0, |card|{
                                 card.heading("03   OPTIMIZATION WORKFLOW");
@@ -1115,7 +1217,7 @@ impl Workstation {
                                             }
                                         }
                                         if valid&&unchanged&&!busy{
-                                            if card.button("2. Approve & Run on CPU").clicked(){
+                                            if card.button("2. Approve & Run Selected Backend").clicked(){
                                                 opt_run=true;
                                             }
                                         }

@@ -185,6 +185,14 @@ impl QuantParityPlan{
         })
     }
 }
+/// Precision eligibility for an existing compressed Q4 quality reference.
+/// Backends must still actually accept each format at conversion time.
+pub fn allowed_parity_precision(precision:Precision)->bool{
+    matches!(precision,
+        Precision::IQ4XS|Precision::IQ3M|Precision::Q3KM|Precision::Q3KL|
+        Precision::IQ3S|Precision::IQ3XS)
+}
+
 pub fn prepare_quant_parity(
     original:&Path,baseline:&Path,suite:&Path,output_dir:&Path,
     mut options:QuantParityOptions,
@@ -201,9 +209,7 @@ pub fn prepare_quant_parity(
     let mut seen=HashSet::new();
     for precision in &options.precisions{
         if !seen.insert(precision.as_str()){return Err(invalid("duplicate candidate quantization")); }
-        if !matches!(precision,
-            Precision::IQ4XS|Precision::IQ3M|Precision::Q3KM|Precision::Q3KL|
-            Precision::IQ3S|Precision::IQ3XS) {
+        if !allowed_parity_precision(*precision) {
             return Err(invalid("quant-parity only accepts candidate formats normally smaller than Q4_K_M"));
         }
     }

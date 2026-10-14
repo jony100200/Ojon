@@ -66,6 +66,13 @@ pub struct LocalSettings{
     pub min_saving_percent:f64,
     pub max_loss_points:f64,
     pub max_ppl_regression_pct:f64,
+    /// Optional manual candidate list, checked against current parity adapter.
+    pub precision_candidates:Option<String>,
+    pub bench_prompt_tokens:u32,
+    pub bench_generation_tokens:u32,
+    pub bench_repetitions:u32,
+    /// Fraction of fastest measured decode throughput accepted by Balanced.
+    pub balanced_min_speed_ratio:f64,
     pub preferred_device:String,
     pub runtime_device:Option<String>,
     pub gpu_layers:u32,
@@ -76,6 +83,9 @@ impl Default for LocalSettings{
             model_directory:None,output_directory:None,
             optimization_goal:"balanced".into(),min_saving_percent:5.0,
             max_loss_points:0.0,max_ppl_regression_pct:0.0,
+            precision_candidates:None,bench_prompt_tokens:512,
+            bench_generation_tokens:128,bench_repetitions:3,
+            balanced_min_speed_ratio:0.85,
             preferred_device:"auto".into(),runtime_device:None,gpu_layers:0}
     }
 }
@@ -90,7 +100,12 @@ impl LocalSettings{
             "optimization":{"goal":self.optimization_goal,
                 "min_saving_percent":self.min_saving_percent,
                 "max_loss_points":self.max_loss_points,
-                "max_ppl_regression_pct":self.max_ppl_regression_pct},
+                "max_ppl_regression_pct":self.max_ppl_regression_pct,
+                "precision_candidates":self.precision_candidates,
+                "bench_prompt_tokens":self.bench_prompt_tokens,
+                "bench_generation_tokens":self.bench_generation_tokens,
+                "bench_repetitions":self.bench_repetitions,
+                "balanced_min_speed_ratio":self.balanced_min_speed_ratio},
             "hardware":{"preferred_device":self.preferred_device,
                 "runtime_device":self.runtime_device,"gpu_layers":self.gpu_layers}})
     }
@@ -125,7 +140,9 @@ impl LocalSettings{
         if let Some(obj)=opt.as_object(){
             for key in obj.keys(){
                 if !["goal","min_saving_percent","max_loss_points",
-                    "max_ppl_regression_pct"].contains(&key.as_str()){
+                    "max_ppl_regression_pct","precision_candidates",
+                    "bench_prompt_tokens","bench_generation_tokens",
+                    "bench_repetitions","balanced_min_speed_ratio"].contains(&key.as_str()){
                     return Err(invalid(format!("unknown optimization setting: {key}")));
                 }
             }
@@ -134,6 +151,20 @@ impl LocalSettings{
         result.min_saving_percent=numeric_field(opt,"min_saving_percent",5.0,95.0)?;
         result.max_loss_points=numeric_field(opt,"max_loss_points",0.0,100.0)?;
         result.max_ppl_regression_pct=numeric_field(opt,"max_ppl_regression_pct",0.0,100.0)?;
+        result.precision_candidates=optional_path(opt,"precision_candidates")?;
+        let quantity=|key:&str,default:u32,min:u32,max:u32|->io::Result<u32>{
+            let v=match opt.get(key){
+                None=>default,
+                Some(value)=>value.as_u64().and_then(|n|u32::try_from(n).ok())
+                    .ok_or_else(||invalid(format!("{key} must be an integer")))?
+            };
+            if !(min..=max).contains(&v){return Err(invalid(format!("{key} must be {min}..={max}")));}
+            Ok(v)
+        };
+        result.bench_prompt_tokens=quantity("bench_prompt_tokens",512,16,8192)?;
+        result.bench_generation_tokens=quantity("bench_generation_tokens",128,16,2048)?;
+        result.bench_repetitions=quantity("bench_repetitions",3,1,10)?;
+        result.balanced_min_speed_ratio=numeric_field(opt,"balanced_min_speed_ratio",0.85,1.0)?;
         let hw=value.get("hardware").unwrap_or(&Value::Null);
         if !hw.is_null()&&!hw.is_object(){return Err(invalid("hardware must be an object"));}
         if let Some(obj)=hw.as_object(){
@@ -162,8 +193,20 @@ impl LocalSettings{
         if !self.min_saving_percent.is_finite()||!(0.0..=95.0).contains(&self.min_saving_percent)
             ||!self.max_loss_points.is_finite()||!(0.0..=100.0).contains(&self.max_loss_points)
             ||!self.max_ppl_regression_pct.is_finite()||!(0.0..=100.0).contains(&self.max_ppl_regression_pct)
-            ||self.gpu_layers>512{
+            ||self.gpu_layers>512
+            ||!(16..=8192).contains(&self.bench_prompt_tokens)
+            ||!(16..=2048).contains(&self.bench_generation_tokens)
+            ||!(1..=10).contains(&self.bench_repetitions)
+            ||!self.balanced_min_speed_ratio.is_finite()
+            ||!(0.50..=1.0).contains(&self.balanced_min_speed_ratio){
             return Err(invalid("invalid quality or hardware preference"));
+        }
+        if let Some(recipe)=self.precision_candidates.as_deref(){
+            let parsed=crate::sweep::parse_precisions(recipe)?;
+            if parsed.len()>6 || parsed.iter().any(|p|
+                !crate::quant_parity::allowed_parity_precision(*p)){
+                return Err(invalid("guided precision list must contain 1..=6 lower-bit Q4 parity candidates"));
+            }
         }
         for value in self.backend_paths.values(){
             if !valid_text(value) || !Path::new(value).is_absolute(){
@@ -197,6 +240,15 @@ impl LocalSettings{
                 .map_err(|_|invalid("expected numeric quality loss"))?,
             "optimization.max_ppl_regression_pct"=>self.max_ppl_regression_pct=value.parse()
                 .map_err(|_|invalid("expected numeric PPL regression"))?,
+            "optimization.precision_candidates"=>self.precision_candidates=Some(value.into()),
+            "optimization.bench_prompt_tokens"=>self.bench_prompt_tokens=value.parse()
+                .map_err(|_|invalid("expected integer prompt tokens"))?,
+            "optimization.bench_generation_tokens"=>self.bench_generation_tokens=value.parse()
+                .map_err(|_|invalid("expected integer decode tokens"))?,
+            "optimization.bench_repetitions"=>self.bench_repetitions=value.parse()
+                .map_err(|_|invalid("expected integer benchmark repetitions"))?,
+            "optimization.balanced_min_speed_ratio"=>self.balanced_min_speed_ratio=value.parse()
+                .map_err(|_|invalid("expected numeric speed ratio"))?,
             "hardware.preferred_device"=>self.preferred_device=value.into(),
             "hardware.runtime_device"=>self.runtime_device=Some(value.into()),
             "hardware.gpu_layers"=>self.gpu_layers=value.parse()
@@ -223,6 +275,11 @@ impl LocalSettings{
             "optimization.min_saving_percent"=>self.min_saving_percent=5.0,
             "optimization.max_loss_points"=>self.max_loss_points=0.0,
             "optimization.max_ppl_regression_pct"=>self.max_ppl_regression_pct=0.0,
+            "optimization.precision_candidates"=>self.precision_candidates=None,
+            "optimization.bench_prompt_tokens"=>self.bench_prompt_tokens=512,
+            "optimization.bench_generation_tokens"=>self.bench_generation_tokens=128,
+            "optimization.bench_repetitions"=>self.bench_repetitions=3,
+            "optimization.balanced_min_speed_ratio"=>self.balanced_min_speed_ratio=0.85,
             _=>return Err(invalid("unknown setting"))
         }
         Ok(())
@@ -345,6 +402,20 @@ mod tests{
         save_to_path(&path,&settings).unwrap();
         assert_eq!(load_from_path(&path).unwrap(),settings);
         let _=fs::remove_dir_all(path.parent().unwrap());
+    }
+    #[test]
+    fn user_defined_search_and_bench_parameters_round_trip(){
+        let mut settings=LocalSettings::default();
+        settings.set("optimization.precision_candidates","IQ3_S,Q3_K_M").unwrap();
+        settings.set("optimization.bench_prompt_tokens","1024").unwrap();
+        settings.set("optimization.bench_generation_tokens","256").unwrap();
+        settings.set("optimization.bench_repetitions","4").unwrap();
+        settings.set("optimization.balanced_min_speed_ratio","0.92").unwrap();
+        let decoded=LocalSettings::from_json(&settings.as_json()).unwrap();
+        assert_eq!(decoded,settings);
+        assert!(settings.set("optimization.precision_candidates","Q5_K_M").is_err());
+        settings.clear("optimization.precision_candidates").unwrap();
+        assert_eq!(settings.precision_candidates,None);
     }
     #[test]
     fn rejects_corrupt_and_future_schema_without_overwrite(){

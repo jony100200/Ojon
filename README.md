@@ -26,6 +26,24 @@ ojon settings set optimization.goal smallest
 ojon settings clear backend.llama_cli
 ```
 
+Users may also configure guided quantization and benchmarks without editing code:
+`ojon settings set optimization.precision_candidates IQ3_S,Q3_K_M`,
+`ojon settings set optimization.bench_prompt_tokens 1024`,
+`ojon settings set optimization.bench_generation_tokens 256`,
+`ojon settings set optimization.bench_repetitions 4`, and
+`ojon settings set optimization.balanced_min_speed_ratio 0.90`.
+Clear any override with `ojon settings clear optimization.precision_candidates`.
+The same fields may be supplied as one-run `optimize-workflow-plan/run`
+flags (`--precisions`, `--bench-prompt-tokens`, `--bench-gen-tokens`,
+`--bench-repetitions`, `--balanced-speed-ratio`). Every precision is checked
+against the existing Q4-parity adapter and is still runtime-tested; choosing
+a format does not prove the installed quantizer can produce it.
+
+Kathamo now exposes a Hardware & Search page, restoring selected backend
+class, concrete runtime device, offload layers and benchmark settings from
+the same local settings file. "Auto" remains CPU-safe; GPU selection still
+requires explicit physical device identification and preflight checks.
+
 The GUI restores available saved model paths and tool preferences, and writes
 preferences when selecting a model or closing the window. The Backend Tools
 panel has **Save Local Preferences** for an explicit save. CLI command flags

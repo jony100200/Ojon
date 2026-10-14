@@ -238,6 +238,14 @@ pub fn rank_quality_gated_candidates(kind:&str,result:&Value)->Vec<Value>{
 /// Balanced policy: smallest variant within 85% of the best measured decode
 /// throughput; Fastest: highest measured decode throughput.
 pub fn select_workflow_goal(loadable:&[Value],benchmarks:&[Value],goal:&str)->(Value,&'static str){
+    select_workflow_goal_with_ratio(loadable,benchmarks,goal,0.85)
+}
+pub fn select_workflow_goal_with_ratio(
+    loadable:&[Value],benchmarks:&[Value],goal:&str,min_speed_ratio:f64
+)->(Value,&'static str){
+    if !min_speed_ratio.is_finite()||!(0.50..=1.0).contains(&min_speed_ratio){
+        return (Value::Null,"invalid_balanced_speed_ratio");
+    }
     if loadable.is_empty(){return (Value::Null,"no_loadable_quality_passing_candidate");}
     if goal=="smallest"{return (loadable[0].clone(),"smallest_quality_passing_loadable");}
     let measured:Vec<(&Value,f64)>=benchmarks.iter().filter_map(|bench|{
@@ -250,13 +258,13 @@ pub fn select_workflow_goal(loadable:&[Value],benchmarks:&[Value],goal:&str)->(V
             else{(Value::Null,"fastest_requires_measured_comparable_benchmarks")};
     }
     let max_decode=measured.iter().map(|(_,speed)|*speed).fold(0.0f64,f64::max);
-    let threshold=if goal=="fastest"{max_decode}else{max_decode*0.85};
+    let threshold=if goal=="fastest"{max_decode}else{max_decode*min_speed_ratio};
     let picked=loadable.iter().find(|candidate|{
         measured.iter().any(|(bench,speed)|bench["path"]==candidate["path"]&&*speed+1e-9>=threshold)
     });
     (picked.cloned().unwrap_or(Value::Null),
         if goal=="fastest"{"fastest_measured_decode_quality_passing"}
-        else{"smallest_within_85pct_of_fastest_measured_decode"})
+        else{"smallest_within_configured_fraction_of_fastest_decode"})
 }
 
 pub fn recommend(report: &QualityReport) -> Value {
@@ -336,6 +344,17 @@ mod tests {
         assert_eq!(recommend(&r)["hardware_constraints_applied"],false);
     }
 
+    #[test]
+    fn configurable_balanced_tradeoff_uses_same_measured_evidence(){
+        let loadable=vec![json!({"path":"small","bytes":80}),json!({"path":"fast","bytes":90})];
+        let results=vec![
+            json!({"path":"small","status":"MEASURED","metrics":{"token_generation":{"tokens_per_second":90.0}}}),
+            json!({"path":"fast","status":"MEASURED","metrics":{"token_generation":{"tokens_per_second":100.0}}})
+        ];
+        assert_eq!(select_workflow_goal_with_ratio(&loadable,&results,"balanced",0.85).0["path"],"small");
+        assert_eq!(select_workflow_goal_with_ratio(&loadable,&results,"balanced",0.95).0["path"],"fast");
+        assert!(select_workflow_goal_with_ratio(&loadable,&results,"balanced",f64::NAN).0.is_null());
+    }
     #[test]
     fn guided_selector_fails_closed_and_applies_measured_balanced_policy(){
         let report=json!({"results":[
