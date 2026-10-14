@@ -286,6 +286,13 @@ fn probe_help(executable:&Path,arg:&str)->std::io::Result<String>{
     let mut command=Command::new(executable);
     command.arg(arg);
     let output=capture_with_timeout(&mut command,256*1024,Duration::from_secs(12))?;
+    // A runtime that rejected --list-devices cannot claim a verified list.
+    // Quantizer --help is different: several compatible releases print usage
+    // and exit nonzero, so accept it only when precise format rows are found.
+    if arg=="--list-devices" && !output.status.success(){
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+            "selected runtime rejected --list-devices"));
+    }
     let mut combined=String::from_utf8_lossy(&output.stdout).into_owned();
     combined.push('\n');
     combined.push_str(&String::from_utf8_lossy(&output.stderr));
@@ -355,7 +362,9 @@ fn probe_binary(found:&FoundBackend)->Value{
                 runtime_devices_from_list(&output)
             }else{Vec::new()};
             json!({"name":found.spec.name,"path":path.to_string_lossy(),
-                "status":if (found.spec.id==BackendId::LlamaQuantize&&formats.is_empty())
+                "status":if found.spec.id==BackendId::LlamaBench{
+                    "HELP_OUTPUT_ONLY"
+                }else if (found.spec.id==BackendId::LlamaQuantize&&formats.is_empty())
                      ||(matches!(found.spec.id,BackendId::LlamaCli|BackendId::IntelSyclCli)
                         &&devices.is_empty()){"INCONCLUSIVE"}else{"CAPABILITY_OUTPUT_PARSED"},
                 "probe_argument":flag,"precision_formats":formats,
