@@ -374,10 +374,31 @@ impl Workstation {
         self.needs_redraw = true;
     }
 
+    /// Respect the executable paths currently shown in Kathamo. Saved
+    /// preferences are not a prerequisite for an explicit per-run override.
+    /// In particular, selecting a SYCL or Vulkan llama-cli must not
+    /// accidentally run the first CUDA binary discovered at startup.
+    fn selected_backends(&self)->Vec<FoundBackend>{
+        let mut found=self.backends.clone();
+        for (id,current,default) in [
+            (BackendId::LlamaQuantize,self.quantizer.trim(),"llama-quantize"),
+            (BackendId::LlamaCli,self.runtime.trim(),"llama-cli"),
+            (BackendId::LlamaBench,self.benchmark.trim(),"llama-bench"),
+            (BackendId::HfConverter,self.converter.trim(),"convert_hf_to_gguf.py"),
+        ]{
+            if current.is_empty()||current==default{continue;}
+            if let Some(backend)=found.iter_mut().find(|item|item.spec.id==id){
+                let path=PathBuf::from(current);
+                backend.executable=path.is_file().then_some(path);
+                backend.found_via=Some("Kathamo selected executable");
+            }
+        }
+        found
+    }
     /// Explicit bounded tool probes, never an implicit model load.
     fn start_capability_probe(&mut self){
         if self.busy{return;}
-        let tools=self.backends.clone();
+        let tools=self.selected_backends();
         let tx=self.tx.clone();
         self.backend_capabilities=None;
         self.busy=true;
@@ -584,7 +605,7 @@ impl Workstation {
             Ok(v)=>v,
             Err(e)=>{self.status=format!("Optimizer settings: {e}");self.needs_redraw=true;return;}
         };
-        let tools=self.backends.clone();
+        let tools=self.selected_backends();
         let tx=self.tx.clone();
         self.opt_planned=None;
         self.opt_result=None;
@@ -616,7 +637,7 @@ impl Workstation {
             self.needs_redraw=true;
             return;
         }
-        let tools=self.backends.clone();
+        let tools=self.selected_backends();
         let tx=self.tx.clone();
         self.opt_planned=None; // one approved action per plan; never double-start
         self.opt_result=None;
