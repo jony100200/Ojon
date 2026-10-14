@@ -15,9 +15,9 @@ use crate::resource::{assess_resources,ResourceMode};
 use crate::quant_compare::prepare_existing_quant_comparison;
 use crate::quant_parity::{prepare_quant_parity, QuantParityOptions};
 use crate::task_eval::parse_eval_suite;
-use crate::smoke::smoke_gguf_capture;
-use crate::benchmark::{prepare_bench,run_bench};
-use crate::quality::rank_quality_gated_candidates;
+use crate::smoke::smoke_gguf_capture_with_device;
+use crate::benchmark::{prepare_bench,run_bench,compare_bench_files};
+use crate::quality::{rank_quality_gated_candidates,select_workflow_goal};
 use crate::adaptive::{prepare_adaptive_against_reference,run_adaptive};
 use std::time::{SystemTime,UNIX_EPOCH};
 use serde_json::{json, Value};
@@ -61,6 +61,9 @@ pub struct OptimizeWorkflowRequest {
     pub max_ppl_regression_pct:f64,
     pub goal:OptimizeGoal,
     pub device:String,
+    /// Concrete llama.cpp device ID; never inferred from vendor name alone.
+    pub runtime_device:Option<String>,
+    pub gpu_layers:i32,
     pub min_saving_percent:f64,
     pub max_loss_points:f64,
 }
@@ -69,7 +72,7 @@ impl OptimizeWorkflowRequest{
         Self{
             model,current_baseline:None,candidates:Vec::new(),suite:None,
             output_dir:None,imatrix:None,tensor_sensitivity:None,ppl_corpus:None,max_ppl_regression_pct:0.0,
-            goal:OptimizeGoal::Balanced,device:"auto".into(),
+            goal:OptimizeGoal::Balanced,device:"auto".into(),runtime_device:None,gpu_layers:0,
             min_saving_percent:5.0,max_loss_points:0.0
         }
     }
@@ -112,7 +115,8 @@ fn configured_options(input:&OptimizeWorkflowRequest,backends:&[FoundBackend])->
     options.ppl_corpus=input.ppl_corpus.clone();
     options.max_ppl_regression_pct=input.max_ppl_regression_pct;
     if let Some(bin)=executable(backends,BackendId::LlamaPerplexity){options.ppl_tool=bin;}
-    options.gpu_layers=0; // Never automatically use occupied local GPUs.
+    options.gpu_layers=input.gpu_layers;
+    options.device=input.runtime_device.clone();
     options.precisions=match input.goal {
         OptimizeGoal::Smallest=>vec![Precision::IQ3M,Precision::Q3KM,Precision::Q3KL,Precision::IQ4XS],
         OptimizeGoal::Balanced=>vec![Precision::IQ4XS,Precision::Q3KL,Precision::IQ3M,Precision::Q3KM],
@@ -129,6 +133,19 @@ pub fn plan_optimize_workflow(
 )->io::Result<Value>{
     if !matches!(input.device.as_str(),"auto"|"cpu"|"cuda"|"xpu"){
         return Err(invalid("device must be auto, cpu, cuda or xpu"));
+    }
+    let gpu_target=matches!(input.device.as_str(),"cuda"|"xpu");
+    if gpu_target{
+        if !(1..=512).contains(&input.gpu_layers){
+            return Err(invalid("GPU optimization requires explicit --gpu-layers 1..512"));
+        }
+        let device=input.runtime_device.as_deref().unwrap_or("");
+        let prefix=if input.device=="cuda"{"CUDA"}else{"SYCL"};
+        if !device.starts_with(prefix)||device.len()>40
+            ||!device.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'_'|b'-'|b'/'))
+        {return Err(invalid("GPU optimization requires explicit vendor-matched llama.cpp --runtime-device (CUDA0 or SYCL0); Vulkan device identity cannot be inferred")); }
+    }else if input.runtime_device.is_some()||input.gpu_layers!=0{
+        return Err(invalid("CPU/auto guided optimization requires zero GPU layers and no runtime device"));
     }
     if !input.min_saving_percent.is_finite()
         ||!(0.0..=95.0).contains(&input.min_saving_percent){
@@ -198,8 +215,26 @@ pub fn plan_optimize_workflow(
     if probe.category==ModelCategory::VisionLanguage{
         checks.push("Vision model: matching mmproj and image-input evaluation are mandatory before claiming quality parity. This basic workflow cannot yet automate those requirements.".into());
     }
-    if input.device=="cuda"||input.device=="xpu"{
-        checks.push("Guided execution is CPU-only. For GPU runs, select a verified physical device and use the advanced comparison CLI; requested GPU was NOT selected.".into());
+    let mut gpu_ready=!gpu_target;
+    if gpu_target{
+        if let Some(parent)=out.as_deref(){
+            match assess_resources(probe.bytes,parent,ResourceMode::Gguf,&input.device){
+                Ok(capacity)=>{
+                    gpu_ready=capacity.device_measured&&capacity.disk_safe!=Some(false)
+                        &&capacity.ram_safe!=Some(false);
+                    if !gpu_ready{checks.push("Selected GPU lacks reliable live vendor telemetry or basic host capacity; use manual backend commands.".into());}
+                },
+                Err(e)=>checks.push(format!("GPU preflight failed: {e}")),
+            }
+        }else{checks.push("GPU verification needs an existing output directory.".into());}
+        if input.ppl_corpus.is_some(){
+            gpu_ready=false;
+            checks.push("GPU-specific perplexity device pinning is unimplemented; refusing to silently test PPL on another device.".into());
+        }
+        if executable(backends,BackendId::LlamaBench).is_none(){
+            gpu_ready=false;
+            checks.push("GPU selection requires llama-bench for verified backend throughput.".into());
+        }
     }
     if suite.is_none(){
         checks.push("No held-out test suite supplied; result cannot prove quality parity.".into());
@@ -243,13 +278,14 @@ pub fn plan_optimize_workflow(
     let text_like=probe.category==ModelCategory::Language;
     if !text_like {
         checks.push("No fully verified one-click quality optimization path for this model category. Use the individual model-family workflow.".into());
-    }else if input.goal==OptimizeGoal::Fastest {
+    }else if input.goal==OptimizeGoal::Fastest
+        && executable(backends,BackendId::LlamaBench).is_none(){
         route="speed_benchmark_required";
-        next=Some("Use matched latency and throughput benchmarks; task and size comparisons alone cannot choose a fastest model".into());
-        checks.push("Fastest goal is not implemented in automatic workflow: benchmarking must compare real prefill, decode, model loading and memory on the SAME device.".into());
-    }else if input.device=="cuda"||input.device=="xpu"{
-        route="explicit_gpu_selection_required";
-        next=Some("Use advanced quant-parity or quant-compare with a verified device identifier".into());
+        next=Some("Install llama-bench to compare matching-device throughput".into());
+        checks.push("Fastest requires installed llama-bench; size is not a speed proxy.".into());
+    }else if gpu_target&&!gpu_ready{
+        route="explicit_gpu_verification_required";
+        next=Some("Provide a real CUDA/SYCL llama.cpp device and working live GPU telemetry".into());
     }else if !input.candidates.is_empty(){
         route="existing_candidate_comparison";
         if let (Some(base),Some(suite),Some(out))=(&baseline,&suite,&out){
@@ -446,18 +482,14 @@ pub fn run_optimize_workflow(
             decision["checks"]
         )));
     }
-    // The guided path uses CPU-only tools. Advanced per-device offloading
-    // requires explicit model/backend/VRAM verification in lower-level commands.
-    if !matches!(request.device.as_str(),"cpu"|"auto"){
-        return Err(invalid("automatic workflow currently supports CPU-only execution"));
-    }
+    // Plan validated concrete CUDA/SYCL selection and free-memory telemetry.
+    // Real runtime compatibility still requires the load and benchmark checks below.
     let suite=request.suite.as_ref()
         .ok_or_else(||invalid("a held-out task suite is mandatory"))?;
     let out=request.output_dir.as_ref()
         .ok_or_else(||invalid("an existing output directory is mandatory"))?;
-    let mut options=configured_options(request,backends);
-    options.gpu_layers=0;
-    log("[ojon] User approved CPU-only optimizer; reconfirming inputs and untouched original weights");
+    let options=configured_options(request,backends);
+    log("[ojon] User approved optimizer; running on the explicitly selected backend without touching original weights");
     let (kind,result)=match decision["next_action"].as_str(){
         Some("compare_existing_quants")=>{
             let baseline=match request.current_baseline.as_ref(){
@@ -477,7 +509,8 @@ pub fn run_optimize_workflow(
                 .ok_or_else(||invalid("adaptive workflow needs sensitivity data"))?;
             let plan=prepare_adaptive_against_reference(&request.model,baseline,scores,out,suite,
                 &options.quantizer,&options.eval_tool,options.imatrix.as_deref(),
-                &[3.0,3.5,4.0],options.threads,0,None,options.tokens,request.max_loss_points)?;
+                &[3.0,3.5,4.0],options.threads,options.gpu_layers,
+                options.device.as_deref(),options.tokens,request.max_loss_points)?;
             log("[ojon] Using existing adaptive allocator, Q4-referenced quality evaluation and tensor recipes");
             ("adaptive_quant_comparison",run_adaptive(&plan,|line|log(line))?)
         },
@@ -493,57 +526,90 @@ pub fn run_optimize_workflow(
     };
     let ranked=rank_quality_gated_candidates(kind,&result);
     let mut attempts=Vec::new();
-    let mut candidate=Value::Null;
-    let mut load_check=json!({"status":"NOT_RUN_NO_QUALITY_PASSING_CANDIDATE"});
+    let mut loadable=Vec::new();
+    let gpu_target=matches!(request.device.as_str(),"cuda"|"xpu");
     for possible in &ranked{
         let Some(path)=possible["path"].as_str() else {continue;};
-        log("[ojon] Verifying quality-passing candidate with real CPU llama-cli");
-        let attempt=match smoke_gguf_capture(
+        log("[ojon] Checking measured-quality candidate against the actual selected llama.cpp backend");
+        let attempt=match smoke_gguf_capture_with_device(
             Path::new(path),&options.eval_tool,
-            "Reply with the single word READY.",16,0
+            "Reply with the single word READY.",16,options.gpu_layers as u32,
+            options.device.as_deref()
         ){
             Ok(capture) if !capture.stdout.trim().is_empty()=>json!({
                 "path":path,"status":"LOAD_AND_GENERATION_PASSED",
-                "backend":"llama-cli","gpu_layers":0,
+                "backend":"llama-cli","device":options.device,
+                "gpu_layers":options.gpu_layers,
                 "captured_output_chars":capture.stdout.chars().count()
             }),
             Ok(_)=>json!({"path":path,"status":"LOAD_CHECK_FAILED",
-                "reason":"runtime exited with empty output"}),
+                "reason":"runtime exited but generated no response"}),
             Err(e)=>json!({"path":path,"status":"LOAD_CHECK_FAILED","reason":e.to_string()}),
         };
-        let passed=attempt["status"]=="LOAD_AND_GENERATION_PASSED";
-        attempts.push(attempt.clone());
-        if passed{
-            candidate=possible.clone();
-            load_check=attempt;
-            break;
+        if attempt["status"]=="LOAD_AND_GENERATION_PASSED"{
+            loadable.push(possible.clone());
         }
+        attempts.push(attempt);
+        // The smallest-only policy does not load larger candidates needlessly.
+        if request.goal==OptimizeGoal::Smallest&&!loadable.is_empty(){break;}
     }
-    if candidate.is_null() && !attempts.is_empty(){
-        load_check=json!({"status":"ALL_QUALITY_PASSING_CANDIDATES_FAILED_TO_LOAD"});
-    }
-    // A successful load check proves executable CPU inference, not a
-    // particular device's performance. Run measured pp/tg on the selected
-    // candidate if the optional llama-bench executable is installed.
-    let performance=if let Some(path)=candidate["path"].as_str(){
-        if let Some(tool)=executable(backends,BackendId::LlamaBench){
+    let mut benchmark_results=Vec::new();
+    let mut comparison_reference:Option<PathBuf>=None;
+    if let Some(tool)=executable(backends,BackendId::LlamaBench){
+        for (idx,possible) in loadable.iter().enumerate(){
+            let Some(path)=possible["path"].as_str() else{continue;};
             let stamp=SystemTime::now().duration_since(UNIX_EPOCH)
                 .map(|d|d.as_nanos()).unwrap_or(0);
-            let report=out.join(format!("ojon-selected-bench-{}-{stamp}.json",std::process::id()));
-            log("[ojon] Measuring selected candidate CPU prefill and decode throughput");
-            match prepare_bench(Path::new(path),&tool,512,128,3,0,None)
-                .and_then(|plan|run_bench(&plan,&report)){
-                Ok(metrics)=>json!({"status":"MEASURED_CPU","receipt":report.to_string_lossy(),
-                    "metrics":metrics}),
-                Err(e)=>json!({"status":"BENCHMARK_FAILED","reason":e.to_string()}),
-            }
-        }else{
-            json!({"status":"NOT_RUN_LLAMA_BENCH_UNAVAILABLE"})
+            let receipt=out.join(format!("ojon-bench-{}-{stamp}-{idx}.json",std::process::id()));
+            log("[ojon] Measuring matched prefill/decode performance of quality-passing candidate");
+            let entry=match prepare_bench(Path::new(path),&tool,512,128,3,
+                options.gpu_layers,options.device.as_deref())
+                .and_then(|plan|run_bench(&plan,&receipt))
+            {
+                Ok(metrics)=>{
+                    let comparison=comparison_reference.as_ref()
+                        .map(|reference|compare_bench_files(reference,&receipt))
+                        .transpose();
+                    match comparison{
+                        Ok(check) if check.as_ref().is_some_and(|v|v["comparable"]!=true)=>
+                            json!({"path":path,"status":"INCOMPARABLE_BENCHMARK","comparison":check}),
+                        Err(e)=>json!({"path":path,"status":"BENCHMARK_COMPARISON_FAILED","reason":e.to_string()}),
+                        _=>{
+                            if comparison_reference.is_none(){comparison_reference=Some(receipt.clone());}
+                            json!({"path":path,"status":"MEASURED","receipt":receipt.to_string_lossy(),
+                                "metrics":metrics})
+                        }
+                    }
+                },
+                Err(e)=>json!({"path":path,"status":"BENCHMARK_FAILED","reason":e.to_string()}),
+            };
+            benchmark_results.push(entry);
         }
-    }else{json!({"status":"NOT_RUN_NO_LOADABLE_CANDIDATE"})};
+    }
+    let (mut candidate,selection_policy)=select_workflow_goal(
+        &loadable,&benchmark_results,request.goal.label());
+    // A GPU run without comparable measured throughput cannot claim the target
+    // device was benchmark-certified. CPU smallest may run without llama-bench.
+    if gpu_target && candidate["path"].as_str().is_some()
+        && !benchmark_results.iter().any(|b|b["path"]==candidate["path"]&&b["status"]=="MEASURED")
+    {
+        candidate=Value::Null;
+    }
+    let load_check=if let Some(path)=candidate["path"].as_str(){
+        attempts.iter().find(|a|a["path"]==path).cloned()
+            .unwrap_or(json!({"status":"LOAD_EVIDENCE_MISSING"}))
+    }else if attempts.is_empty(){
+        json!({"status":"NOT_RUN_NO_QUALITY_PASSING_CANDIDATE"})
+    }else{
+        json!({"status":"NO_CANDIDATE_PASSED_BACKEND_AND_BENCHMARK_GATES"})
+    };
+    let performance=if let Some(path)=candidate["path"].as_str(){
+        benchmark_results.iter().find(|b|b["path"]==path).cloned()
+            .unwrap_or(json!({"status":"NOT_RUN_LLAMA_BENCH_UNAVAILABLE"}))
+    }else{json!({"status":"NO_SELECTED_CANDIDATE"})};
     Ok(json!({
         "schema":"ojon.optimize_workflow_result.v1",
-        "mode":"user_confirmed_cpu_only",
+        "mode":if gpu_target{"user_confirmed_explicit_gpu"}else{"user_confirmed_cpu_only"},
         "route":kind,
         "status":if candidate.is_null(){"NO_CANDIDATE_PASSED"}else{"PROVISIONAL_CANDIDATE_FOUND"},
         "model_source":request.model.to_string_lossy(),
@@ -555,16 +621,21 @@ pub fn run_optimize_workflow(
             "revision_identity":"NOT_CRYPTOGRAPHICALLY_VERIFIED"},
         "evaluated_tasks_only":true,
         "heldout_perplexity_requested":request.ppl_corpus.is_some(),
-        "runtime_speed_not_automatically_tested":performance["status"]!="MEASURED_CPU",
+        "runtime_speed_not_automatically_tested":performance["status"]!="MEASURED",
         "global_quality_lossless_proven":false,
         "hardware_peak_ram_vram_fit_proven":false,
+        "hardware_preflight_measured":decision["minimum_cpu_resource_preflight"],
         "provisional_candidate":candidate,
         "selected_candidate_runtime_load":load_check,
         "candidate_load_attempts":attempts,
         "quality_passing_candidate_count":ranked.len(),
         "selected_candidate_performance":performance,
-        "selection_policy":"smallest_quality_passing_cpu_load_verified",
-        "runtime_load_verified_on_cpu":load_check["status"]=="LOAD_AND_GENERATION_PASSED",
+        "candidate_benchmarks":benchmark_results,
+        "requested_backend_device":options.device,
+        "requested_gpu_layers":options.gpu_layers,
+        "selection_policy":selection_policy,
+        "runtime_load_verified_on_cpu":!gpu_target && load_check["status"]=="LOAD_AND_GENERATION_PASSED",
+        "selected_backend_load_verified":load_check["status"]=="LOAD_AND_GENERATION_PASSED",
         "evidence":result,
         "note":"Inspect all candidate task scores, size, RAM, VRAM and latency before deploying. There may be no candidate that passes."
     }))
