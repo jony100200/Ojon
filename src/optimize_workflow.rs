@@ -77,6 +77,19 @@ fn stage(id:&str,title:&str,status:&str,reason:&str,command:Option<Vec<String>>)
     json!({"id":id,"title":title,"status":status,"reason":reason,
         "command_argv":command,"completed":false,"quality_verified":false})
 }
+/// Pick a free receipt filename without deleting old benchmark evidence.
+/// The downstream report writer retains exclusive create-new semantics.
+fn next_compare_report(folder:&Path)->io::Result<PathBuf>{
+    for ordinal in 0..1000 {
+        let name=if ordinal==0 {"ojon-quant-comparison.json".to_owned()}
+            else {format!("ojon-quant-comparison-{ordinal:03}.json")};
+        let p=folder.join(name);
+        if !p.exists(){return Ok(p);}
+    }
+    Err(io::Error::new(ErrorKind::AlreadyExists,
+        "1000 comparison receipts already exist; use another results directory"))
+}
+
 fn types_for(goal:OptimizeGoal)->&'static str{
     match goal {
         OptimizeGoal::Smallest=>"IQ3_M,Q3_K_M,IQ4_XS",
@@ -234,7 +247,7 @@ pub fn plan_optimize_workflow(
     }else if !input.candidates.is_empty(){
         route="existing_candidate_comparison";
         if let (Some(base),Some(suite),Some(out))=(&baseline,&suite,&out){
-            let report=out.join("ojon-quant-comparison.json");
+            let report=next_compare_report(out)?;
             let valid=prepare_existing_quant_comparison(
                 base,&input.candidates,suite,&report,options.clone());
             match valid {
@@ -419,7 +432,7 @@ pub fn run_optimize_workflow(
                 Some(path)=>path,
                 None=>&request.model,
             };
-            let report=out.join("ojon-quant-comparison.json");
+            let report=next_compare_report(out)?;
             let plan=prepare_existing_quant_comparison(
                 baseline,&request.candidates,suite,&report,options)?;
             log("[ojon] Running real matched task comparisons; this does not generate new quantized weights");
