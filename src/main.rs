@@ -1109,6 +1109,7 @@ fn run() -> io::Result<()> {
             let mut options=ojon_backend::QuantParityOptions::default();
             options.quantizer=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaQuantize,"llama-quantize")?;
             options.eval_tool=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaCli,"llama-cli")?;
+            options.server_tool=ojon_backend::discovered_path(BackendId::LlamaServer);
             options.ppl_tool=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaPerplexity,"llama-perplexity")?;
             let(mut confirmed,mut json)=(false,false);
             while let Some(opt)=args.next() {
