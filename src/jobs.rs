@@ -28,8 +28,9 @@ fn peak_process_ram(child:&Child)->Option<u64>{
     let mut value=Counters{cb:std::mem::size_of::<Counters>() as u32,
         faults:0,peak_ws:0,working_ws:0,peak_paged:0,paged:0,
         peak_nonpaged:0,nonpaged:0,pagefile:0,peak_pagefile:0};
+    let size=value.cb;
     let success=unsafe{GetProcessMemoryInfo(child.as_raw_handle() as *mut c_void,
-        &mut value,value.cb)};
+        &mut value,size)};
     if success==0{None}else{Some(value.peak_ws as u64)}
 }
 #[cfg(target_os="linux")]
