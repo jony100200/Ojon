@@ -72,7 +72,12 @@ fn call(addr:SocketAddr,path:&str,body:Option<&[u8]>,timeout:Duration)->io::Resu
     // Reading to EOF with "Connection: close" avoids any dependency on an
     // HTTP client crate; the bound applies to headers AND response content.
     let mut block=[0u8;8192];
+    let started=Instant::now();
     loop{
+        let remaining=timeout.checked_sub(started.elapsed())
+            .filter(|d|!d.is_zero())
+            .ok_or_else(||io::Error::new(ErrorKind::TimedOut,"task server HTTP deadline exceeded"))?;
+        stream.set_read_timeout(Some(remaining))?;
         let n=stream.read(&mut block)?;
         if n==0{break;}
         if response.len().saturating_add(n)>MAX_HTTP_BYTES{
@@ -119,7 +124,19 @@ impl EvalSession{
                 return Err(bad(format!("llama-server exited during model startup: {status}")));
             }
             if let Ok((200,response))=call(address,"/health",None,Duration::from_secs(2)){
-                if response["status"]=="ok" {return Ok(session);}
+                if response["status"]=="ok"{
+                    let (code,props)=call(address,"/props",None,Duration::from_secs(5))?;
+                    if code!=200{return Err(bad("loaded model server did not provide properties"));}
+                    let loaded=props["model_path"].as_str()
+                        .ok_or_else(||bad("server cannot attest to loaded model path"))?;
+                    let actual=Path::new(loaded).canonicalize().map_err(|_|
+                        bad("reported model path cannot be resolved"))?;
+                    let expected=model.canonicalize()?;
+                    if actual!=expected{
+                        return Err(bad("server process reported a different model than the selected GGUF"));
+                    }
+                    return Ok(session);
+                }
             }
             if started.elapsed()>=READY_TIMEOUT{
                 return Err(io::Error::new(ErrorKind::TimedOut,
