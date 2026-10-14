@@ -107,13 +107,6 @@ fn next_compare_report(folder:&Path)->io::Result<PathBuf>{
         "1000 comparison receipts already exist; use another results directory"))
 }
 
-fn types_for(goal:OptimizeGoal)->&'static str{
-    match goal {
-        OptimizeGoal::Smallest=>"IQ3_M,Q3_K_M,Q3_K_L,IQ4_XS",
-        OptimizeGoal::Balanced=>"IQ4_XS,Q3_K_L,IQ3_M,Q3_K_M",
-        OptimizeGoal::Fastest=>"Q3_K_M,Q3_K_L,IQ4_XS,IQ3_M",
-    }
-}
 /// Resolve the one candidate list shared by planning, generation and receipts.
 fn precisions_for(input:&OptimizeWorkflowRequest)->Vec<Precision>{
     input.precision_candidates.clone().unwrap_or_else(||match input.goal{
@@ -810,13 +803,15 @@ mod tests{
         let input=OptimizeWorkflowRequest::new(PathBuf::new());
         let opt=configured_options(&input,&[]);
         let types=opt.precisions.iter().map(|p|p.as_str()).collect::<Vec<_>>().join(",");
-        assert_eq!(types,types_for(input.goal));
+        assert_eq!(types,precision_csv(&input));
     }
     #[test]
     fn goals_and_limits_are_explicit(){
         assert_eq!(OptimizeGoal::parse("smallest").unwrap(),OptimizeGoal::Smallest);
         assert!(OptimizeGoal::parse("magical").is_err());
-        assert_eq!(types_for(OptimizeGoal::Smallest),"IQ3_M,Q3_K_M,Q3_K_L,IQ4_XS");
+        let mut request=OptimizeWorkflowRequest::new(PathBuf::new());
+        request.goal=OptimizeGoal::Smallest;
+        assert_eq!(precision_csv(&request),"IQ3_M,Q3_K_M,Q3_K_L,IQ4_XS");
     }
     #[test]
     fn explicit_gpu_routes_reject_unknown_device_and_offload(){

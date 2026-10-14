@@ -33,6 +33,8 @@ Users may also configure guided quantization and benchmarks without editing code
 `ojon settings set optimization.bench_repetitions 4`, and
 `ojon settings set optimization.balanced_min_speed_ratio 0.90`.
 Clear any override with `ojon settings clear optimization.precision_candidates`.
+Manual llama-bench in Kathamo uses the same persisted prefill, decode and
+repetition settings; it does not maintain a second conflicting benchmark preset.
 The same fields may be supplied as one-run `optimize-workflow-plan/run`
 flags (`--precisions`, `--bench-prompt-tokens`, `--bench-gen-tokens`,
 `--bench-repetitions`, `--balanced-speed-ratio`). Every precision is checked

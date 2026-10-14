@@ -699,17 +699,34 @@ impl Workstation {
             }
         };
         let (model, benchmark) = (self.output.clone(), self.benchmark.clone());
+        let (prompt_tokens,gen_tokens,repetitions)=match (
+            self.opt_bench_prompt.trim().parse::<u32>(),
+            self.opt_bench_generation.trim().parse::<u32>(),
+            self.opt_bench_repetitions.trim().parse::<u32>())
+        {
+            (Ok(pp),Ok(tg),Ok(reps)) if (16..=8192).contains(&pp)
+                &&(16..=2048).contains(&tg)&&(1..=10).contains(&reps)=>(pp,tg,reps),
+            _=>{
+                self.status="Benchmark settings: prefill 16..8192, decode 16..2048, repetitions 1..10.".into();
+                self.needs_redraw=true;
+                return;
+            }
+        };
+        let device=if matches!(self.opt_device,2|3){
+            Some(self.opt_runtime_device.trim().to_string()).filter(|v|!v.is_empty())
+        }else{None};
         let tx = self.tx.clone();
         self.busy = true;
         self.started_at = Some(Instant::now());
         self.last_elapsed = None;
         self.last_benchmark = None;
-        self.status = "Running installed llama-bench: real prefill and decoding, 3 repeats. Not a quality benchmark.".into();
+        self.status = format!("Running real llama-bench: {prompt_tokens} prefill / {gen_tokens} decode, {repetitions} repeats; not a quality benchmark.");
         self.needs_redraw = true;
         std::thread::spawn(move || {
             let result = (|| -> std::io::Result<(PathBuf, serde_json::Value)> {
                 let model = Path::new(model.trim());
-                let plan = prepare_bench(model, Path::new(benchmark.trim()), 512, 128, 3, gpu_layers, None)?;
+                let plan = prepare_bench(model, Path::new(benchmark.trim()),
+                    prompt_tokens,gen_tokens,repetitions,gpu_layers,device.as_deref())?;
                 let stamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH).map_err(std::io::Error::other)?
                     .as_millis();
@@ -1103,7 +1120,7 @@ impl Workstation {
                             col.glass_card(398.0, |card|{
                                 card.heading("02   AUTOMATIC MODEL OPTIMIZATION");
                                 card.label("Find a smaller GGUF without measured task regression.");
-                                card.tabs(&["Model & Tasks","Quality Controls","Hardware & Search"], optimize_settings_tab);
+                                card.tabs(&["Model & Tasks","Quality Controls","Hardware","Search & Bench"], optimize_settings_tab);
                                 if *optimize_settings_tab==0 {
                                     card.label("Current Q4 reference GGUF (leave blank if selected model is Q4)");
                                     if card.text_input(opt_baseline,"Q4 baseline GGUF path...").clicked(){
@@ -1152,7 +1169,7 @@ impl Workstation {
                                     if card.text_input(opt_max_ppl,"Default: 0").clicked(){
                                         new_focus=Some(Focus::OptMaxPpl);
                                     }
-                                }else{
+                                }else if *optimize_settings_tab==2{
                                     card.label("Runtime backend (Auto remains CPU-safe)");
                                     card.dropdown("Choose runtime",opt_device,&[
                                         "Auto (CPU safe)","CPU","CUDA backend","SYCL backend"
@@ -1167,6 +1184,7 @@ impl Workstation {
                                             new_focus=Some(Focus::GpuLayers);
                                         }
                                     }
+                                }else{
                                     card.label("Q4-parity candidate formats (blank = conservative defaults)");
                                     if card.text_input(opt_precisions,"IQ4_XS,Q3_K_M,...").clicked(){
                                         new_focus=Some(Focus::OptPrecisions);
@@ -1332,7 +1350,7 @@ impl Workstation {
                             if card.button_secondary("Test with llama-cli").clicked() { smoke = true; }
                             card.label("llama-bench executable (real performance, optional)");
                             if card.text_input(benchmark, "llama-bench executable...").clicked() { new_focus = Some(Focus::Benchmark); }
-                            if card.button_secondary("Benchmark Output (512/128, 3 runs)").clicked() { bench = true; }
+                            if card.button_secondary("Benchmark Output (selected settings)").clicked() { bench = true; }
                             if let Some((receipt_path, values)) = last_benchmark {
                                 let pp = values["prompt_processing"]["tokens_per_second"].as_f64().unwrap_or(0.0);
                                 let tg = values["token_generation"]["tokens_per_second"].as_f64().unwrap_or(0.0);
