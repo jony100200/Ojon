@@ -47,6 +47,11 @@ pub struct OptimizeWorkflowRequest {
     pub candidates:Vec<(String,PathBuf)>,
     pub suite:Option<PathBuf>,
     pub output_dir:Option<PathBuf>,
+    /// Optional calibration; used only when producing new quantizations.
+    pub imatrix:Option<PathBuf>,
+    /// Held-out corpus for a second independent quantitative quality gate.
+    pub ppl_corpus:Option<PathBuf>,
+    pub max_ppl_regression_pct:f64,
     pub goal:OptimizeGoal,
     pub device:String,
     pub min_saving_percent:f64,
@@ -56,7 +61,8 @@ impl OptimizeWorkflowRequest{
     pub fn new(model:PathBuf)->Self{
         Self{
             model,current_baseline:None,candidates:Vec::new(),suite:None,
-            output_dir:None,goal:OptimizeGoal::Balanced,device:"auto".into(),
+            output_dir:None,imatrix:None,ppl_corpus:None,max_ppl_regression_pct:0.0,
+            goal:OptimizeGoal::Balanced,device:"auto".into(),
             min_saving_percent:5.0,max_loss_points:0.0
         }
     }
@@ -82,6 +88,10 @@ fn configured_options(input:&OptimizeWorkflowRequest,backends:&[FoundBackend])->
     let mut options=QuantParityOptions::default();
     options.min_saving_percent=input.min_saving_percent;
     options.max_loss_points=input.max_loss_points;
+    options.imatrix=input.imatrix.clone();
+    options.ppl_corpus=input.ppl_corpus.clone();
+    options.max_ppl_regression_pct=input.max_ppl_regression_pct;
+    if let Some(bin)=executable(backends,BackendId::LlamaPerplexity){options.ppl_tool=bin;}
     options.gpu_layers=0; // Never automatically use occupied local GPUs.
     options.precisions=match input.goal {
         OptimizeGoal::Smallest=>vec![Precision::IQ3M,Precision::Q3KM,Precision::IQ4XS],
@@ -107,6 +117,10 @@ pub fn plan_optimize_workflow(
     if !input.max_loss_points.is_finite()
         ||!(0.0..=100.0).contains(&input.max_loss_points){
         return Err(invalid("maximum quality loss must be within 0..100 percentage points"));
+    }
+    if !input.max_ppl_regression_pct.is_finite()
+        ||!(0.0..=100.0).contains(&input.max_ppl_regression_pct){
+        return Err(invalid("maximum relative perplexity regression must be 0..100 percent"));
     }
     if input.candidates.len()>6{return Err(invalid("at most six existing candidate GGUFs"));}
     let mut names=HashSet::new();
@@ -170,6 +184,15 @@ pub fn plan_optimize_workflow(
     if suite.is_none(){
         checks.push("No held-out test suite supplied; result cannot prove quality parity.".into());
     }
+    if input.ppl_corpus.is_some() && executable(backends,BackendId::LlamaPerplexity).is_none(){
+        checks.push("Perplexity corpus provided but llama-perplexity not detected. Execution requires this backend.".into());
+    }
+    if input.ppl_corpus.is_none(){
+        checks.push("Optional held-out perplexity gate not configured; the task suite alone may miss language-model degradation.".into());
+    }
+    if input.imatrix.is_none() && original_gguf{
+        checks.push("No calibrated importance matrix supplied; low-bit candidates will use uncalibrated recipes.".into());
+    }
     let base_text=baseline.as_ref().map(|p|path_text(p));
     let output_text=out.as_ref().map(|p|path_text(p));
     let mut next=None::<String>;
@@ -199,6 +222,9 @@ pub fn plan_optimize_workflow(
                 Ok(_)=>{
                     if !evaluator_available{
                         checks.push("llama-cli not discovered; cannot execute quality comparison.".into());
+                    }else if input.ppl_corpus.is_some()
+                        && executable(backends,BackendId::LlamaPerplexity).is_none(){
+                        // A requested quality gate must never silently be skipped.
                     }else {
                         let mut cmd=vec!["ojon".into(),"quant-compare-run".into(),
                             path_text(base),path_text(suite),path_text(&report)];
@@ -208,8 +234,14 @@ pub fn plan_optimize_workflow(
                         }
                         cmd.extend(["--eval-tool".into(),path_text(&options.eval_tool),
                             "--max-loss-points".into(),input.max_loss_points.to_string(),
-                            "--min-saving-percent".into(),input.min_saving_percent.to_string(),
-                            "--confirm".into()]);
+                            "--min-saving-percent".into(),input.min_saving_percent.to_string()]);
+                        if let Some(corpus)=options.ppl_corpus.as_ref(){
+                            cmd.extend(["--ppl-corpus".into(),path_text(corpus),
+                                "--ppl-tool".into(),path_text(&options.ppl_tool),
+                                "--max-ppl-regression-pct".into(),
+                                options.max_ppl_regression_pct.to_string()]);
+                        }
+                        cmd.push("--confirm".into());
                         argv=Some(cmd);
                         permitted=true;
                         action="compare_existing_quants";
@@ -226,10 +258,13 @@ pub fn plan_optimize_workflow(
             route="quantize_and_compare";
             if !quantizer_available||!evaluator_available {
                 checks.push("Both llama-quantize and llama-cli must be discovered for end-to-end candidate search.".into());
+            }else if input.ppl_corpus.is_some()
+                && executable(backends,BackendId::LlamaPerplexity).is_none(){
+                // Requested PPL gate is mandatory for the guided workflow.
             }else{
                 match prepare_quant_parity(&source,base,suite,out,options.clone()){
                     Ok(_)=>{
-                        let cmd=vec!["ojon".into(),"quant-parity-run".into(),
+                        let mut cmd=vec!["ojon".into(),"quant-parity-run".into(),
                             path_text(&source),path_text(base),path_text(suite),path_text(out),
                             "--precisions".into(),types_for(input.goal).into(),
                             "--quantizer".into(),path_text(&options.quantizer),
@@ -237,8 +272,17 @@ pub fn plan_optimize_workflow(
                             "--max-buffer-mib".into(),"512".into(),
                             "--min-saving-percent".into(),input.min_saving_percent.to_string(),
                             "--max-loss-points".into(),input.max_loss_points.to_string(),
-                            "--gpu-layers".into(),"0".into(),
-                            "--confirm".into()];
+                            "--gpu-layers".into(),"0".into()];
+                        if let Some(imatrix)=options.imatrix.as_ref(){
+                            cmd.extend(["--imatrix".into(),path_text(imatrix)]);
+                        }
+                        if let Some(corpus)=options.ppl_corpus.as_ref(){
+                            cmd.extend(["--ppl-corpus".into(),path_text(corpus),
+                                "--ppl-tool".into(),path_text(&options.ppl_tool),
+                                "--max-ppl-regression-pct".into(),
+                                options.max_ppl_regression_pct.to_string()]);
+                        }
+                        cmd.push("--confirm".into());
                         argv=Some(cmd);permitted=true;
                         action="quantize_and_compare";
                         next=Some("Generate and test smaller precision candidates from the original weights".into());
@@ -286,6 +330,9 @@ pub fn plan_optimize_workflow(
         "model":probe.as_json(),
         "current_baseline":base_text,
         "heldout_suite":suite.map(|p|path_text(&p)),
+        "calibration_imatrix":input.imatrix.as_ref().map(|p|path_text(p)),
+        "heldout_perplexity_corpus":input.ppl_corpus.as_ref().map(|p|path_text(p)),
+        "max_relative_perplexity_regression_pct":input.max_ppl_regression_pct,
         "output_directory":output_text,
         "goal":input.goal.label(),
         "target_device":input.device,
