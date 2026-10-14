@@ -4,6 +4,7 @@
 //! No binary is executed, installed, downloaded or recursively searched for.
 
 use std::collections::HashSet;
+use crate::settings::{LocalSettings,load_settings};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -207,31 +208,14 @@ fn search_dirs() -> Vec<(PathBuf, &'static str)> {
             "../llama.cpp",
             "../llama.cpp/bin",
             "../llama.cpp/build/bin",
-            "../KS-Kendro/bin",
-            "../tools/llama_cuda_b11575",
-            "../tools/llama_vulkan_b11575",
-            "../tools/llama_sycl_b11575",
-        ] {
+         ] {
             dirs.push((cwd.join(sub), "adjacent workspace folder"));
-        }
-    }
-    // Check known workstation environment script folders for Python engines
-    for env_path in [
-        r"M:\ComfyUI-Intel\venv-xpu\Scripts",
-        r"D:\KSAppDev\.venv\Scripts",
-        r"D:\KSAppDev\tools\llama_cuda_b11575",
-        r"D:\KSAppDev\tools\llama_vulkan_b11575",
-        r"D:\KSAppDev\tools\llama_sycl_b11575",
-    ] {
-        let p = PathBuf::from(env_path);
-        if p.is_dir() {
-            dirs.push((p, "workstation environment folder"));
         }
     }
     dirs
 }
 
-fn discover_one(spec: BackendSpec, dirs: &[(PathBuf, &'static str)]) -> FoundBackend {
+fn discover_one(spec: BackendSpec, dirs: &[(PathBuf, &'static str)],prefs:&LocalSettings) -> FoundBackend {
     // Explicit override is authoritative: do not secretly choose another installation.
     // An invalid override is reported as missing so the user can correct it.
     if let Some(override_path) = env::var_os(spec.override_env) {
@@ -240,6 +224,14 @@ fn discover_one(spec: BackendSpec, dirs: &[(PathBuf, &'static str)]) -> FoundBac
             spec,
             executable: if binary_at(&candidate) { Some(candidate) } else { None },
             found_via: Some("explicit environment override"),
+        };
+    }
+    if let Some(saved)=prefs.backend(spec.override_env){
+        let candidate=PathBuf::from(saved);
+        // Explicit local choice is authoritative even when temporarily missing.
+        return FoundBackend{
+            spec,executable:if binary_at(&candidate){Some(candidate)}else{None},
+            found_via:Some("local settings file")
         };
     }
     let mut seen = HashSet::new();
@@ -261,9 +253,24 @@ fn discover_one(spec: BackendSpec, dirs: &[(PathBuf, &'static str)]) -> FoundBac
 
 /// Identifies known binaries in PATH/common folders, without executing any.
 /// "Installed" here means a candidate file was found, not validated compatibility.
+/// Discover using an already loaded file, so GUI and CLI share the same
+/// preference source and command-line flags remain independent overrides.
+pub fn discover_backends_with_settings(prefs:&LocalSettings)->Vec<FoundBackend>{
+    let dirs=search_dirs();
+    SPECS.iter().copied().map(|s|discover_one(s,&dirs,prefs)).collect()
+}
 pub fn discover_backends() -> Vec<FoundBackend> {
-    let dirs = search_dirs();
-    SPECS.iter().copied().map(|s| discover_one(s, &dirs)).collect()
+    match load_settings(){
+        Ok(prefs)=>discover_backends_with_settings(&prefs),
+        Err(e)=>{
+            // Fail closed: corrupt/future settings never silently select a
+            // different executable than the user's previously chosen backend.
+            eprintln!("Ojon settings unavailable ({e}); backend discovery blocked until repaired");
+            SPECS.iter().copied().map(|spec|FoundBackend{
+                spec,executable:None,found_via:Some("invalid local settings")
+            }).collect()
+        }
+    }
 }
 
 /// The optional Python interpreter for llama.cpp's official HF converter.

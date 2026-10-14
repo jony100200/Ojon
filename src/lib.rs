@@ -1,6 +1,8 @@
 //! Ojon's independent Rust backend: native scalar weight packing plus optional public ML engines.
 //! No GUI, Python, network access, or model weights are required for inspection.
 
+pub mod settings;
+pub use settings::{LocalSettings,load_settings,save_settings,settings_path};
 pub mod discovery;
 pub mod gguf;
 pub mod hf;
