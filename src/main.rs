@@ -28,7 +28,8 @@ fn usage() {
 Commands:
   ojon inspect   <model.gguf>
   ojon verify    <model.gguf>
-  ojon backends [--json]     Detect installed engines and show official download links\n  ojon settings path|show|set <key> <value>|clear <key>   Manage local per-user preferences
+  ojon backends [--json]     Detect installed engines and show official download links
+  ojon backends --probe [--json]     Explicitly probe installed runtime device IDs and quantizer formats\n  ojon settings path|show|set <key> <value>|clear <key>   Manage local per-user preferences
   ojon probe <model-path> [--json]   Identify model format/family without loading weights
   ojon optimize-workflow-run <model-path> [--baseline Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--imatrix calibration.imatrix] [--tensor-sensitivity scores.json] [--ppl-corpus heldout.txt] [--max-ppl-regression-pct 0] [--goal balanced|smallest] --confirm [--json]
   ojon optimize-workflow-plan <model-path> [--baseline current-Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--goal balanced|smallest|fastest] [--precisions IQ4_XS,Q3_K_M] [--bench-prompt-tokens 512] [--bench-gen-tokens 128] [--bench-repetitions 3] [--balanced-speed-ratio 0.85] [--device auto|cpu|cuda|xpu] [--runtime-device SYCL0|CUDA0] [--gpu-layers 99] [--min-saving-percent 5] [--max-loss-points 0] [--json]
@@ -1932,13 +1933,29 @@ fn run() -> io::Result<()> {
             if let Some(receipt) = done.receipt { println!("receipt: {}", receipt.display()); }
         }
         Some("backends") => {
-            let json = match args.next() {
-                None => false,
-                Some(value) if value == "--json" => true,
-                _ => return Err(invalid("backends accepts only optional --json")),
-            };
-            if args.next().is_some() { return Err(invalid("too many backends options")); }
-            let detected = discover_backends();
+            let mut json=false;
+            let mut probe=false;
+            for option in args{
+                match option.to_str(){
+                    Some("--json") if !json=>json=true,
+                    Some("--probe") if !probe=>probe=true,
+                    _=>return Err(invalid("backends accepts only --json and --probe")),
+                }
+            }
+            let detected=discover_backends();
+            if probe{
+                let result=ojon_backend::probe_backend_capabilities(&detected);
+                if json{println!("{result}");}
+                else{
+                    for item in result["probes"].as_array().into_iter().flatten(){
+                        println!("{}: {}\n  devices: {}\n  formats: {}",
+                            item["name"].as_str().unwrap_or("backend"),
+                            item["status"].as_str().unwrap_or("unknown"),
+                            item["device_ids"],item["precision_formats"]);
+                    }
+                }
+                return Ok(());
+            }
             if json {
                 let arr: Vec<_> = detected.iter().map(|item| serde_json::json!({
                     "name": item.spec.name,

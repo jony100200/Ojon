@@ -8,6 +8,11 @@ use crate::settings::{LocalSettings,load_settings};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+use serde_json::{json,Value};
+use crate::jobs::capture_with_timeout;
+use crate::llama::Precision;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Integration {
@@ -273,6 +278,121 @@ pub fn discover_backends() -> Vec<FoundBackend> {
     }
 }
 
+
+/// Capabilities are live, read-only *executable probes*, never inferred from
+/// a filename, GPU vendor or release folder. No models are opened.
+/// Only run this at user request or immediately before an approved job.
+fn probe_help(executable:&Path,arg:&str)->std::io::Result<String>{
+    let mut command=Command::new(executable);
+    command.arg(arg);
+    let output=capture_with_timeout(&mut command,256*1024,Duration::from_secs(12))?;
+    let mut combined=String::from_utf8_lossy(&output.stdout).into_owned();
+    combined.push('\n');
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    // llama-quantize --help sometimes returns a nonzero exit code; clear,
+    // bounded human-readable output is useful but does not prove execution.
+    if combined.trim().is_empty(){
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+            "backend capability probe returned no output"));
+    }
+    Ok(combined)
+}
+
+/// Quantizer usage lines contain an index, "or" and the supported GGUF type.
+/// Do not parse unrelated prose that happens to mention a known precision.
+pub fn quantizer_formats_from_help(help:&str)->Vec<String>{
+    let mut formats=Vec::new();
+    for line in help.lines(){
+        let words=line.split_whitespace().collect::<Vec<_>>();
+        let name=if words.len()>=3&&words[0].parse::<u16>().is_ok()
+            &&words[1].eq_ignore_ascii_case("or"){words[2]}
+            else{continue};
+        if let Ok(precision)=name.parse::<Precision>(){
+            let canonical=precision.as_str();
+            if !formats.contains(&canonical.to_owned()){formats.push(canonical.to_owned());}
+        }
+    }
+    formats
+}
+/// Parse only explicit device identifiers at the start of runtime list lines.
+/// A random GPU name or reference to a device elsewhere in stdout is not proof.
+pub fn runtime_devices_from_list(output:&str)->Vec<String>{
+    let mut devices=Vec::new();
+    for line in output.lines(){
+        let line=line.trim();
+        let Some((key,description))=line.split_once(':')else{continue;};
+        let key=key.trim();
+        if key.len()>80||key.len()<3||description.trim().is_empty()
+            ||!key.starts_with(|c:char|c.is_ascii_alphabetic())
+            ||!key.bytes().any(|b|b.is_ascii_digit())
+            ||!key.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'_'|b'-'))
+        {continue;}
+        if !devices.iter().any(|id|id==key){devices.push(key.to_string());}
+    }
+    devices
+}
+fn probe_binary(found:&FoundBackend)->Value{
+    let Some(path)=found.executable.as_deref()else{
+        return json!({"name":found.spec.name,"status":"NOT_INSTALLED",
+            "path":Value::Null,"capability_evidence":"none"});
+    };
+    let probe=match found.spec.id {
+        BackendId::LlamaQuantize=>Some("--help"),
+        BackendId::LlamaCli|BackendId::IntelSyclCli=>Some("--list-devices"),
+        BackendId::LlamaBench=>Some("--help"),
+        _=>None,
+    };
+    let Some(flag)=probe else {
+        return json!({"name":found.spec.name,"status":"NOT_PROBED_NO_STANDARD_ADAPTER",
+            "path":path.to_string_lossy(),"capability_evidence":"none"});
+    };
+    match probe_help(path,flag){
+        Ok(output)=>{
+            let formats=if found.spec.id==BackendId::LlamaQuantize{
+                quantizer_formats_from_help(&output)
+            }else{Vec::new()};
+            let devices=if matches!(found.spec.id,BackendId::LlamaCli|BackendId::IntelSyclCli){
+                runtime_devices_from_list(&output)
+            }else{Vec::new()};
+            json!({"name":found.spec.name,"path":path.to_string_lossy(),
+                "status":if (found.spec.id==BackendId::LlamaQuantize&&formats.is_empty())
+                     ||(matches!(found.spec.id,BackendId::LlamaCli|BackendId::IntelSyclCli)
+                        &&devices.is_empty()){"INCONCLUSIVE"}else{"CAPABILITY_OUTPUT_PARSED"},
+                "probe_argument":flag,"precision_formats":formats,
+                "device_ids":devices,
+                "backend_executable_ran":true,
+                "model_family_compatibility_verified":false,
+                "runtime_model_load_verified":false})
+        },
+        Err(error)=>json!({"name":found.spec.name,
+            "path":path.to_string_lossy(),"status":"PROBE_FAILED",
+            "reason":error.to_string(),"capability_evidence":"none"})
+    }
+}
+/// Caller explicitly requests capability checks; this can execute selected
+/// local binaries with bounded time/output but does not load or quantize models.
+pub fn probe_backend_capabilities(found:&[FoundBackend])->Value{
+    json!({"schema":"ojon.backend_capabilities.v1",
+        "read_only_no_model_weights_loaded":true,
+        "probes":found.iter().map(probe_binary).collect::<Vec<_>>()})
+}
+pub fn probe_quantizer_formats(executable:&Path)->std::io::Result<Vec<String>>{
+    let formats=quantizer_formats_from_help(&probe_help(executable,"--help")?);
+    if formats.is_empty(){
+        return Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
+            "installed quantizer did not advertise a parseable list of supported GGUF formats"));
+    }
+    Ok(formats)
+}
+pub fn probe_runtime_devices(executable:&Path)->std::io::Result<Vec<String>>{
+    let devices=runtime_devices_from_list(&probe_help(executable,"--list-devices")?);
+    if devices.is_empty(){
+        return Err(std::io::Error::new(std::io::ErrorKind::Unsupported,
+            "installed llama runtime returned no parseable device list"));
+    }
+    Ok(devices)
+}
+
 /// The optional Python interpreter for llama.cpp's official HF converter.
 /// This is not executed during discovery; installed Python packages are not
 /// checked until the user explicitly starts a conversion.
@@ -293,6 +413,21 @@ pub fn resolve_backend_command(id:BackendId,fallback:&str)->std::io::Result<Path
 }
 pub fn discovered_path(id: BackendId) -> Option<PathBuf> {
     discover_backends().into_iter().find(|b| b.spec.id == id)?.executable
+}
+
+#[cfg(test)]
+mod capability_tests{
+    use super::*;
+    #[test]
+    fn quantizer_only_accepts_advertised_format_table(){
+        let output="usage: llama-quantize\n  11 or Q3_K_M : mixed\n  13 or Q3_K_L : mixed\n  30 or IQ4_XS : mixed\n Q3_K_S mentioned in a random message";
+        assert_eq!(quantizer_formats_from_help(output),vec!["Q3_K_M","Q3_K_L","IQ4_XS"]);
+    }
+    #[test]
+    fn device_list_does_not_infer_vendor_from_prose(){
+        let list="Available devices:\n CUDA0: NVIDIA GPU\n SYCL0: Intel Arc GPU\n Vulkan2: adapter\n CUDA0: same again\n Please try CUDA1 in a sample\n";
+        assert_eq!(runtime_devices_from_list(list),vec!["CUDA0","SYCL0","Vulkan2"]);
+    }
 }
 
 /// Open the publisher's trusted website, only following an explicit user action.

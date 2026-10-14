@@ -46,6 +46,14 @@ class, concrete runtime device, offload layers and benchmark settings from
 the same local settings file. "Auto" remains CPU-safe; GPU selection still
 requires explicit physical device identification and preflight checks.
 
+Backend detection is separate from capability verification: `ojon backends
+--probe --json` explicitly executes bounded `llama-cli --list-devices`,
+`llama-quantize --help`, and applicable backend help commands. The parsed
+device IDs and formats are **claims advertised by the installed executable**,
+not proof of model load or high-quality quantization. Planning still does not
+execute model tools; an approved optimization rechecks the relevant binary.
+No capability probe is run merely because Ojon starts up.
+
 The GUI restores available saved model paths and tool preferences, and writes
 preferences when selecting a model or closing the window. The Backend Tools
 panel has **Save Local Preferences** for an explicit save. CLI command flags
