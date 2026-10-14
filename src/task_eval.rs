@@ -6,8 +6,8 @@ use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::process::Command;
+use std::time::{Instant,Duration};
 
 fn invalid(s: impl Into<String>) -> io::Error { io::Error::new(ErrorKind::InvalidInput,s.into()) }
 
@@ -135,7 +135,7 @@ fn execute_task(plan:&EvalPlan,model:&Path,task:&EvalTask)->io::Result<(String,f
         .arg("--no-display-prompt").arg("-st").arg("--simple-io");
     if let Some(d)=&plan.device {command.arg("-dev").arg(d);}
     let start=Instant::now();
-    let result=command.stdin(Stdio::null()).output()?;
+    let result=crate::jobs::capture_with_timeout(&mut command,2*1024*1024,Duration::from_secs(1200))?;
     if !result.status.success(){
         return Err(io::Error::other(format!("llama-cli task {} failed ({}): {}",
             task.id,result.status,String::from_utf8_lossy(&result.stderr).chars().take(500).collect::<String>())));

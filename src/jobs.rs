@@ -3,9 +3,57 @@
 //! No fake completion percentages, inferred GPU usage or synthetic progress.
 
 use std::io::{self, BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
+use std::io::Read;
+use std::time::{Duration,Instant};
 use std::sync::mpsc;
 use std::thread;
+
+/// Bounded output for untrusted local model executables. Both pipes are
+/// drained concurrently even after reaching the configured memory cap.
+/// On timeout the child is killed and reaped; no success receipt is produced.
+pub fn capture_with_timeout(
+    cmd:&mut Command,limit:usize,timeout:Duration
+)->io::Result<Output>{
+    if limit==0||limit>16*1024*1024||timeout.is_zero(){
+        return Err(io::Error::new(io::ErrorKind::InvalidInput,"invalid capture limit or timeout"));
+    }
+    let mut child=cmd.stdin(Stdio::null()).stdout(Stdio::piped())
+        .stderr(Stdio::piped()).spawn()?;
+    fn drain<R:Read>(mut pipe:R,limit:usize)->io::Result<(Vec<u8>,bool)>{
+        let mut data=Vec::new();
+        let mut extra=false;
+        let mut block=[0u8;8192];
+        loop{
+            let n=pipe.read(&mut block)?;
+            if n==0{break;}
+            let room=limit.saturating_sub(data.len());
+            data.extend_from_slice(&block[..n.min(room)]);
+            if n>room{extra=true;}
+        }
+        Ok((data,extra))
+    }
+    let stdout=child.stdout.take().ok_or_else(||io::Error::other("missing stdout pipe"))?;
+    let stderr=child.stderr.take().ok_or_else(||io::Error::other("missing stderr pipe"))?;
+    let out=thread::spawn(move||drain(stdout,limit));
+    let err=thread::spawn(move||drain(stderr,limit));
+    let started=Instant::now();
+    let mut timed_out=false;
+    let status=loop{
+        if let Some(status)=child.try_wait()?{break status;}
+        if started.elapsed()>timeout{
+            timed_out=true;
+            let _=child.kill();
+            break child.wait()?;
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    let stdout=out.join().map_err(|_|io::Error::other("stdout worker panicked"))??;
+    let stderr=err.join().map_err(|_|io::Error::other("stderr worker panicked"))??;
+    if timed_out{return Err(io::Error::new(io::ErrorKind::TimedOut,"model backend exceeded execution timeout"));}
+    if stdout.1||stderr.1{return Err(io::Error::new(io::ErrorKind::InvalidData,"backend output exceeded capture size limit"));}
+    Ok(Output{status,stdout:stdout.0,stderr:stderr.0})
+}
 
 const MAX_LINE_BYTES: usize = 2048;
 const MAX_TOTAL_LOG_BYTES: usize = 8 * 1024 * 1024;

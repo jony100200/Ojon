@@ -7,7 +7,8 @@ use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::time::Duration;
 
 pub const RECEIPT_SCHEMA: &str = "ojon.llama_bench_receipt.v1";
 const MAX_BENCH_OUTPUT: usize = 8 * 1024 * 1024;
@@ -255,7 +256,7 @@ pub fn run_bench(plan: &BenchPlan, receipt: &Path) -> io::Result<Value> {
     if !parent.is_dir() { return Err(invalid("receipt parent directory must already exist")); }
     if target.exists() { return Err(io::Error::new(ErrorKind::AlreadyExists, "receipt already exists; refusing overwrite")); }
     eprintln!("Ojon: real llama-bench loads model weights. Results require an installed backend and sufficient real RAM/VRAM.");
-    let output = plan.command().stdin(Stdio::null()).output()?;
+    let output = crate::jobs::capture_with_timeout(&mut plan.command(),MAX_BENCH_OUTPUT,Duration::from_secs(1200))?;
     if !output.status.success() {
         let tail = String::from_utf8_lossy(&output.stderr).chars().take(1200).collect::<String>();
         return Err(io::Error::other(format!("llama-bench failed: {}: {tail}", output.status)));

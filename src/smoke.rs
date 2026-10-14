@@ -6,6 +6,7 @@ use crate::gguf::inspect_gguf;
 use std::io::{self, ErrorKind};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 /// Executes a short inference run with the actual selected llama.cpp runtime.
 /// The prompt and output are visible in the terminal; Ojon records only whether
@@ -73,15 +74,16 @@ pub fn smoke_gguf_capture(
     if inspect_gguf(&model)?.tensor_count == 0 {
         return Err(io::Error::new(ErrorKind::InvalidData, "GGUF has no tensors"));
     }
-    let result = Command::new(runtime)
-        .arg("-m").arg(&model)
+    let mut cmd = Command::new(runtime);
+    cmd.arg("-m").arg(&model)
         .arg("-p").arg(prompt)
         .arg("-n").arg(tokens.to_string())
         .arg("-ngl").arg(gpu_layers.to_string())
         .arg("--no-display-prompt")
         .arg("--simple-io")
         .arg("-st")
-        .stdin(Stdio::null()).output()?;
+        ;
+    let result=crate::jobs::capture_with_timeout(&mut cmd,128*1024,Duration::from_secs(600))?;
     let stderr = String::from_utf8_lossy(&result.stderr);
     if !result.status.success() {
         return Err(io::Error::new(ErrorKind::Other, format!(
