@@ -770,6 +770,21 @@ mod tests{
         assert_eq!(types_for(OptimizeGoal::Smallest),"IQ3_M,Q3_K_M,Q3_K_L,IQ4_XS");
     }
     #[test]
+    fn explicit_gpu_routes_reject_unknown_device_and_offload(){
+        let mut req=OptimizeWorkflowRequest::new(PathBuf::from("no-model.gguf"));
+        req.device="cuda".into();
+        req.gpu_layers=99;
+        assert!(plan_optimize_workflow(&req,&[]).is_err());
+        req.runtime_device=Some("SYCL0".into());
+        assert!(plan_optimize_workflow(&req,&[]).is_err());
+        req.runtime_device=Some("CUDA0".into());
+        req.gpu_layers=0;
+        assert!(plan_optimize_workflow(&req,&[]).is_err());
+        req.device="cpu".into();
+        req.gpu_layers=99;
+        assert!(plan_optimize_workflow(&req,&[]).is_err());
+    }
+    #[test]
     fn invalid_arguments_do_not_invent_a_plan(){
         let mut req=OptimizeWorkflowRequest::new(PathBuf::from("does-not-exist.gguf"));
         req.max_loss_points=f64::NAN;

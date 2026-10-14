@@ -3,6 +3,8 @@
 use crate::gguf::inspect_gguf;
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::hash::{DefaultHasher,Hash,Hasher};
+use std::time::UNIX_EPOCH;
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -175,9 +177,22 @@ pub fn run_eval(plan:&EvalPlan,log:impl FnMut(&str))->io::Result<Value>{
 pub(crate) fn run_eval_reusing_baseline(
     plan:&EvalPlan,prior:Option<&Value>,mut log:impl FnMut(&str)
 )->io::Result<Value>{
+    let mut fingerprint=DefaultHasher::new();
+    for task in &plan.suite.tasks{
+        task.id.hash(&mut fingerprint);task.category.hash(&mut fingerprint);
+        task.prompt.hash(&mut fingerprint);task.expected.hash(&mut fingerprint);
+        task.matching.hash(&mut fingerprint);
+    }
+    // Same-run invalidation, not cryptographic model provenance.
+    let meta=fs::metadata(&plan.baseline)?;
+    let modified=meta.modified().ok()
+        .and_then(|t|t.duration_since(UNIX_EPOCH).ok())
+        .map(|d|d.as_nanos().to_string());
     let config=json!({"tool":plan.tool.to_string_lossy(),
         "gpu_layers":plan.gpu_layers,"device":plan.device,
-        "tokens":plan.tokens,"task_count":plan.suite.tasks.len()});
+        "tokens":plan.tokens,"task_count":plan.suite.tasks.len(),
+        "suite_fingerprint_noncrypto":fingerprint.finish(),
+        "baseline_file_bytes":meta.len(),"baseline_modified_ns":modified});
     let baseline=if let Some(cached)=prior{
         if cached["baseline"]["model"]!=json!(plan.baseline.to_string_lossy())
             ||cached["evaluation_suite"]!=json!(plan.suite.id)

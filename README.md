@@ -44,8 +44,9 @@ needed for this refactor.
 
 ### Guided model optimization (Kathamo UI and Rust CLI)
 
-Ojon provides a metadata-only decision layer and a separately approved CPU-only
-execution workflow. The **Kathamo desktop app** now defaults to the
+Ojon provides a metadata-only planner and a separately approved
+execution workflow. The GUI defaults to CPU; the CLI additionally accepts
+explicit CUDA/SYCL device IDs with live vendor telemetry preflight. The **Kathamo desktop app** now defaults to the
 **Automatic Optimize** view; the existing quantization and inference controls
 remain under **Manual Tools**. The guided view inspects a selected model,
 current Q4 reference, optional smaller GGUF, held-out task suite and output
@@ -77,8 +78,15 @@ ojon optimize-workflow-plan 'D:\Models\current-Q4_K_M.gguf' --candidate iq3='D:\
 ojon optimize-workflow-plan 'D:\Models\original-F16.gguf' --baseline 'D:\Models\current-Q4_K_M.gguf' --suite 'D:\Bench\coding-suite.json' --output-dir 'D:\Bench' --goal balanced --json
 ```
 
-An approved CPU-only run uses the **same validated Rust adapters**, without executing a
-shell string. Both steps require a real held-out task suite and a current Q4 reference.
+An approved run uses the **same validated Rust adapters**, without executing a
+shell string. CPU is the default; GPU requires `--device cuda|xpu`,
+`--runtime-device CUDA0|SYCL0` and `--gpu-layers N`, subject to installed
+GPU telemetry and real backend checks. The GPU device name is never guessed.
+For adaptive mixed precision, add `--tensor-sensitivity scores.json` from an
+already validated sensitivity extraction; the adaptive runner reuses the held-out
+suite and compares against the existing Q4 reference. Optional PPL is currently
+not available on that adaptive route, and requesting PPL for an explicitly
+selected GPU blocks that route rather than switching devices. Both steps require a real held-out task suite and a current Q4 reference.
 The run does not overwrite originals or silently allocate a GPU.
 Comparison receipt filenames are allocated without overwriting earlier reports.
 
@@ -94,10 +102,16 @@ Existing smaller community quants can instead be provided with `--candidate name
 and the quantized Q4 reference as the first positional model; this compares weights
 without recompressing them. If the evaluation or perplexity backend is unavailable,
 a requested gate blocks execution rather than silently disappearing.
-Only `balanced` and `smallest` are currently runnable from the guided workflow;
-`fastest` requires separate **real hardware throughput** measurements and is not
-yet an automatic winner selector. CUDA/XPU execution remains in the advanced
-device-specific commands until compatibility and hardware availability are verified.
+`smallest` selects the smallest quality-gated, loadable candidate; `balanced`
+selects the smallest loadable candidate within 85% of the top measured decode
+speed on comparable backend settings, and falls back to size-only if no speed
+evidence exists. `fastest` requires installed llama-bench and selects the
+fastest comparable quality-passing candidate by measured decode speed.
+GPU-guided runs require real load and throughput checks and explicit vendor
+device selection. The workflow still does **not** claim peak GPU VRAM or
+general model equivalence. Ojon samples peak *process working-set RAM* from
+supported operating systems during llama-bench; this is not total memory
+commitment and is not per-GPU VRAM.
 Passing the configured task/PPL checks is **not proof of general zero-loss quality**.
 The plan gives the proposed action, blocking prerequisites, ordered stages,
 and an **argument-array** command for a separate user-approved execution.
