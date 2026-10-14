@@ -28,7 +28,7 @@ fn usage() {
 Commands:
   ojon inspect   <model.gguf>
   ojon verify    <model.gguf>
-  ojon backends [--json]     Detect installed engines and show official download links
+  ojon backends [--json]     Detect installed engines and show official download links\n  ojon settings path|show|set <key> <value>|clear <key>   Manage local per-user preferences
   ojon probe <model-path> [--json]   Identify model format/family without loading weights
   ojon optimize-workflow-run <model-path> [--baseline Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--imatrix calibration.imatrix] [--tensor-sensitivity scores.json] [--ppl-corpus heldout.txt] [--max-ppl-regression-pct 0] [--goal balanced|smallest] --confirm [--json]
   ojon optimize-workflow-plan <model-path> [--baseline current-Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--goal balanced|smallest|fastest] [--device auto|cpu|cuda|xpu] [--runtime-device SYCL0|CUDA0] [--gpu-layers 99] [--min-saving-percent 5] [--max-loss-points 0] [--json]
@@ -227,6 +227,48 @@ fn run() -> io::Result<()> {
     let mut args = env::args_os().skip(1);
     let cmd = args.next().unwrap_or_else(|| OsString::from("--help"));
     match cmd.to_str() {
+        Some("settings") => {
+            let op=next_argument(&mut args,"settings subcommand (path/show/set/clear)")?;
+            match op.to_str(){
+                Some("path")=>{
+                    if args.next().is_some(){return Err(invalid("settings path takes no arguments"));}
+                    println!("{}",ojon_backend::settings_path()?.display());
+                },
+                Some("show")=>{
+                    let extra=args.next();
+                    if extra.as_deref()!=Some(std::ffi::OsStr::new("--json"))&&extra.is_some(){
+                        return Err(invalid("settings show accepts only --json"));
+                    }
+                    if args.next().is_some(){return Err(invalid("too many settings arguments"));}
+                    let path=ojon_backend::settings_path()?;
+                    let settings=ojon_backend::load_settings()?;
+                    println!("{}",serde_json::json!({
+                        "path":path.to_string_lossy(),
+                        "stored":path.is_file(),
+                        "settings":settings.as_json()
+                    }));
+                },
+                Some("set")=>{
+                    let key=next_argument(&mut args,"setting key")?;
+                    let value=next_argument(&mut args,"setting value")?;
+                    if args.next().is_some(){return Err(invalid("too many settings arguments"));}
+                    let mut settings=ojon_backend::load_settings()?;
+                    settings.set(key.to_str().ok_or_else(||invalid("setting name must be UTF-8"))?,
+                        value.to_str().ok_or_else(||invalid("setting value must be UTF-8"))?)?;
+                    let path=ojon_backend::save_settings(&settings)?;
+                    println!("saved_local_preferences: {}",path.display());
+                },
+                Some("clear")=>{
+                    let key=next_argument(&mut args,"setting key")?;
+                    if args.next().is_some(){return Err(invalid("too many settings arguments"));}
+                    let mut settings=ojon_backend::load_settings()?;
+                    settings.clear(key.to_str().ok_or_else(||invalid("setting name must be UTF-8"))?)?;
+                    let path=ojon_backend::save_settings(&settings)?;
+                    println!("updated_local_preferences: {}",path.display());
+                },
+                _=>return Err(invalid("settings command must be path, show, set or clear"))
+            }
+        }
         Some("ara-fit") => {
             let source=PathBuf::from(next_argument(&mut args,"module input/output calibration JSON")?);
             let output=PathBuf::from(next_argument(&mut args,"output low-rank edit recipe JSON")?);
@@ -270,7 +312,7 @@ fn run() -> io::Result<()> {
             let execute=cmd=="adapter-smoke-run";
             let bundle=PathBuf::from(next_argument(&mut args,"Ojon compressed adapter bundle folder")?);
             let report=PathBuf::from(next_argument(&mut args,"new JSON receipt file")?);
-            let mut tool=PathBuf::from("llama-cli");
+            let mut tool=discovered_path(BackendId::LlamaCli).unwrap_or_else(||PathBuf::from("llama-cli"));
             let mut gpu_layers=0i32; // GPU-free by default.
             let mut device=None::<String>;
             let mut image=None::<PathBuf>;
@@ -1147,8 +1189,8 @@ fn run() -> io::Result<()> {
             let output=PathBuf::from(next_argument(&mut args,"existing output directory")?);
             let suite=PathBuf::from(next_argument(&mut args,"held-out suite JSON")?);
             let mut targets=vec![3.0,3.5,4.0,4.5];
-            let mut quantizer=PathBuf::from("llama-quantize");
-            let mut eval_tool=PathBuf::from("llama-cli");
+            let mut quantizer=discovered_path(BackendId::LlamaQuantize).unwrap_or_else(||PathBuf::from("llama-quantize"));
+            let mut eval_tool=discovered_path(BackendId::LlamaCli).unwrap_or_else(||PathBuf::from("llama-cli"));
             let mut imatrix:Option<PathBuf>=None;
             let mut threads=std::thread::available_parallelism().map(|n|n.get()).unwrap_or(4);
             let mut gpu_layers=0i32;
@@ -1199,7 +1241,7 @@ fn run() -> io::Result<()> {
             let output=PathBuf::from(next_argument(&mut args,"new quality evidence JSON")?);
             let mut baseline:Option<PathBuf>=None;
             let mut candidates:Vec<(String,PathBuf)>=Vec::new();
-            let mut tool=PathBuf::from("llama-cli");
+            let mut tool=discovered_path(BackendId::LlamaCli).unwrap_or_else(||PathBuf::from("llama-cli"));
             let mut gpu_layers=0i32;
             let mut device:Option<String>=None;
             let mut tokens=128u32;
@@ -1482,6 +1524,18 @@ fn run() -> io::Result<()> {
             let execute=cmd=="optimize-workflow-run";
             let source=PathBuf::from(next_argument(&mut args,"model file or directory")?);
             let mut input=ojon_backend::OptimizeWorkflowRequest::new(source);
+            // Saved defaults apply only when a CLI flag doesn't explicitly
+            // override the field. Loading does not mutate settings.
+            let prefs=ojon_backend::load_settings()?;
+            input.goal=ojon_backend::OptimizeGoal::parse(&prefs.optimization_goal)?;
+            input.min_saving_percent=prefs.min_saving_percent;
+            input.max_loss_points=prefs.max_loss_points;
+            input.max_ppl_regression_pct=prefs.max_ppl_regression_pct;
+            input.device=prefs.preferred_device.clone();
+            if matches!(input.device.as_str(),"cuda"|"xpu"){
+                input.runtime_device=prefs.runtime_device.clone();
+                input.gpu_layers=prefs.gpu_layers as i32;
+            }
             let mut json=false;
             let mut confirmed=false;
             while let Some(option)=args.next(){
@@ -1516,8 +1570,13 @@ fn run() -> io::Result<()> {
                         input.goal=ojon_backend::OptimizeGoal::parse(
                             name.to_str().ok_or_else(||invalid("goal must be UTF-8"))?)?;
                     }
-                    Some("--device")=>input.device=next_argument(&mut args,"device")?
-                        .to_str().ok_or_else(||invalid("device must be UTF-8"))?.to_owned(),
+                    Some("--device")=>{
+                        input.device=next_argument(&mut args,"device")?
+                            .to_str().ok_or_else(||invalid("device must be UTF-8"))?.to_owned();
+                        if matches!(input.device.as_str(),"auto"|"cpu"){
+                            input.runtime_device=None;input.gpu_layers=0;
+                        }
+                    },
                     Some("--runtime-device")=>input.runtime_device=Some(
                         next_argument(&mut args,"llama.cpp device name, e.g. SYCL0 or CUDA0")?
                             .to_string_lossy().into_owned()),
