@@ -626,14 +626,14 @@ pub fn run_optimize_workflow(
             "Reply with the single word READY.",16,options.gpu_layers as u32,
             options.device.as_deref()
         ){
-            Ok(capture) if !capture.stdout.trim().is_empty()=>json!({
+            Ok(capture) if crate::smoke::matches_single_word_reply(&capture.stdout,"READY")=>json!({
                 "path":path,"status":"LOAD_AND_GENERATION_PASSED",
                 "backend":"llama-cli","device":options.device,
                 "gpu_layers":options.gpu_layers,
                 "captured_output_chars":capture.stdout.chars().count()
             }),
             Ok(_)=>json!({"path":path,"status":"LOAD_CHECK_FAILED",
-                "reason":"runtime exited but generated no response"}),
+                "reason":"runtime returned an empty or incorrect answer to the strict READY probe"}),
             Err(e)=>json!({"path":path,"status":"LOAD_CHECK_FAILED","reason":e.to_string()}),
         };
         if attempt["status"]=="LOAD_AND_GENERATION_PASSED"{

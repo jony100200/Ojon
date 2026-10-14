@@ -114,10 +114,30 @@ const MAX_TOTAL_LOG_BYTES: usize = 8 * 1024 * 1024;
 /// The callback must be cheap; GUI callers should forward events to a channel.
 /// Lines longer than MAX_LINE_BYTES are split into fragments to bound memory.
 /// Total display output is limited; conversion continues even after that limit.
-pub fn run_with_log<F>(cmd: &mut Command, mut emit: F) -> io::Result<()>
-where
-    F: FnMut(&str),
-{
+/// The default bound is 4 hours; users may explicitly configure a longer
+/// legitimate conversion via OJON_JOB_TIMEOUT_SECONDS (5..=86400).
+/// This is a local process limit, not a model performance estimate.
+pub fn run_with_log<F>(cmd: &mut Command, emit: F) -> io::Result<()>
+where F: FnMut(&str) {
+    let timeout=match std::env::var("OJON_JOB_TIMEOUT_SECONDS"){
+        Ok(raw)=>Duration::from_secs(raw.parse::<u64>()
+            .ok().filter(|seconds|(5..=86400).contains(seconds))
+            .ok_or_else(||io::Error::new(io::ErrorKind::InvalidInput,
+                "OJON_JOB_TIMEOUT_SECONDS must be 5..=86400"))?),
+        Err(std::env::VarError::NotPresent)=>Duration::from_secs(4*3600),
+        Err(e)=>return Err(io::Error::new(io::ErrorKind::InvalidInput,e)),
+    };
+    run_with_log_timeout(cmd,timeout,emit)
+}
+/// Bound even silent subprocesses. Timeout kills and reaps the selected
+/// direct child, closes the receiver and never claims successful output.
+pub fn run_with_log_timeout<F>(
+    cmd: &mut Command, timeout: Duration, mut emit: F
+) -> io::Result<()>
+where F: FnMut(&str) {
+    if timeout.is_zero(){return Err(io::Error::new(io::ErrorKind::InvalidInput,
+        "external backend timeout must be positive"));}
+    let started=Instant::now();
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -139,10 +159,27 @@ where
     // Drain both pipes until they close. Even after reaching the display cap,
     // keep consuming to avoid stalling the converter.
     let mut forwarded = 0usize;
-    for line in rx {
-        if forwarded < MAX_TOTAL_LOG_BYTES {
-            forwarded = forwarded.saturating_add(line.len());
-            emit(&line);
+    loop{
+        let remaining=timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero(){
+            let _=child.kill();
+            let _=child.wait();
+            drop(rx);
+            // Detached readers exit once the killed process closes its pipes;
+            // joining a pipe inherited by a grandchild would reintroduce a
+            // potentially unbounded wait on this error path.
+            return Err(io::Error::new(io::ErrorKind::TimedOut,
+                "external backend exceeded Ojon subprocess timeout"));
+        }
+        match rx.recv_timeout(remaining.min(Duration::from_millis(250))){
+            Ok(line)=>{
+                if forwarded < MAX_TOTAL_LOG_BYTES{
+                    forwarded=forwarded.saturating_add(line.len());
+                    emit(&line);
+                }
+            },
+            Err(mpsc::RecvTimeoutError::Timeout)=>continue,
+            Err(mpsc::RecvTimeoutError::Disconnected)=>break
         }
     }
 
@@ -203,6 +240,20 @@ fn read_pipe<R: io::Read>(input: R, tx: mpsc::SyncSender<String>, stream: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stalled_external_process_is_terminated(){
+        let mut command=if cfg!(windows){
+            let mut c=Command::new("powershell");
+            c.args(["-NoProfile","-Command","Start-Sleep -Seconds 5"]);c
+        }else{
+            let mut c=Command::new("sh");c.args(["-c","sleep 5"]);c
+        };
+        let started=Instant::now();
+        let error=run_with_log_timeout(&mut command,Duration::from_millis(200),|_|{})
+            .unwrap_err();
+        assert_eq!(error.kind(),io::ErrorKind::TimedOut);
+        assert!(started.elapsed()<Duration::from_secs(4));
+    }
     #[test]
     fn reports_failing_command_without_faking_success() {
         let mut command = if cfg!(windows) {

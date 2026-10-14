@@ -55,6 +55,15 @@ pub struct SmokeCapture {
     pub stderr: String,
 }
 
+/// Only exact one-word output is acceptable as evidence of compliance with
+/// an explicitly requested single-word runtime sentinel. A process exit or
+/// echoed prompt is never enough to mark guided load/generation as passing.
+pub fn matches_single_word_reply(output:&str,expected:&str)->bool{
+    !expected.is_empty()
+        &&expected.bytes().all(|b|b.is_ascii_uppercase()||b.is_ascii_digit()||b==b'_')
+        &&output.trim()==expected
+}
+
 /// Runs the installed CLI and captures its real output for the Kathamo Test pane.
 /// Keep token count small: Command::output buffers the child's output in RAM.
 pub fn smoke_gguf_capture(
@@ -109,4 +118,17 @@ pub fn smoke_gguf_capture_with_device(
         stdout: String::from_utf8_lossy(&result.stdout).chars().take(16_384).collect(),
         stderr: stderr.chars().take(4_096).collect(),
     })
+}
+
+#[cfg(test)]
+mod sentinel_tests{
+    use super::*;
+    #[test]
+    fn rejects_false_positive_runtime_outputs(){
+        assert!(matches_single_word_reply("READY\n","READY"));
+        assert!(!matches_single_word_reply("Reply READY","READY"));
+        assert!(!matches_single_word_reply("READY, but not quite","READY"));
+        assert!(!matches_single_word_reply("","READY"));
+        assert!(!matches_single_word_reply("READY",""));
+    }
 }

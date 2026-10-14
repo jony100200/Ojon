@@ -61,6 +61,12 @@ processes were started by that evaluation call and identify the selected
 server executable. This is process accounting, not measured inference speed. The local server is stopped after each
 model suite, and results still require held-out quality evidence.
 
+External converter subprocesses now have a bounded four-hour deadline
+(configurable with `OJON_JOB_TIMEOUT_SECONDS` from 5 to 86400 seconds);
+timeouts kill and reap the direct child and are never reported as success.
+Guided runtime smoke checks require the exact single-word READY sentinel,
+not just any nonempty text from a successful process.
+
 Backend detection is separate from capability verification: `ojon backends
 --probe --json` explicitly executes bounded `llama-cli --list-devices`,
 `llama-quantize --help`, and applicable backend help commands. The parsed
