@@ -3,7 +3,7 @@
 //! no heuristic guess is described as observed activation sensitivity.
 use crate::gguf::{inspect_gguf, inspect_gguf_tensors, read_imatrix_energy};
 use crate::llama::{prepare_gguf, quantize_gguf_with_log, Precision};
-use crate::task_eval::{prepare_eval, run_eval_reusing_baseline};
+use crate::task_eval::{prepare_eval_with_server, run_eval_reusing_baseline};
 use serde_json::{json,Value};
 use std::collections::{HashMap,HashSet};
 use std::fs::{self,OpenOptions};
@@ -23,7 +23,7 @@ pub struct TensorScore {pub name:String,pub elements:u64,pub sensitivity:f64}
 pub struct AdaptivePlan{
     pub source:PathBuf,pub scores_file:PathBuf,pub scores:Vec<TensorScore>,
     pub output_dir:PathBuf,pub suite:PathBuf,pub quantizer:PathBuf,
-    pub eval_tool:PathBuf,pub imatrix:Option<PathBuf>,pub targets:Vec<f64>,
+    pub eval_tool:PathBuf,pub server_tool:Option<PathBuf>,pub imatrix:Option<PathBuf>,pub targets:Vec<f64>,
     pub threads:usize,pub gpu_layers:i32,pub device:Option<String>,pub tokens:u32,
     pub max_absolute_loss_pct:f64,
     pub reference:PathBuf,
@@ -207,7 +207,7 @@ pub fn prepare_adaptive(
         }
     }
     Ok(AdaptivePlan{reference:source.clone(),source,scores_file,scores:parsed,output_dir,suite,
-        quantizer:quantizer.into(),eval_tool:eval_tool.into(),imatrix,targets:bits,
+        quantizer:quantizer.into(),eval_tool:eval_tool.into(),server_tool:None,imatrix,targets:bits,
         threads,gpu_layers,device:device.map(str::to_owned),tokens,max_absolute_loss_pct})
 }
 
@@ -232,6 +232,7 @@ impl AdaptivePlan{
             "sensitivity_verified_by_ojon":false,
             "output_dir":self.output_dir.to_string_lossy(),
             "suite":self.suite.to_string_lossy(),
+            "evaluation_server":self.server_tool.as_ref().map(|p|p.to_string_lossy().to_string()),
             "quality_reference":self.reference.to_string_lossy(),
             "targets":self.targets.iter().map(|&t|allocate_bits(&self.scores,t).unwrap_or(Value::Null)).collect::<Vec<_>>(),
             "default_format":"GGUF with upstream Q2_K through Q6_K tensor overrides",
@@ -297,7 +298,8 @@ pub fn run_adaptive(plan:&AdaptivePlan,mut log:impl FnMut(&str))->io::Result<Val
             Ok(done)=>{
                 let candidate=vec![(label.clone(),output.clone())];
                 let evaluated=(||{
-                    let test=prepare_eval(&plan.suite,&plan.reference,&candidate,&plan.eval_tool,
+                    let test=prepare_eval_with_server(&plan.suite,&plan.reference,&candidate,&plan.eval_tool,
+                    plan.server_tool.as_deref(),
                         plan.gpu_layers,plan.device.as_deref(),plan.tokens,&evidence)?;
                     run_eval_reusing_baseline(&test,baseline_tasks.as_ref(),|line|log(line))
                 })();

@@ -72,6 +72,8 @@ pub struct OptimizeWorkflowRequest {
     pub bench_generation_tokens:u32,
     pub bench_repetitions:u32,
     pub balanced_min_speed_ratio:f64,
+    /// Explicit persistent evaluator, if selected; None discovers installed server.
+    pub server_tool:Option<PathBuf>,
 }
 impl OptimizeWorkflowRequest{
     pub fn new(model:PathBuf)->Self{
@@ -81,7 +83,7 @@ impl OptimizeWorkflowRequest{
             goal:OptimizeGoal::Balanced,device:"auto".into(),runtime_device:None,gpu_layers:0,
             min_saving_percent:5.0,max_loss_points:0.0,
             precision_candidates:None,bench_prompt_tokens:512,bench_generation_tokens:128,
-            bench_repetitions:3,balanced_min_speed_ratio:0.85
+            bench_repetitions:3,balanced_min_speed_ratio:0.85,server_tool:None
         }
     }
 }
@@ -132,6 +134,7 @@ fn configured_options(input:&OptimizeWorkflowRequest,backends:&[FoundBackend])->
     options.precisions=precisions_for(input);
     if let Some(bin)=executable(backends,BackendId::LlamaQuantize){options.quantizer=bin;}
     if let Some(bin)=executable(backends,BackendId::LlamaCli){options.eval_tool=bin;}
+    options.server_tool=input.server_tool.clone().or_else(||executable(backends,BackendId::LlamaServer));
     options
 }
 
@@ -165,6 +168,9 @@ pub fn plan_optimize_workflow(
     if !input.max_ppl_regression_pct.is_finite()
         ||!(0.0..=100.0).contains(&input.max_ppl_regression_pct){
         return Err(invalid("maximum relative perplexity regression must be 0..100 percent"));
+    }
+    if input.server_tool.as_ref().is_some_and(|p|p.as_os_str().is_empty()){
+        return Err(invalid("persistent evaluator path cannot be empty"));
     }
     if input.candidates.len()>6{return Err(invalid("at most six existing candidate GGUFs"));}
     let formats=precisions_for(input);
@@ -477,6 +483,8 @@ pub fn plan_optimize_workflow(
         "recommended_command_argv":argv,
         "recommended_precision_order":formats.iter().map(|v|v.as_str()).collect::<Vec<_>>(),
         "precision_selection":if input.precision_candidates.is_some(){"user_configured"}else{"conservative_default"},
+        "evaluation_engine":if options.server_tool.is_some(){"persistent_llama_server"}else{"llama_cli_per_task"},
+        "evaluation_server_path":options.server_tool.as_ref().map(|p|path_text(p)),
         "benchmark_settings":{"prompt_tokens":input.bench_prompt_tokens,
             "generation_tokens":input.bench_generation_tokens,
             "repetitions":input.bench_repetitions,
@@ -582,10 +590,11 @@ pub fn run_optimize_workflow(
                 .ok_or_else(||invalid("adaptive workflow needs a current Q4 baseline"))?;
             let scores=request.tensor_sensitivity.as_ref()
                 .ok_or_else(||invalid("adaptive workflow needs sensitivity data"))?;
-            let plan=prepare_adaptive_against_reference(&request.model,baseline,scores,out,suite,
+            let mut plan=prepare_adaptive_against_reference(&request.model,baseline,scores,out,suite,
                 &options.quantizer,&options.eval_tool,options.imatrix.as_deref(),
                 &[3.0,3.5,4.0],options.threads,options.gpu_layers,
                 options.device.as_deref(),options.tokens,request.max_loss_points)?;
+            plan.server_tool=options.server_tool.clone();
             log("[ojon] Using existing adaptive allocator, Q4-referenced quality evaluation and tensor recipes");
             ("adaptive_quant_comparison",run_adaptive(&plan,|line|log(line))?)
         },
@@ -692,6 +701,8 @@ pub fn run_optimize_workflow(
         "model_source":request.model.to_string_lossy(),
         "goal":request.goal.label(),
         "quality_reference":decision["current_baseline"],
+        "evaluation_engine":if options.server_tool.is_some(){"persistent_llama_server"}else{"llama_cli_per_task"},
+        "evaluation_server_path":options.server_tool.as_ref().map(|p|path_text(p)),
         "backend_capability_evidence":{"quantizer":quantizer_evidence,
             "runtime_device":runtime_device_evidence},
         "source_provenance":{"source_path":request.model.to_string_lossy(),

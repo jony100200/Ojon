@@ -9,7 +9,7 @@
 use crate::gguf::{inspect_gguf, inspect_gguf_tensors};
 use crate::llama::{prepare_gguf, quantize_gguf_with_log, Precision};
 use crate::ppl::{measure as measure_perplexity, PplSettings};
-use crate::task_eval::{parse_eval_suite, prepare_eval, run_eval_reusing_baseline};
+use crate::task_eval::{parse_eval_suite, prepare_eval_with_server, run_eval_reusing_baseline};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -111,6 +111,7 @@ pub struct QuantParityOptions {
     pub imatrix:Option<PathBuf>,
     pub quantizer:PathBuf,
     pub eval_tool:PathBuf,
+    pub server_tool:Option<PathBuf>,
     pub threads:usize,
     pub max_buffer_mib:Option<u32>,
     pub gpu_layers:i32,
@@ -133,6 +134,7 @@ impl Default for QuantParityOptions {
             imatrix:None,
             quantizer:PathBuf::from("llama-quantize"),
             eval_tool:PathBuf::from("llama-cli"),
+            server_tool:None,
             threads:std::thread::available_parallelism().map(|n|n.get()).unwrap_or(4),
             max_buffer_mib:Some(512),
             gpu_layers:0,
@@ -168,6 +170,7 @@ impl QuantParityPlan{
             "imatrix":self.options.imatrix.as_ref().map(|p|p.to_string_lossy().to_string()),
             "quantizer":self.options.quantizer.to_string_lossy(),
             "eval_tool":self.options.eval_tool.to_string_lossy(),
+            "eval_server_tool":self.options.server_tool.as_ref().map(|p|p.to_string_lossy().to_string()),
             "max_buffer_mib":self.options.max_buffer_mib,
             "threads":self.options.threads,
             "gpu_layers":self.options.gpu_layers,
@@ -367,8 +370,8 @@ pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Res
         }
         let results=(||{
             let candidates=vec![(format!("smaller_{ordinal}"),output.clone())];
-            let eval=prepare_eval(&plan.suite,&plan.baseline,&candidates,
-                &plan.options.eval_tool,plan.options.gpu_layers,
+            let eval=prepare_eval_with_server(&plan.suite,&plan.baseline,&candidates,
+                &plan.options.eval_tool,plan.options.server_tool.as_deref(),plan.options.gpu_layers,
                 plan.options.device.as_deref(),plan.options.tokens,&evidence)?;
             run_eval_reusing_baseline(&eval,baseline_tasks.as_ref(),|line|log(line))
         })();

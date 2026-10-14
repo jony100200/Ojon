@@ -10,9 +10,10 @@ use std::path::{Path,PathBuf};
 use std::time::{SystemTime,UNIX_EPOCH};
 
 const MAX_SETTINGS_BYTES:usize=64*1024;
-const BACKENDS:[(&str,&str);11]=[
+const BACKENDS:[(&str,&str);12]=[
     ("llama_quantize","OJON_LLAMA_QUANTIZE"),
     ("llama_cli","OJON_LLAMA_CLI"),
+    ("llama_server","OJON_LLAMA_SERVER"),
     ("llama_bench","OJON_LLAMA_BENCH"),
     ("llama_perplexity","OJON_LLAMA_PERPLEXITY"),
     ("llama_imatrix","OJON_LLAMA_IMATRIX"),

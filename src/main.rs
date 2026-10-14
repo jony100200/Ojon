@@ -32,7 +32,7 @@ Commands:
   ojon backends --probe [--json]     Explicitly probe installed runtime device IDs and quantizer formats\n  ojon settings path|show|set <key> <value>|clear <key>   Manage local per-user preferences
   ojon probe <model-path> [--json]   Identify model format/family without loading weights
   ojon optimize-workflow-run <model-path> [--baseline Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--imatrix calibration.imatrix] [--tensor-sensitivity scores.json] [--ppl-corpus heldout.txt] [--max-ppl-regression-pct 0] [--goal balanced|smallest] --confirm [--json]
-  ojon optimize-workflow-plan <model-path> [--baseline current-Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--goal balanced|smallest|fastest] [--precisions IQ4_XS,Q3_K_M] [--bench-prompt-tokens 512] [--bench-gen-tokens 128] [--bench-repetitions 3] [--balanced-speed-ratio 0.85] [--device auto|cpu|cuda|xpu] [--runtime-device SYCL0|CUDA0] [--gpu-layers 99] [--min-saving-percent 5] [--max-loss-points 0] [--json]
+  ojon optimize-workflow-plan <model-path> [--baseline current-Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--server-tool path-to-llama-server] [--goal balanced|smallest|fastest] [--precisions IQ4_XS,Q3_K_M] [--bench-prompt-tokens 512] [--bench-gen-tokens 128] [--bench-repetitions 3] [--balanced-speed-ratio 0.85] [--device auto|cpu|cuda|xpu] [--runtime-device SYCL0|CUDA0] [--gpu-layers 99] [--min-saving-percent 5] [--max-loss-points 0] [--json]
   ojon optimize-plan <model-path> [--device auto|cpu|cuda|xpu] [--json]   Compare candidate routes without converting
   ojon resource-plan <model-path> <existing-output-parent> [--mode hqq|openvino|autoround|gguf|pack|exl3] [--device cpu|cuda|xpu|auto] [--json]
   ojon dataset-audit <dataset.jsonl> [--json]   Audit external dataset for drift, dead paths, staleness
@@ -1035,6 +1035,7 @@ fn run() -> io::Result<()> {
             let mut options=ojon_backend::QuantParityOptions::default();
             options.quantizer=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaQuantize,"llama-quantize")?;
             options.eval_tool=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaCli,"llama-cli")?;
+            options.server_tool=ojon_backend::discovered_path(BackendId::LlamaServer);
             options.ppl_tool=ojon_backend::discovery::resolve_backend_command(BackendId::LlamaPerplexity,"llama-perplexity")?;
             let(mut confirmed,mut json)=(false,false);
             while let Some(option)=args.next(){
@@ -1048,6 +1049,8 @@ fn run() -> io::Result<()> {
                         candidates.push((name.to_owned(),PathBuf::from(path)));
                     }
                     Some("--eval-tool")=>options.eval_tool=PathBuf::from(next_argument(&mut args,"llama-cli path")?),
+                    Some("--server-tool")=>options.server_tool=Some(
+                        PathBuf::from(next_argument(&mut args,"llama-server executable")?)),
                     Some("--gpu-layers")=>{
                         options.gpu_layers=next_argument(&mut args,"GPU layers")?.to_string_lossy()
                             .parse().map_err(|_|invalid("gpu-layers must be integer"))?;
@@ -1119,6 +1122,8 @@ fn run() -> io::Result<()> {
                     Some("--imatrix")=>options.imatrix=Some(PathBuf::from(next_argument(&mut args,"imatrix path")?)),
                     Some("--quantizer")=>options.quantizer=PathBuf::from(next_argument(&mut args,"llama-quantize path")?),
                     Some("--eval-tool")=>options.eval_tool=PathBuf::from(next_argument(&mut args,"llama-cli path")?),
+                    Some("--server-tool")=>options.server_tool=Some(
+                        PathBuf::from(next_argument(&mut args,"llama-server executable")?)),
                     Some("--threads")=>{
                         options.threads=next_argument(&mut args,"threads")?.to_string_lossy()
                             .parse().map_err(|_|invalid("threads must be an integer"))?;
@@ -1249,6 +1254,7 @@ fn run() -> io::Result<()> {
             let mut gpu_layers=0i32;
             let mut device:Option<String>=None;
             let mut tokens=128u32;
+            let mut server_tool=ojon_backend::discovered_path(BackendId::LlamaServer);
             let mut confirm=false;
             let mut json=false;
             while let Some(option)=args.next() {
@@ -1261,6 +1267,8 @@ fn run() -> io::Result<()> {
                         candidates.push((name.to_owned(),PathBuf::from(path)));
                     }
                     Some("--tool") => tool=PathBuf::from(next_argument(&mut args,"llama-cli executable")?),
+                    Some("--server-tool")=>server_tool=Some(PathBuf::from(
+                        next_argument(&mut args,"llama-server executable")?)),
                     Some("--gpu-layers") => gpu_layers=next_argument(&mut args,"GPU layer count")?.to_str()
                         .ok_or_else(||invalid("invalid layers"))?.parse().map_err(|_|invalid("invalid layers"))?,
                     Some("--device") => device=Some(next_argument(&mut args,"Vulkan2 or SYCL0")?
@@ -1273,7 +1281,9 @@ fn run() -> io::Result<()> {
                 }
             }
             let baseline=baseline.ok_or_else(||invalid("--baseline is required"))?;
-            let plan=prepare_eval(&suite,&baseline,&candidates,&tool,gpu_layers,device.as_deref(),tokens,&output)?;
+            let plan=ojon_backend::task_eval::prepare_eval_with_server(
+                &suite,&baseline,&candidates,&tool,server_tool.as_deref(),
+                gpu_layers,device.as_deref(),tokens,&output)?;
             if execute {
                 if !confirm{return Err(invalid("task evaluation loads real models; pass --confirm"));}
                 let result=run_eval(&plan,|line|eprintln!("{line}"))?;
@@ -1546,6 +1556,7 @@ fn run() -> io::Result<()> {
                 input.runtime_device=prefs.runtime_device.clone();
                 input.gpu_layers=prefs.gpu_layers as i32;
             }
+            input.server_tool=ojon_backend::discovered_path(BackendId::LlamaServer);
             let mut json=false;
             let mut confirmed=false;
             while let Some(option)=args.next(){
@@ -1560,6 +1571,8 @@ fn run() -> io::Result<()> {
                         if name.is_empty()||path.is_empty(){return Err(invalid("empty candidate label/path"));}
                         input.candidates.push((name.to_owned(),PathBuf::from(path)));
                     }
+                    Some("--server-tool")=>input.server_tool=Some(
+                        PathBuf::from(next_argument(&mut args,"local llama-server executable")?)),
                     Some("--suite")=>input.suite=Some(
                         PathBuf::from(next_argument(&mut args,"held-out task suite JSON")?)),
                     Some("--output-dir")=>input.output_dir=Some(

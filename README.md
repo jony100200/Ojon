@@ -46,6 +46,18 @@ class, concrete runtime device, offload layers and benchmark settings from
 the same local settings file. "Auto" remains CPU-safe; GPU selection still
 requires explicit physical device identification and preflight checks.
 
+Held-out task scoring now prefers a discovered, locally installed `llama-server`
+when available. Its loopback-only session loads each model once per suite
+instead of launching `llama-cli` for every task; the baseline is still
+evaluated once per matched experiment. Use `ojon settings set
+backend.llama_server /absolute/path/to/llama-server` to select a personal
+installation or `--server-tool` for an explicit per-run override.
+If no server is installed, the previous isolated llama-cli task evaluator
+remains available. A selected server that fails startup/completion is reported,
+never silently replaced. Evaluation receipts record their actual engine and
+reject cross-engine baseline reuse. The local server is stopped after each
+model suite, and results still require held-out quality evidence.
+
 Backend detection is separate from capability verification: `ojon backends
 --probe --json` explicitly executes bounded `llama-cli --list-devices`,
 `llama-quantize --help`, and applicable backend help commands. The parsed

@@ -26,6 +26,7 @@ pub enum Integration {
 pub enum BackendId {
     LlamaQuantize,
     LlamaCli,
+    LlamaServer,
     LlamaBench,
     LlamaPerplexity,
     LlamaImatrix,
@@ -48,7 +49,7 @@ pub struct BackendSpec {
     pub role: &'static str,
 }
 
-const SPECS: [BackendSpec; 11] = [
+const SPECS: [BackendSpec; 12] = [
     BackendSpec {
         id: BackendId::LlamaQuantize,
         name: "llama.cpp quantizer",
@@ -66,6 +67,15 @@ const SPECS: [BackendSpec; 11] = [
         website: "https://github.com/ggml-org/llama.cpp/releases",
         integration: Integration::Wired,
         role: "GGUF text-model inference smoke check",
+    },
+    BackendSpec {
+        id: BackendId::LlamaServer,
+        name: "llama.cpp persistent evaluation server",
+        executable_names: &["llama-server", "llama-server.exe"],
+        override_env: "OJON_LLAMA_SERVER",
+        website: "https://github.com/ggml-org/llama.cpp",
+        integration: Integration::Wired,
+        role: "Local loopback session, one GGUF load per held-out task suite",
     },
     BackendSpec {
         id: BackendId::LlamaBench,
@@ -346,7 +356,7 @@ fn probe_binary(found:&FoundBackend)->Value{
     let probe=match found.spec.id {
         BackendId::LlamaQuantize=>Some("--help"),
         BackendId::LlamaCli|BackendId::IntelSyclCli=>Some("--list-devices"),
-        BackendId::LlamaBench=>Some("--help"),
+        BackendId::LlamaBench|BackendId::LlamaServer=>Some("--help"),
         _=>None,
     };
     let Some(flag)=probe else {
@@ -362,7 +372,7 @@ fn probe_binary(found:&FoundBackend)->Value{
                 runtime_devices_from_list(&output)
             }else{Vec::new()};
             json!({"name":found.spec.name,"path":path.to_string_lossy(),
-                "status":if found.spec.id==BackendId::LlamaBench{
+                "status":if matches!(found.spec.id,BackendId::LlamaBench|BackendId::LlamaServer){
                     "HELP_OUTPUT_ONLY"
                 }else if (found.spec.id==BackendId::LlamaQuantize&&formats.is_empty())
                      ||(matches!(found.spec.id,BackendId::LlamaCli|BackendId::IntelSyclCli)

@@ -154,9 +154,9 @@ mod tests{
     use super::*;
     #[test]
     fn parser_accepts_chunked_and_content_length(){
-        let a=b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n{\"status\":\"ok\"}";
+        let a=b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"ok\"}";
         assert_eq!(body_from_http(a).unwrap().0,200);
-        let b=b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nD\r\n{\"status\":\"ok\"}\r\n0\r\n\r\n";
+        let b=b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nF\r\n{\"status\":\"ok\"}\r\n0\r\n\r\n";
         assert_eq!(body_from_http(b).unwrap().1,b"{\"status\":\"ok\"}");
         assert!(body_from_http(b"wrong").is_err());
     }

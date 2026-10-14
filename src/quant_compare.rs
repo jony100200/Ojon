@@ -3,7 +3,7 @@
 //! quantization process. Runtime tests run only with explicit confirmation.
 
 use crate::gguf::{inspect_gguf,inspect_gguf_tensors};
-use crate::task_eval::{parse_eval_suite,prepare_eval,run_eval_reusing_baseline};
+use crate::task_eval::{parse_eval_suite,prepare_eval_with_server,run_eval_reusing_baseline};
 use crate::quant_parity::{task_parity,vision_suite,vision_score,QuantParityOptions,VisionSuite};
 use crate::ppl::{measure as measure_perplexity,PplSettings};
 use serde_json::{json,Value};
@@ -155,8 +155,8 @@ pub fn run_existing_quant_comparison(
             plan.report.file_stem().and_then(|s|s.to_str()).unwrap_or("parity")));
         let test=(||{
             let v=vec![(label.clone(),path.clone())];
-            let prep=prepare_eval(&plan.suite,&plan.baseline,&v,&plan.options.eval_tool,
-                plan.options.gpu_layers,plan.options.device.as_deref(),plan.options.tokens,&evidence)?;
+            let prep=prepare_eval_with_server(&plan.suite,&plan.baseline,&v,&plan.options.eval_tool,
+                plan.options.server_tool.as_deref(),plan.options.gpu_layers,plan.options.device.as_deref(),plan.options.tokens,&evidence)?;
             run_eval_reusing_baseline(&prep,baseline_tasks.as_ref(),|msg|log(msg))
         })();
         let scored=match test {
