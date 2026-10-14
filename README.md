@@ -10,12 +10,32 @@ Ojon brings existing, independent model tools under one roof. Install only the p
 
 ## What works today
 
-### Automatic optimization front door (read-only)
+### Guided model optimization (Kathamo UI and Rust CLI)
 
-Ojon now offers a metadata-only decision layer for the Kathamo Optimize UI
-and agent clients. It inspects a selected model, current quantized quality
-baseline, available smaller GGUF candidates and held-out test suite, then
-identifies the **next valid existing command** without executing anything.
+Ojon provides a metadata-only decision layer and a separately approved CPU-only
+execution workflow. The **Kathamo desktop app** now defaults to the
+**Automatic Optimize** view; the existing quantization and inference controls
+remain under **Manual Tools**. The guided view inspects a selected model,
+current Q4 reference, optional smaller GGUF, held-out task suite and output
+folder to determine a valid next step **without running a model**.
+
+The interface has **Model & Tasks** and **Quality Controls** pages,
+followed by **Review & Run** and **Results & Logs**. Users must review
+a read-only plan and explicitly approve execution. Editing any input
+invalidates the prior approval; the Run button disappears until replanned.
+Quantization and task evaluation run in a background worker on CPU by default,
+reusing the existing Rust backend, not executing assembled shell strings.
+Real backend logs and candidate results are displayed without invented
+progress or performance measurements.
+
+**Guided limits:** current GUI supports one comparison candidate per run;
+the CLI supports up to six. The UI still needs a genuine held-out task suite
+and a current compressed Q4 reference (unless the selected model itself is
+the reference). Quantization from original F16/BF16 GGUF can search IQ4/IQ3
+when compatible tools, source, suite, disk/RAM policy and Q4 reference exist.
+No automatic dataset generation, automatic model downloads, large-model
+runtime-fit proof, VLM verification, resume/cancel or GPU availability
+guarantee is claimed. Those belong to the future integration milestone.
 
 ```powershell
 # Your current Q4 is the reference. Compare a smaller candidate when ready:
@@ -28,6 +48,7 @@ ojon optimize-workflow-plan 'D:\Models\original-F16.gguf' --baseline 'D:\Models\
 An approved CPU-only run uses the **same validated Rust adapters**, without executing a
 shell string. Both steps require a real held-out task suite and a current Q4 reference.
 The run does not overwrite originals or silently allocate a GPU.
+Comparison receipt filenames are allocated without overwriting earlier reports.
 
 ```powershell
 # First inspect the proposal (read-only):
