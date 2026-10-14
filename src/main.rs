@@ -30,6 +30,7 @@ Commands:
   ojon verify    <model.gguf>
   ojon backends [--json]     Detect installed engines and show official download links
   ojon probe <model-path> [--json]   Identify model format/family without loading weights
+  ojon optimize-workflow-run <model-path> [same options as optimize-workflow-plan] --confirm [--json]   Execute CPU-only quantization/evaluation with explicit approval
   ojon optimize-workflow-plan <model-path> [--baseline current-Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--goal balanced|smallest|fastest] [--device auto|cpu|cuda|xpu] [--min-saving-percent 5] [--max-loss-points 0] [--json]
   ojon optimize-plan <model-path> [--device auto|cpu|cuda|xpu] [--json]   Compare candidate routes without converting
   ojon resource-plan <model-path> <existing-output-parent> [--mode hqq|openvino|autoround|gguf|pack|exl3] [--device cpu|cuda|xpu|auto] [--json]
@@ -1477,10 +1478,12 @@ fn run() -> io::Result<()> {
                 println!("autoround_status: COMPLETED");
             }
         }
-        Some("optimize-workflow-plan") => {
+        Some("optimize-workflow-plan") | Some("optimize-workflow-run") => {
+            let execute=cmd=="optimize-workflow-run";
             let source=PathBuf::from(next_argument(&mut args,"model file or directory")?);
             let mut input=ojon_backend::OptimizeWorkflowRequest::new(source);
             let mut json=false;
+            let mut confirmed=false;
             while let Some(option)=args.next(){
                 match option.to_str(){
                     Some("--baseline")=>input.current_baseline=Some(
@@ -1513,12 +1516,30 @@ fn run() -> io::Result<()> {
                             .to_string_lossy().parse().map_err(|_|invalid("loss must be numeric"))?;
                     }
                     Some("--json")=>json=true,
-                    _=>return Err(invalid(format!("unknown workflow plan option: {}",
+                    Some("--confirm")=>confirmed=true,
+                    _=>return Err(invalid(format!("unknown workflow option: {}",
                         option.to_string_lossy()))),
                 }
             }
-            let plan=ojon_backend::plan_optimize_workflow(&input,&discover_backends())?;
-            if json{println!("{plan}");}
+            if confirmed && !execute{return Err(invalid("--confirm is only valid with optimize-workflow-run"));}
+            if execute && !confirmed{return Err(invalid("optimize-workflow-run requires --confirm"));}
+            let backends=discover_backends();
+            let plan=ojon_backend::plan_optimize_workflow(&input,&backends)?;
+            if execute {
+                if plan["ready_for_user_approved_execution"]!=true {
+                    return Err(invalid(format!("optimizer prerequisites not met: {}",plan["checks"])));
+                }
+                let result=ojon_backend::run_optimize_workflow(&input,&backends,true,
+                    |line|eprintln!("{line}"))?;
+                if json{println!("{result}");}
+                else{
+                    println!("operation: {}",result["route"]);
+                    println!("status: {}",result["status"]);
+                    println!("provisional_candidate: {}",result["provisional_candidate"]);
+                    println!("global_quality_equivalence: NOT_PROVEN");
+                    println!("details: {}",result["evidence"]);
+                }
+            } else if json{println!("{plan}");}
             else{
                 println!("model: {}",plan["model"]["source"]);
                 println!("goal: {} / device: {}",plan["goal"],plan["target_device"]);
