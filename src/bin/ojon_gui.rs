@@ -4,6 +4,7 @@
 
 use ojon_backend::{inspect_gguf, prepare_gguf, quantize_gguf_with_log, inspect_hf_folder, prepare_hf, quantize_hf_with_log, hf_python_path, smoke_gguf_capture, probe_model};
 use ojon_backend::{resource_plan, ResourceMode, prepare_bench, run_bench};
+use ojon_backend::{OptimizeWorkflowRequest, OptimizeGoal, plan_optimize_workflow, run_optimize_workflow};
 use ojon_backend::{GgufSummary, HfFolderInfo, ModelProbe, HfQuantizeResult, SmokeCapture, Precision, QuantizeResult, FoundBackend, BackendId, discover_backends, open_official_download_page};
 use std::path::{Path, PathBuf};
 use std::collections::VecDeque;
@@ -61,13 +62,19 @@ fn clipboard_text() -> Option<String> {
 fn clipboard_text() -> Option<String> { None }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Focus { Model, Output, Quantizer, Converter, Runtime, Benchmark, Prompt, GpuLayers }
+enum Focus {
+    Model, Output, Quantizer, Converter, Runtime, Benchmark, Prompt, GpuLayers,
+    OptBaseline, OptCandidate, OptSuite, OptOutput, OptImatrix, OptPpl,
+    OptMinSaving, OptMaxLoss, OptMaxPpl,
+}
 
 enum WorkerEvent {
     Inspected(Result<(GgufSummary, ModelProbe), String>),
     HfInspected(Result<(HfFolderInfo, ModelProbe), String>),
     StandaloneProbed(Result<ModelProbe, String>),
     Planned(Result<String, String>),
+    OptimizerPlan(OptimizeWorkflowRequest, Result<serde_json::Value,String>),
+    OptimizerRun(Result<serde_json::Value,String>),
     Quantized(Result<QuantizeResult, String>),
     HfQuantized(Result<HfQuantizeResult, String>),
     Smoke(Result<SmokeCapture, String>),
@@ -86,6 +93,20 @@ struct Workstation {
     gpu_layers: String,
     recipe: usize,
     format_tab: usize,
+    workspace_tab: usize,
+    optimize_settings_tab: usize,
+    opt_baseline: String,
+    opt_candidate: String,
+    opt_suite: String,
+    opt_output: String,
+    opt_imatrix: String,
+    opt_ppl: String,
+    opt_min_saving: String,
+    opt_max_loss: String,
+    opt_max_ppl: String,
+    opt_goal: usize,
+    opt_planned: Option<(OptimizeWorkflowRequest,serde_json::Value)>,
+    opt_result: Option<serde_json::Value>,
     focus: Option<Focus>,
     model: Option<GgufSummary>,
     hf_folder: Option<HfFolderInfo>,
@@ -152,6 +173,22 @@ impl Workstation {
             gpu_layers: "0".into(),
             recipe: 0,
             format_tab: 0,
+            workspace_tab: 0,
+            optimize_settings_tab: 0,
+            opt_baseline: String::new(),
+            opt_candidate: String::new(),
+            opt_suite: String::new(),
+            opt_output: Path::new(&output).parent()
+                .filter(|p|!p.as_os_str().is_empty())
+                .map(|p|p.to_string_lossy().into_owned()).unwrap_or_default(),
+            opt_imatrix: String::new(),
+            opt_ppl: String::new(),
+            opt_min_saving: "5".into(),
+            opt_max_loss: "0".into(),
+            opt_max_ppl: "0".into(),
+            opt_goal: 0,
+            opt_planned: None,
+            opt_result: None,
             focus: None,
             model: None,
             hf_folder: None,
@@ -227,6 +264,10 @@ impl Workstation {
         self.last_inference = None;
         self.inspected_source = None;
         self.last_output = None;
+        self.opt_planned = None;
+        self.opt_result = None;
+        self.opt_output = path.parent()
+            .map(|p|p.to_string_lossy().into_owned()).unwrap_or_default();
         self.status = "Model selected. Inspect it before converting.".into();
         self.needs_redraw = true;
         self.start_inspect();
@@ -322,40 +363,96 @@ impl Workstation {
             let _ = tx.send(WorkerEvent::Planned(res));
         });
     }
+    /// Read-only settings capture. The visual inputs are simple model-independent
+    /// strings; this converts them to a strongly validated backend request.
+    fn optimize_request(&self) -> Result<OptimizeWorkflowRequest,String> {
+        let source=self.source.trim();
+        if source.is_empty(){return Err("Choose a model first".into());}
+        let mut req=OptimizeWorkflowRequest::new(PathBuf::from(source));
+        req.goal=if self.opt_goal==1 {OptimizeGoal::Smallest}else{OptimizeGoal::Balanced};
+        req.device="cpu".into();
+        let baseline=self.opt_baseline.trim();
+        if !baseline.is_empty(){req.current_baseline=Some(PathBuf::from(baseline));}
+        let candidate=self.opt_candidate.trim();
+        if !candidate.is_empty(){req.candidates.push(("smaller".into(),PathBuf::from(candidate)));}
+        let suite=self.opt_suite.trim();
+        if !suite.is_empty(){req.suite=Some(PathBuf::from(suite));}
+        let output=self.opt_output.trim();
+        if !output.is_empty(){
+            req.output_dir=Some(PathBuf::from(output));
+        }else{
+            req.output_dir=Path::new(source).parent().map(Path::to_path_buf);
+        }
+        let imatrix=self.opt_imatrix.trim();
+        if !imatrix.is_empty(){req.imatrix=Some(PathBuf::from(imatrix));}
+        let ppl=self.opt_ppl.trim();
+        if !ppl.is_empty(){req.ppl_corpus=Some(PathBuf::from(ppl));}
+        req.min_saving_percent=self.opt_min_saving.trim().parse()
+            .map_err(|_|"Minimum size reduction must be a number from 0 to 95".to_owned())?;
+        req.max_loss_points=self.opt_max_loss.trim().parse()
+            .map_err(|_|"Allowed task score loss must be a number from 0 to 100".to_owned())?;
+        req.max_ppl_regression_pct=self.opt_max_ppl.trim().parse()
+            .map_err(|_|"Allowed PPL regression must be a number from 0 to 100".to_owned())?;
+        Ok(req)
+    }
     fn start_optimizer_advice(&mut self) {
-        if self.busy { return; }
-        if self.inspected_source.as_deref()!=Some(self.source.as_str()) || self.source.trim().is_empty(){
-            self.status="Inspect model metadata first. The optimization assistant will not load any weights.".into();
+        if self.busy{return;}
+        if self.inspected_source.as_deref()!=Some(self.source.as_str()) {
+            self.status="Inspect the currently selected model before planning optimization.".into();
             self.needs_redraw=true;
             return;
         }
-        let model=PathBuf::from(self.source.trim());
-        let output=self.output.clone();
+        let request=match self.optimize_request(){
+            Ok(v)=>v,
+            Err(e)=>{self.status=format!("Optimizer settings: {e}");self.needs_redraw=true;return;}
+        };
         let tools=self.backends.clone();
         let tx=self.tx.clone();
+        self.opt_planned=None;
+        self.opt_result=None;
         self.busy=true;
         self.started_at=Some(Instant::now());
-        self.status="Finding next supported optimization step (metadata only; GPU not used)...".into();
+        self.status="Planning optimal quantization route (read-only; no model weights or GPU)".into();
         self.needs_redraw=true;
-        std::thread::spawn(move || {
-            let mut request=ojon_backend::OptimizeWorkflowRequest::new(model);
-            let dest=Path::new(output.trim());
-            let parent=dest.parent().filter(|p|!p.as_os_str().is_empty())
-                .unwrap_or(Path::new("."));
-            if parent.is_dir() {request.output_dir=Some(parent.to_path_buf());}
-            let result=ojon_backend::plan_optimize_workflow(&request,&tools)
-                .map(|plan|{
-                    let route=plan["route"].as_str().unwrap_or("not_available");
-                    let step=plan["next_user_step"].as_str()
-                        .unwrap_or("Choose an original high-precision model and a tested quantization format");
-                    let blockers=plan["checks"].as_array()
-                        .map(|checks|checks.iter()
-                            .filter_map(|v|v.as_str()).take(2)
-                            .collect::<Vec<_>>().join(" | "))
-                        .unwrap_or_default();
-                    format!("Ojon advisor [{route}]: {step}. {blockers}. Read-only: no quantization, GPU allocation, quality claim or file writes.")
-                }).map_err(|e|e.to_string());
-            let _=tx.send(WorkerEvent::Planned(result));
+        std::thread::spawn(move||{
+            let result=plan_optimize_workflow(&request,&tools).map_err(|e|e.to_string());
+            let _=tx.send(WorkerEvent::OptimizerPlan(request,result));
+        });
+    }
+    fn start_optimizer_run(&mut self){
+        if self.busy{return;}
+        if self.inspected_source.as_deref()!=Some(self.source.as_str()){
+            self.status="Inspect this model before running an optimizer.".into();
+            self.needs_redraw=true;return;
+        }
+        let request=match self.optimize_request(){
+            Ok(v)=>v,
+            Err(e)=>{self.status=format!("Optimizer settings: {e}");self.needs_redraw=true;return;}
+        };
+        let approved=matches!(self.opt_planned.as_ref(),
+            Some((planned,value)) if *planned==request && value["ready_for_user_approved_execution"]==true);
+        if !approved {
+            self.status="Settings changed or prerequisites are missing. Review a fresh plan before approving execution.".into();
+            self.opt_planned=None;
+            self.needs_redraw=true;
+            return;
+        }
+        let tools=self.backends.clone();
+        let tx=self.tx.clone();
+        self.opt_planned=None; // one approved action per plan; never double-start
+        self.opt_result=None;
+        self.log_tail.clear();
+        self.started_at=Some(Instant::now());
+        self.last_elapsed=None;
+        self.busy=true;
+        self.status="User-approved optimization running on CPU; actual backend logs below.".into();
+        self.needs_redraw=true;
+        std::thread::spawn(move||{
+            let logs=tx.clone();
+            let result=run_optimize_workflow(&request,&tools,true,|line|{
+                let _=logs.send(WorkerEvent::Log(line.to_owned()));
+            }).map_err(|e|e.to_string());
+            let _=tx.send(WorkerEvent::OptimizerRun(result));
         });
     }
     fn ready_to_convert(&self) -> bool {
@@ -514,6 +611,31 @@ impl Workstation {
                     self.model = None;
                     self.status = format!("Inspection failed: {e}");
                 }
+                WorkerEvent::OptimizerPlan(request,Ok(value))=>{
+                    let route=value["route"].as_str().unwrap_or("unknown");
+                    let step=value["next_user_step"].as_str().unwrap_or("See prerequisites");
+                    let ready=value["ready_for_user_approved_execution"]==true;
+                    self.status=format!("Optimization plan [{route}]: {step}. {}",
+                        if ready {"Review settings and approve a real CPU run."}
+                        else {"Prerequisites not yet satisfied."});
+                    self.opt_planned=Some((request,value));
+                }
+                WorkerEvent::OptimizerPlan(_,Err(e))=>{
+                    self.opt_planned=None;
+                    self.status=format!("Optimization plan blocked: {e}");
+                }
+                WorkerEvent::OptimizerRun(Ok(value))=>{
+                    let pass=value["status"].as_str()==Some("PROVISIONAL_CANDIDATE_FOUND");
+                    self.status=if pass{
+                        "Measured candidate passed the selected gates. Verify speed, hardware loading and broader tasks before use.".into()
+                    }else{
+                        "Experiment finished, but no candidate passed the selected quality/size gates.".into()
+                    };
+                    self.opt_result=Some(value);
+                }
+                WorkerEvent::OptimizerRun(Err(e))=>{
+                    self.status=format!("Optimization failed: {e}");
+                }
                 WorkerEvent::Planned(Ok(text)) => self.status = text,
                 WorkerEvent::Planned(Err(e)) => self.status = format!("Preflight failed: {e}"),
                 WorkerEvent::Quantized(Ok(done)) => {
@@ -565,6 +687,15 @@ impl Workstation {
             Focus::Benchmark => &mut self.benchmark,
             Focus::Prompt => &mut self.prompt,
             Focus::GpuLayers => &mut self.gpu_layers,
+            Focus::OptBaseline => &mut self.opt_baseline,
+            Focus::OptCandidate => &mut self.opt_candidate,
+            Focus::OptSuite => &mut self.opt_suite,
+            Focus::OptOutput => &mut self.opt_output,
+            Focus::OptImatrix => &mut self.opt_imatrix,
+            Focus::OptPpl => &mut self.opt_ppl,
+            Focus::OptMinSaving => &mut self.opt_min_saving,
+            Focus::OptMaxLoss => &mut self.opt_max_loss,
+            Focus::OptMaxPpl => &mut self.opt_max_ppl,
         };
         if self.control_held {
             if let Key::Character(ref key) = event.logical_key {
@@ -617,6 +748,20 @@ impl Workstation {
         let gpu_layers = &mut self.gpu_layers;
         let recipe = &mut self.recipe;
         let format_tab = &mut self.format_tab;
+        let workspace_tab=&mut self.workspace_tab;
+        let optimize_settings_tab=&mut self.optimize_settings_tab;
+        let opt_baseline=&mut self.opt_baseline;
+        let opt_candidate=&mut self.opt_candidate;
+        let opt_suite=&mut self.opt_suite;
+        let opt_output=&mut self.opt_output;
+        let opt_imatrix=&mut self.opt_imatrix;
+        let opt_ppl=&mut self.opt_ppl;
+        let opt_min_saving=&mut self.opt_min_saving;
+        let opt_max_loss=&mut self.opt_max_loss;
+        let opt_max_ppl=&mut self.opt_max_ppl;
+        let opt_goal=&mut self.opt_goal;
+        let opt_planned=self.opt_planned.as_ref();
+        let opt_result=self.opt_result.as_ref();
         let model = if source_is_current { self.model.as_ref() } else { None };
         let hf_folder = if source_is_current { self.hf_folder.as_ref() } else { None };
         let model_probe = if source_is_current { self.probe.as_ref() } else { None };
@@ -631,7 +776,8 @@ impl Workstation {
         let mut rescan = false;
         let mut download: Option<BackendId> = None;
         let mut new_focus = self.focus;
-        let (mut inspect, mut plan, mut advise, mut convert, mut smoke, mut bench) = (false, false, false, false, false, false);
+        let (mut inspect, mut plan, mut advise, mut opt_run, mut convert, mut smoke, mut bench) =
+            (false, false, false, false, false, false, false);
         {
             let mut ui = KathamoUi::new(&mut cmds, &mut self.icons, &palette, viewport, click_pointer);
 
@@ -760,6 +906,137 @@ impl Workstation {
                             }
                         });
                     } else {
+                        col.card(54.0, |bar|{
+                            bar.tabs(&["Automatic Optimize","Manual Tools"], workspace_tab);
+                        });
+                        if *workspace_tab==0 {
+                            col.glass_card(414.0, |card|{
+                                card.heading("02   AUTOMATIC MODEL OPTIMIZATION");
+                                card.label("Find a smaller GGUF without measured task regression.");
+                                card.tabs(&["Model & Tasks","Quality Controls"], optimize_settings_tab);
+                                if *optimize_settings_tab==0 {
+                                    card.label("Current Q4 reference GGUF (leave blank if selected model is Q4)");
+                                    if card.text_input(opt_baseline,"Q4 baseline GGUF path...").clicked(){
+                                        new_focus=Some(Focus::OptBaseline);
+                                    }
+                                    card.label("Held-out coding, reasoning and tool-use suite (required)");
+                                    if card.text_input(opt_suite,"Task suite JSON path...").clicked(){
+                                        new_focus=Some(Focus::OptSuite);
+                                    }
+                                    card.label("Existing smaller GGUF to compare (optional)");
+                                    if card.text_input(opt_candidate,"Smaller GGUF path; omit to quantize original...").clicked(){
+                                        new_focus=Some(Focus::OptCandidate);
+                                    }
+                                    card.label("Results directory (must already exist)");
+                                    if card.text_input(opt_output,"Folder for new models and reports...").clicked(){
+                                        new_focus=Some(Focus::OptOutput);
+                                    }
+                                    card.label("Goal");
+                                    card.dropdown("Optimize for",opt_goal,&[
+                                        "Balanced: protect quality","Smallest: stronger compression"
+                                    ]);
+                                }else{
+                                    card.label("Importance matrix from separate calibration (optional)");
+                                    if card.text_input(opt_imatrix,"Calibration imatrix path...").clicked(){
+                                        new_focus=Some(Focus::OptImatrix);
+                                    }
+                                    card.label("Independent held-out perplexity corpus (recommended)");
+                                    if card.text_input(opt_ppl,"PPL corpus text path...").clicked(){
+                                        new_focus=Some(Focus::OptPpl);
+                                    }
+                                    card.label("Minimum file saving, percent");
+                                    if card.text_input(opt_min_saving,"Default: 5").clicked(){
+                                        new_focus=Some(Focus::OptMinSaving);
+                                    }
+                                    card.label("Maximum task score loss, percentage points");
+                                    if card.text_input(opt_max_loss,"Default: 0").clicked(){
+                                        new_focus=Some(Focus::OptMaxLoss);
+                                    }
+                                    card.label("Maximum PPL regression, percent (when enabled)");
+                                    if card.text_input(opt_max_ppl,"Default: 0").clicked(){
+                                        new_focus=Some(Focus::OptMaxPpl);
+                                    }
+                                }
+                                card.label("CPU-only default; other backends require explicit verified hardware setup.");
+                            });
+                            col.card(266.0, |card|{
+                                card.heading("03   REVIEW, APPROVE & RESULTS");
+                                if card.button_secondary("1. Inspect Optimization Plan (No GPU)").clicked(){
+                                    advise=true;
+                                }
+                                let preview=opt_planned.map(|(req,plan)|{
+                                    let editable=Path::new(source.trim())==req.model.as_path()
+                                        && opt_goal.eq(&if req.goal==OptimizeGoal::Smallest{1usize}else{0usize})
+                                        && opt_baseline.trim()==req.current_baseline.as_ref()
+                                            .map(|x|x.to_string_lossy().to_string()).unwrap_or_default()
+                                        && opt_candidate.trim()==req.candidates.first()
+                                            .map(|x|x.1.to_string_lossy().to_string()).unwrap_or_default()
+                                        && opt_suite.trim()==req.suite.as_ref()
+                                            .map(|x|x.to_string_lossy().to_string()).unwrap_or_default()
+                                        && opt_output.trim()==req.output_dir.as_ref()
+                                            .map(|x|x.to_string_lossy().to_string()).unwrap_or_default()
+                                        && opt_imatrix.trim()==req.imatrix.as_ref()
+                                            .map(|x|x.to_string_lossy().to_string()).unwrap_or_default()
+                                        && opt_ppl.trim()==req.ppl_corpus.as_ref()
+                                            .map(|x|x.to_string_lossy().to_string()).unwrap_or_default()
+                                        && opt_min_saving.trim()==req.min_saving_percent.to_string()
+                                        && opt_max_loss.trim()==req.max_loss_points.to_string()
+                                        && opt_max_ppl.trim()==req.max_ppl_regression_pct.to_string();
+                                    (plan,editable)
+                                });
+                                if let Some((review,unchanged))=preview {
+                                    let route=review["route"].as_str().unwrap_or("unknown");
+                                    let valid=review["ready_for_user_approved_execution"]==true;
+                                    card.status_pill(
+                                        if valid&&unchanged{"Plan ready for approval"}
+                                        else if !unchanged {"Settings edited; replan required"}
+                                        else {"Requirements missing"},
+                                        valid&&unchanged);
+                                    card.label(&format!("Route: {route}"));
+                                    if let Some(step)=review["next_user_step"].as_str(){
+                                        card.label(&step.chars().take(100).collect::<String>());
+                                    }
+                                    for note in review["checks"].as_array().into_iter().flatten().take(2){
+                                        if let Some(reason)=note.as_str(){
+                                            card.label(&reason.chars().take(92).collect::<String>());
+                                        }
+                                    }
+                                    if valid&&unchanged && !busy {
+                                        if card.button("2. Approve & Run Real CPU Optimization").clicked(){
+                                            opt_run=true;
+                                        }
+                                    }
+                                }else{
+                                    card.label("Review a read-only plan before any quantization or inference.");
+                                }
+                                if busy {
+                                    card.label("CPU work in progress; no estimated completion percentage.");
+                                    for line in log_tail.iter().rev().take(2){
+                                        card.label(&line.chars().take(92).collect::<String>());
+                                    }
+                                }
+                                if let Some(result)=opt_result {
+                                    let passed=result["status"].as_str()==Some("PROVISIONAL_CANDIDATE_FOUND");
+                                    card.status_pill(
+                                        if passed {"Provisional model passed selected gates"}
+                                        else {"No model passed selected gates"}, passed);
+                                    let chosen=&result["provisional_candidate"];
+                                    let candidate=chosen.as_str()
+                                        .or_else(||chosen["path"].as_str()).unwrap_or("None");
+                                    card.label(&format!("Candidate: {}",candidate.chars().take(92).collect::<String>()));
+                                    let evidence=&result["evidence"];
+                                    for item in evidence["results"].as_array().into_iter().flatten().take(3){
+                                        let name=item["name"].as_str()
+                                            .or_else(||item["type"].as_str()).unwrap_or("candidate");
+                                        let status=item["status"].as_str().unwrap_or("unknown");
+                                        let savings=item["savings_pct"].as_f64();
+                                        card.label(&format!("{name}: {status}; saving {}",
+                                            savings.map(|v|format!("{v:.1}%")).unwrap_or_else(||"unmeasured".into())));
+                                    }
+                                    card.label("Evidence is task-specific; speed and full hardware fit unverified.");
+                                }
+                            });
+                        }else{
                         col.glass_card(320.0, |card| {
                             card.heading("02   CONFIGURE QUANTIZATION");
                             let formats = ["GGUF (llama.cpp)", "FP8 (TensorRT)", "AWQ (AutoAWQ)", "EXL2 (ExLlamaV2)"];
@@ -858,6 +1135,7 @@ impl Workstation {
                                 card.label(&line.chars().take(88).collect::<String>());
                             }
                         });
+                        }
                     }
                 },
             );
@@ -882,6 +1160,7 @@ impl Workstation {
         if inspect { self.start_inspect(); }
         else if plan { self.start_plan(); }
         else if advise { self.start_optimizer_advice(); }
+        else if opt_run { self.start_optimizer_run(); }
         else if convert { self.start_quantize(); }
         else if smoke { self.start_smoke(); }
         else if bench { self.start_bench(); }
