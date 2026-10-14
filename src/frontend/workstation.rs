@@ -1351,6 +1351,8 @@ impl Workstation {
                                                 .unwrap_or_else(||"unmeasured".into());
                                             card.label(&format!("{name}: {state}; file saving {saving}"));
                                         }
+                                        card.label(&format!("Evaluation engine: {}",
+                                            result["evaluation_engine"].as_str().unwrap_or("not reported")));
                                         let load=&result["selected_candidate_runtime_load"];
                                         card.label(&format!("Backend load: {}",load["status"].as_str().unwrap_or("not tested")));
                                         let count=result["candidate_load_attempts"].as_array().map_or(0,|v|v.len());

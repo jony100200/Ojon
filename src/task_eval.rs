@@ -216,7 +216,18 @@ pub(crate) fn run_eval_reusing_baseline(
     let modified=meta.modified().ok()
         .and_then(|t|t.duration_since(UNIX_EPOCH).ok())
         .map(|d|d.as_nanos().to_string());
+    let server_binary=match plan.server_tool.as_ref(){
+        Some(path)=>{
+            let metadata=fs::metadata(path)?;
+            let mtime=metadata.modified().ok()
+                .and_then(|time|time.duration_since(UNIX_EPOCH).ok())
+                .map(|elapsed|elapsed.as_nanos().to_string());
+            Some(json!({"bytes":metadata.len(),"modified_ns":mtime}))
+        },
+        None=>None
+    };
     let config=json!({"tool":plan.tool.to_string_lossy(),
+        "server_binary_file_metadata":server_binary,
         "server_tool":plan.server_tool.as_ref().map(|p|p.to_string_lossy().to_string()),
         "evaluation_mode":if plan.server_tool.is_some(){"persistent_llama_server"}else{"llama_cli_per_task"},
         "gpu_layers":plan.gpu_layers,"device":plan.device,
@@ -247,6 +258,10 @@ pub(crate) fn run_eval_reusing_baseline(
         "schema":"ojon.quality_evidence.v1","evaluation_suite":plan.suite.id,
         "evaluation_config":config,"baseline_reused":prior.is_some(),
         "model_load_policy":if plan.server_tool.is_some(){"one_server_per_model_per_suite"}else{"cli_per_task"},
+        "new_model_processes_launched":if plan.server_tool.is_some(){
+            if prior.is_some(){plan.candidates.len()}else{plan.candidates.len()+1}
+        }else if prior.is_some(){plan.candidates.len()*plan.suite.tasks.len()}
+            else{(plan.candidates.len()+1)*plan.suite.tasks.len()},
         "baseline":{"model":plan.baseline.to_string_lossy(),"metrics":baseline["metrics"],"tests":baseline},
         "requirements":requirements,
         "candidates":candidates,"detailed_candidate_results":details,

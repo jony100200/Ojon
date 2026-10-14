@@ -172,6 +172,13 @@ pub fn plan_optimize_workflow(
     if input.server_tool.as_ref().is_some_and(|p|p.as_os_str().is_empty()){
         return Err(invalid("persistent evaluator path cannot be empty"));
     }
+    // A previously chosen server missing from disk is NOT permission to use
+    // an unrelated llama-cli backend without informing the user.
+    if backends.iter().any(|b|b.spec.id==BackendId::LlamaServer
+        &&b.executable.is_none()
+        &&matches!(b.found_via,Some("local settings file"|"explicit environment override"|"Kathamo selected executable"))){
+        return Err(invalid("configured persistent evaluator is missing; repair or clear its local path"));
+    }
     if input.candidates.len()>6{return Err(invalid("at most six existing candidate GGUFs"));}
     let formats=precisions_for(input);
     if formats.is_empty()||formats.len()>6{
