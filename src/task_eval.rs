@@ -1,4 +1,4 @@
-//! Real deterministic GGUF task comparison using installed llama-cli.
+//! Real deterministic GGUF task comparison using either llama-cli or persistent local llama-server.
 //! Strict text/JSON answers; generated code is never executed.
 use crate::gguf::inspect_gguf;
 use serde_json::{json, Value};
@@ -74,7 +74,9 @@ fn answer_matches(task:&EvalTask,answer:&str)->bool {
 pub struct EvalPlan {
     pub suite:EvalSuite,pub baseline:PathBuf,pub candidates:Vec<(String,PathBuf)>,
     pub tool:PathBuf,pub gpu_layers:i32,pub device:Option<String>,
-    pub tokens:u32,pub report:PathBuf
+    pub tokens:u32,pub report:PathBuf,
+    /// When present, keep each model loaded for all suite prompts.
+    pub server_tool:Option<PathBuf>
 }
 fn checked_model(path:&Path)->io::Result<PathBuf> {
     let path=path.canonicalize()?;let info=inspect_gguf(&path)?;
@@ -87,12 +89,22 @@ pub fn prepare_eval(
     suite:&Path,baseline:&Path,candidates:&[(String,PathBuf)],tool:&Path,
     gpu_layers:i32,device:Option<&str>,tokens:u32,report:&Path
 )->io::Result<EvalPlan>{
+    prepare_eval_with_server(suite,baseline,candidates,tool,None,
+        gpu_layers,device,tokens,report)
+}
+pub fn prepare_eval_with_server(
+    suite:&Path,baseline:&Path,candidates:&[(String,PathBuf)],tool:&Path,
+    server_tool:Option<&Path>,gpu_layers:i32,device:Option<&str>,tokens:u32,report:&Path
+)->io::Result<EvalPlan>{
     let suite=parse_eval_suite(suite)?;
     if candidates.is_empty()||candidates.len()>12{return Err(invalid("require 1..=12 candidates"));}
     if !(1..=1024).contains(&tokens)||!(-1..=512).contains(&gpu_layers){
         return Err(invalid("tokens or GPU layer count out of range"));
     }
     if tool.as_os_str().is_empty(){return Err(invalid("llama-cli required"));}
+    if server_tool.is_some_and(|p|p.as_os_str().is_empty()){
+        return Err(invalid("llama-server executable cannot be empty"));
+    }
     if let Some(d)=device{
         if d.is_empty()||d.len()>80||!d.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_'||b==b'-'||b==b'/'){
             return Err(invalid("invalid device"));
@@ -117,14 +129,18 @@ pub fn prepare_eval(
     let report=parent.join(report.file_name().ok_or_else(||invalid("missing filename"))?);
     if report.symlink_metadata().is_ok(){return Err(io::Error::new(ErrorKind::AlreadyExists,"report exists"));}
     Ok(EvalPlan{suite,baseline,candidates:verified,tool:tool.into(),
-        gpu_layers,device:device.map(str::to_owned),tokens,report})
+        gpu_layers,device:device.map(str::to_owned),tokens,report,
+        server_tool:server_tool.map(Path::to_path_buf)})
 }
 impl EvalPlan {
     pub fn as_json(&self)->Value{
         json!({"schema":"ojon.task_eval_plan.v1","suite":self.suite.id,"tasks":self.suite.tasks.len(),
           "baseline":self.baseline.to_string_lossy(),
           "candidates":self.candidates.iter().map(|(name,path)|json!({"name":name,"path":path.to_string_lossy()})).collect::<Vec<_>>(),
-          "tool":self.tool.to_string_lossy(),"gpu_layers":self.gpu_layers,
+          "tool":self.tool.to_string_lossy(),
+          "evaluation_mode":if self.server_tool.is_some(){"persistent_llama_server"}else{"llama_cli_per_task"},
+          "server_tool":self.server_tool.as_ref().map(|p|p.to_string_lossy().to_string()),
+          "gpu_layers":self.gpu_layers,
           "device":self.device,"tokens":self.tokens,"output":self.report.to_string_lossy(),
           "status":"PLAN_ONLY","quality_scope":"deterministic exact/json functional tests, NOT general intelligence"})
     }
@@ -155,9 +171,20 @@ fn metric_key(category:&str)->&'static str{
 }
 fn evaluate_one(plan:&EvalPlan,model:&Path,log:&mut impl FnMut(&str))->io::Result<Value>{
     let mut counts=[0usize;3];let mut passed=[0usize;3];let mut detail=Vec::new();
+    // One runtime process per model, rather than one expensive model reload
+    // for every task. Baseline results are still reused across candidate calls.
+    let mut session=match plan.server_tool.as_deref(){
+        Some(server)=>Some(crate::eval_session::EvalSession::launch(
+            server,model,plan.gpu_layers,plan.device.as_deref())?),
+        None=>None,
+    };
     for task in &plan.suite.tasks {
         log(&format!("[ojon] {} — {}",model.display(),task.id));
-        let (answer,seconds)=execute_task(plan,model,task)?;
+        let (answer,seconds)=if let Some(session)=session.as_mut(){
+            let started=Instant::now();
+            let answer=session.completion(&task.prompt,plan.tokens)?;
+            (answer,started.elapsed().as_secs_f64())
+        }else{execute_task(plan,model,task)?};
         let correct=answer_matches(task,&answer);
         let idx=match task.category.as_str(){"coding"=>0,"reasoning"=>1,_=>2};
         counts[idx]+=1;if correct{passed[idx]+=1;}
@@ -190,6 +217,8 @@ pub(crate) fn run_eval_reusing_baseline(
         .and_then(|t|t.duration_since(UNIX_EPOCH).ok())
         .map(|d|d.as_nanos().to_string());
     let config=json!({"tool":plan.tool.to_string_lossy(),
+        "server_tool":plan.server_tool.as_ref().map(|p|p.to_string_lossy().to_string()),
+        "evaluation_mode":if plan.server_tool.is_some(){"persistent_llama_server"}else{"llama_cli_per_task"},
         "gpu_layers":plan.gpu_layers,"device":plan.device,
         "tokens":plan.tokens,"task_count":plan.suite.tasks.len(),
         "suite_fingerprint_noncrypto":fingerprint.finish(),
@@ -217,6 +246,7 @@ pub(crate) fn run_eval_reusing_baseline(
     let result=json!({
         "schema":"ojon.quality_evidence.v1","evaluation_suite":plan.suite.id,
         "evaluation_config":config,"baseline_reused":prior.is_some(),
+        "model_load_policy":if plan.server_tool.is_some(){"one_server_per_model_per_suite"}else{"cli_per_task"},
         "baseline":{"model":plan.baseline.to_string_lossy(),"metrics":baseline["metrics"],"tests":baseline},
         "requirements":requirements,
         "candidates":candidates,"detailed_candidate_results":details,
