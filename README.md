@@ -53,7 +53,8 @@ evaluated once per matched experiment. Use `ojon settings set
 backend.llama_server /absolute/path/to/llama-server` to select a personal
 installation or `--server-tool` for an explicit per-run override.
 If no server is installed, the previous isolated llama-cli task evaluator
-remains available. A selected server that fails startup/completion is reported,
+remains available. Kathamo's Search & Bench page can select a persistent
+server executable; the same path can be saved as a local preference. A selected server that fails startup/completion is reported,
 never silently replaced. Evaluation receipts record their actual engine and
 reject cross-engine baseline reuse. The local server is stopped after each
 model suite, and results still require held-out quality evidence.

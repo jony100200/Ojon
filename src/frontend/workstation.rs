@@ -66,7 +66,7 @@ fn clipboard_text() -> Option<String> { None }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Focus {
-    Model, Output, Quantizer, Converter, Runtime, Benchmark, Prompt, GpuLayers,
+    Model, Output, Quantizer, Converter, Runtime, EvalServer, Benchmark, Prompt, GpuLayers,
     OptBaseline, OptCandidate, OptSuite, OptOutput, OptImatrix, OptSensitivity, OptPpl,
     OptMinSaving, OptMaxLoss, OptMaxPpl, OptRuntimeDevice, OptPrecisions,
     OptBenchPrompt, OptBenchGeneration, OptBenchRepetitions, OptSpeedRatio,
@@ -95,6 +95,7 @@ struct Workstation {
     quantizer: String,
     converter: String,
     runtime: String,
+    eval_server:String,
     benchmark: String,
     prompt: String,
     gpu_layers: String,
@@ -183,6 +184,12 @@ impl Workstation {
             .map(|p| p.to_string_lossy().into_owned())
             .or_else(||settings.backend("OJON_LLAMA_CLI").map(str::to_owned))
             .unwrap_or_else(|| "llama-cli".to_owned());
+        let eval_server=backends.iter()
+            .find(|b|b.spec.id==BackendId::LlamaServer)
+            .and_then(|b|b.executable.as_ref())
+            .map(|path|path.to_string_lossy().into_owned())
+            .or_else(||settings.backend("OJON_LLAMA_SERVER").map(str::to_owned))
+            .unwrap_or_default();
         let benchmark = backends.iter()
             .find(|b| b.spec.id == BackendId::LlamaBench)
             .and_then(|b| b.executable.as_ref())
@@ -204,7 +211,7 @@ impl Workstation {
             Path::new(&output).parent().filter(|p|!p.as_os_str().is_empty())
                 .map(|p|p.to_string_lossy().into_owned()).unwrap_or_default());
         Self {
-            source, output, quantizer, converter, runtime, benchmark,
+            source, output, quantizer, converter, runtime, eval_server, benchmark,
             local_settings:settings.clone(),
             settings_load_failed:settings_problem.is_some(),
             prompt: "Explain in one sentence what a quantized language model is.".into(),
@@ -287,6 +294,7 @@ impl Workstation {
             ("OJON_LLAMA_QUANTIZE",self.quantizer.trim(),"llama-quantize"),
             ("OJON_CONVERT_HF",self.converter.trim(),"convert_hf_to_gguf.py"),
             ("OJON_LLAMA_CLI",self.runtime.trim(),"llama-cli"),
+            ("OJON_LLAMA_SERVER",self.eval_server.trim(),"llama-server"),
             ("OJON_LLAMA_BENCH",self.benchmark.trim(),"llama-bench"),
         ]{
             if value.is_empty()||value==default{
@@ -383,6 +391,7 @@ impl Workstation {
         for (id,current,default) in [
             (BackendId::LlamaQuantize,self.quantizer.trim(),"llama-quantize"),
             (BackendId::LlamaCli,self.runtime.trim(),"llama-cli"),
+            (BackendId::LlamaServer,self.eval_server.trim(),"llama-server"),
             (BackendId::LlamaBench,self.benchmark.trim(),"llama-bench"),
             (BackendId::HfConverter,self.converter.trim(),"convert_hf_to_gguf.py"),
         ]{
@@ -541,6 +550,10 @@ impl Workstation {
         let source=self.source.trim();
         if source.is_empty(){return Err("Choose a model first".into());}
         let mut req=OptimizeWorkflowRequest::new(PathBuf::from(source));
+        let server=self.eval_server.trim();
+        if !server.is_empty() && server!="llama-server" {
+            req.server_tool=Some(PathBuf::from(server));
+        }
         req.goal=match self.opt_goal{
             1=>OptimizeGoal::Smallest,
             2=>OptimizeGoal::Fastest,
@@ -909,6 +922,7 @@ impl Workstation {
             Focus::Quantizer => &mut self.quantizer,
             Focus::Converter => &mut self.converter,
             Focus::Runtime => &mut self.runtime,
+            Focus::EvalServer=>&mut self.eval_server,
             Focus::Benchmark => &mut self.benchmark,
             Focus::Prompt => &mut self.prompt,
             Focus::GpuLayers => &mut self.gpu_layers,
@@ -977,6 +991,7 @@ impl Workstation {
         let quantizer = &mut self.quantizer;
         let converter = &mut self.converter;
         let runtime = &mut self.runtime;
+        let eval_server=&mut self.eval_server;
         let benchmark = &mut self.benchmark;
         let prompt = &mut self.prompt;
         let gpu_layers = &mut self.gpu_layers;
@@ -1154,6 +1169,7 @@ impl Workstation {
                                 let label = match backend.spec.id {
                                     BackendId::LlamaQuantize => "GGUF converter",
                                     BackendId::LlamaCli => "GGUF inference",
+                                    BackendId::LlamaServer=>"Persistent task-evaluation server",
                                     BackendId::LlamaBench => "GGUF performance benchmark",
                                     BackendId::LlamaPerplexity => "GGUF quality / PPL",
                                     BackendId::LlamaImatrix => "GGUF calibration",
@@ -1252,6 +1268,10 @@ impl Workstation {
                                         }
                                     }
                                 }else{
+                                    card.label("Persistent evaluator executable (optional; blank uses discovered server or CLI)");
+                                    if card.text_input(eval_server,"llama-server executable path...").clicked(){
+                                        new_focus=Some(Focus::EvalServer);
+                                    }
                                     card.label("Q4-parity candidate formats (blank = conservative defaults)");
                                     if card.text_input(opt_precisions,"IQ4_XS,Q3_K_M,...").clicked(){
                                         new_focus=Some(Focus::OptPrecisions);

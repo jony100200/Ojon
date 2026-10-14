@@ -1206,6 +1206,7 @@ fn run() -> io::Result<()> {
             let mut device:Option<String>=None;
             let mut tokens=128u32;
             let mut max_loss=1.0f64;
+            let mut server_tool=ojon_backend::discovered_path(BackendId::LlamaServer);
             let mut confirm=false;
             let mut json=false;
             while let Some(option)=args.next(){
@@ -1218,6 +1219,8 @@ fn run() -> io::Result<()> {
                     }
                     Some("--quantizer")=>quantizer=PathBuf::from(next_argument(&mut args,"llama-quantize")?),
                     Some("--eval-tool")=>eval_tool=PathBuf::from(next_argument(&mut args,"llama-cli")?),
+                    Some("--server-tool")=>server_tool=Some(PathBuf::from(
+                        next_argument(&mut args,"llama-server")?)),
                     Some("--imatrix")=>imatrix=Some(PathBuf::from(next_argument(&mut args,"imatrix")?)),
                     Some("--threads")=>threads=next_argument(&mut args,"threads")?.to_str()
                         .ok_or_else(||invalid("invalid threads"))?.parse().map_err(|_|invalid("invalid threads"))?,
@@ -1235,8 +1238,9 @@ fn run() -> io::Result<()> {
                     _=>return Err(invalid(format!("unknown adaptive option: {}",option.to_string_lossy()))),
                 }
             }
-            let plan=prepare_adaptive(&source,&scores,&output,&suite,&quantizer,&eval_tool,
+            let mut plan=prepare_adaptive(&source,&scores,&output,&suite,&quantizer,&eval_tool,
                 imatrix.as_deref(),&targets,threads,gpu_layers,device.as_deref(),tokens,max_loss)?;
+            plan.server_tool=server_tool;
             if execute{
                 if !confirm{return Err(invalid("adaptive search launches quantizers and model inference; pass --confirm"));}
                 let results=run_adaptive(&plan,|line|eprintln!("{line}"))?;
