@@ -1739,4 +1739,51 @@ mod tests {
             let _ = std::fs::write(ppm_path, data);
         }
     }
+
+    #[test]
+    fn test_gui_settings_persistence_and_goals() {
+        let temp = std::env::temp_dir().join(format!("ojon_gui_test_{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let _ = std::fs::create_dir_all(&temp);
+        let settings_file = temp.join("settings.json");
+        std::env::set_var("OJON_SETTINGS_PATH", &settings_file);
+
+        let dummy_model = temp.join("test_model.gguf");
+        let _ = std::fs::write(&dummy_model, b"GGUF");
+
+        // 1. Initial launch with no settings
+        let mut ws = Workstation::new();
+        assert_eq!(ws.opt_goal, 0, "default goal should be Balanced (0)");
+
+        // 2. Configure in GUI: model, tools, Smallest goal
+        ws.source = dummy_model.to_string_lossy().into_owned();
+        ws.opt_goal = 1; // Smallest
+        ws.opt_min_saving = "15.0".into();
+        ws.persist_local_settings(true);
+
+        // 3. Reopen GUI: confirm persistence of Smallest
+        let mut ws2 = Workstation::new();
+        assert_eq!(ws2.source, dummy_model.to_string_lossy());
+        assert_eq!(ws2.opt_goal, 1, "Smallest goal should persist");
+        assert_eq!(ws2.opt_min_saving, "15");
+
+        // 4. Change to Fastest in GUI and save
+        ws2.opt_goal = 2; // Fastest
+        ws2.persist_local_settings(true);
+
+        // 5. Reopen GUI: confirm persistence of Fastest
+        let ws3 = Workstation::new();
+        assert_eq!(ws3.opt_goal, 2, "Fastest goal should persist");
+
+        // 6. Test CLI set -> GUI reload
+        let mut settings = ojon_backend::load_settings().unwrap();
+        settings.optimization_goal = "balanced".into();
+        ojon_backend::save_settings(&settings).unwrap();
+
+        let ws4 = Workstation::new();
+        assert_eq!(ws4.opt_goal, 0, "Balanced goal from CLI should reflect in GUI");
+
+        // Cleanup
+        std::env::remove_var("OJON_SETTINGS_PATH");
+        let _ = std::fs::remove_dir_all(&temp);
+    }
 }
