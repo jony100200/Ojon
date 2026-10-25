@@ -17,6 +17,7 @@ pub mod ppl;
 pub mod calibration;
 pub mod advanced;
 pub mod diffusion;
+pub mod diffusion_gguf;
 pub mod packed;
 pub mod distill;
 pub mod autoround;
