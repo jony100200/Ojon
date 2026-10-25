@@ -1,7 +1,7 @@
 //! Working image/video GGUF conversion and runtime smoke path through the
 //! user's installed stable-diffusion.cpp sd-cli. No Python or downloaded weights.
 //! A valid container or generated preview is not a visual quality benchmark.
-use crate::gguf::inspect_gguf;
+use crate::gguf::{inspect_gguf, inspect_gguf_tensors, GgufTensor};
 use crate::jobs::run_with_log;
 use crate::probe::probe_model;
 use serde_json::{json, Value};
@@ -36,6 +36,25 @@ impl InputLayout {
 fn precision(text:&str)->io::Result<&str>{
     match text {"q8_0"|"q5_0"|"q4_0"|"q4_K"|"q3_K"=>Ok(text),
         _=>Err(bad("GGUF precision must be q8_0, q5_0, q4_0, q4_K or q3_K"))}
+}
+// GGML tensor types, not activation quantization or Nunchaku W4A4.
+// The target backend may keep sensitive tensors at a higher precision.
+fn requested_storage_type(name:&str)->io::Result<u32>{
+    match precision(name)?{
+        "q8_0"=>Ok(8), "q5_0"=>Ok(6), "q4_0"=>Ok(2),
+        "q4_K"=>Ok(12), "q3_K"=>Ok(11),
+        _=>Err(bad("unsupported diffusion tensor storage type")),
+    }
+}
+fn count_requested_tensors(tensors:&[GgufTensor],name:&str)->io::Result<usize>{
+    let requested=requested_storage_type(name)?;
+    let count=tensors.iter().filter(|t|t.storage_type==requested).count();
+    if count==0 {
+        return Err(bad(format!(
+            "sd-cli returned GGUF without any {name} tensors; refusing an unquantized or incompatible artifact"
+        )));
+    }
+    Ok(count)
 }
 fn target(path:&Path,extension:&str)->io::Result<PathBuf>{
     if path.extension().and_then(|s|s.to_str())!=Some(extension){
@@ -119,6 +138,9 @@ impl GgufConvertPlan{
             "tool":self.tool.to_string_lossy(),"precision":self.format,
             "model_loaded":false,"runtime_load_verified":false,
             "quality_verified":false,
+            "quantization_semantics":"weight_only; NOT W4A4",
+            "comfyui_gguf_runtime_verified":false,
+            "cross_runtime_recommended_formats":["q4_0","q5_0","q8_0"],
             "warnings":[
                 "The output contains converted diffusion weights, not automatically the text encoders or VAE.",
                 "Architecture-specific conversion support depends on the installed sd-cli build.",
@@ -146,6 +168,12 @@ pub fn run_gguf_convert(plan:&GgufConvertPlan,mut log:impl FnMut(&str))->io::Res
     if info.tensor_count==0 || info.split_count.unwrap_or(1)>1 {
         return Err(bad("converter did not produce a nonempty single-file GGUF"));
     }
+    // A structurally valid GGUF can still contain only F16/F32 weights if
+    // the selected converter ignored or fell back from the requested type.
+    // Read the bounded tensor catalog to ensure the requested GGML type exists
+    // before publishing, while still permitting mixed high-precision tensors.
+    let tensors=inspect_gguf_tensors(&candidate)?;
+    let requested_tensor_count=count_requested_tensors(&tensors,&plan.format)?;
     let output_bytes=info.file_bytes;
     fs::hard_link(&candidate,&plan.output)?;
     let report=json!({"schema":"ojon.diffusion_gguf_conversion.v1",
@@ -154,10 +182,15 @@ pub fn run_gguf_convert(plan:&GgufConvertPlan,mut log:impl FnMut(&str))->io::Res
         "kind":plan.kind.name(),"input_layout":plan.layout.name(),"precision":plan.format,
         "source_bytes":plan.source_bytes,"output_bytes":output_bytes,
         "size_saving_pct":100.0*(1.0-output_bytes as f64/plan.source_bytes as f64),
-        "tensor_count":info.tensor_count,"elapsed_seconds":start.elapsed().as_secs_f64(),
-        "gguf_structure_checked":true,"runtime_load_verified":false,
+        "tensor_count":info.tensor_count,"requested_quantized_tensor_count":requested_tensor_count,
+        "requested_ggml_storage_type":requested_storage_type(&plan.format)?,
+        "gguf_architecture":info.architecture,
+        "quantization_semantics":"weight_only; NOT W4A4",
+        "elapsed_seconds":start.elapsed().as_secs_f64(),
+        "gguf_structure_checked":true,"requested_quantization_present":true,
+        "runtime_load_verified":false,"comfyui_gguf_runtime_verified":false,
         "peak_vram_measured":false,"image_video_quality_verified":false,
-        "warning":"A GGUF catalog check is not proof of a runnable pipeline. Run a real smoke test and inspect matched-seed outputs."});
+        "warning":"GGUF contains requested weight quantization but activation quantization is not W4A4. ComfyUI-GGUF compatibility and SD.cpp generation need independent real-load tests and matched-seed comparison."});
     if let Err(e)=atomic_receipt(&plan.output,&report){let _=fs::remove_file(&plan.output);return Err(e);}
     log("[ojon] GGUF container validated and published; actual generation still untested");
     Ok(report)
@@ -327,6 +360,19 @@ mod tests{
         assert!(prepare_gguf_convert(Path::new("does_not_exist.safetensors"),
             Path::new("out.gguf"),Path::new("sd-cli"),MediaKind::Image,
             InputLayout::Diffusion,"q4_0").is_err());
+    }
+    #[test]
+    fn requested_quantization_is_checked_in_tensor_catalog(){
+        let make=|name:&str,kind:u32|GgufTensor{
+            name:name.into(),elements:4096,shape:vec![64,64],
+            storage_type:kind,relative_offset:0
+        };
+        let mixed=vec![make("w1",2),make("norm",1),make("w2",2)];
+        assert_eq!(count_requested_tensors(&mixed,"q4_0").unwrap(),2);
+        assert!(count_requested_tensors(&mixed,"q8_0").is_err());
+        assert_eq!(requested_storage_type("q4_K").unwrap(),12);
+        assert_eq!(requested_storage_type("q3_K").unwrap(),11);
+        assert!(requested_storage_type("w4a4").is_err());
     }
     #[test]
     fn verifies_real_media_headers_not_just_extensions(){
