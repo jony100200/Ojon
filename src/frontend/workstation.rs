@@ -25,7 +25,7 @@ use ui_platform::winit::{
 use ui_platform::PointerState;
 use ui_render::{CommandBuffer, CpuBackend, GpuBackend, RenderBackend, SoftwarePresenter};
 use ui_themes::{BilingualLabel, ThemePalette};
-use ui_widgets::{icon_cache::IconAtlas, KathamoUi};
+use ui_widgets::{icon_cache::{IconAtlas, StudioIcon}, KathamoUi, NavigationRail, NavigationRailItem};
 
 
 // Native Windows clipboard: cheap path pasting without a browser/UI runtime.
@@ -985,7 +985,9 @@ impl Workstation {
         let mut click_pointer = self.pointer;
         click_pointer.primary_down = self.click_pulse;
         self.click_pulse = false;
-        let viewport = Rect::from_min_size(Vec2::ZERO, Vec2::new(width.max(700.0), height.max(500.0)));
+        let navigation_width = 56.0;
+        let viewport = Rect::from_min_size(Vec2::new(navigation_width, 0.0),
+            Vec2::new((width - navigation_width).max(700.0), height.max(500.0)));
         let source = &mut self.source;
         let output = &mut self.output;
         let quantizer = &mut self.quantizer;
@@ -1041,6 +1043,27 @@ impl Workstation {
         let (mut inspect, mut plan, mut advise, mut opt_run, mut convert, mut smoke, mut bench) =
             (false, false, false, false, false, false, false);
         {
+            // New Kathamo navigation; each destination is an existing working view.
+            let rail = NavigationRail::new()
+                .with_selected(if *workspace_tab == 1 { "manual" }
+                    else if *optimize_review_tab == 1 { "results" }
+                    else if *optimize_settings_tab == 2 { "hardware" }
+                    else { "optimize" })
+                .add_main(NavigationRailItem::new("optimize", StudioIcon::Sparkles, "Optimize"))
+                .add_main(NavigationRailItem::new("hardware", StudioIcon::Cpu, "Hardware"))
+                .add_main(NavigationRailItem::new("results", StudioIcon::Check, "Results"))
+                .add_main(NavigationRailItem::new("manual", StudioIcon::Settings, "Manual Tools"));
+            if let Some(destination) = rail.render(&mut cmds, &mut self.icons,
+                Rect::from_min_size(Vec2::ZERO, Vec2::new(navigation_width - 4.0, viewport.height())),
+                click_pointer.position, click_pointer.primary_down, &palette) {
+                match destination {
+                    "optimize" => { *workspace_tab=0; *optimize_settings_tab=0; *optimize_review_tab=0; }
+                    "hardware" => { *workspace_tab=0; *optimize_settings_tab=2; *optimize_review_tab=0; }
+                    "results" => { *workspace_tab=0; *optimize_review_tab=1; }
+                    "manual" => { *workspace_tab=1; }
+                    _ => {}
+                }
+            }
             let mut ui = KathamoUi::new(&mut cmds, &mut self.icons, &palette, viewport, click_pointer);
 
             // 1. Studio Telemetry & Header Bar
@@ -1092,15 +1115,21 @@ impl Workstation {
             });
 
             ui.separator();
+            ui.horizontal(30.0, |steps| {
+                steps.status_pill("1  SELECT / INSPECT", source_is_current && model_probe.is_some());
+                steps.status_pill("2  PLAN", opt_planned.is_some() && optimizer_plan_current);
+                steps.status_pill("3  TEST / COMPARE", opt_result.is_some());
+                steps.status_pill("4  REVIEW / SAVE", false);
+            });
 
             // 2. Main Two-Column Workstation Layout
             ui.columns(
-                (height - 118.0).max(520.0),
-                &[SizeConstraint::Fixed(385.0), SizeConstraint::Flex(1.0)],
+                (height - 154.0).max(520.0),
+                &[SizeConstraint::Fixed(if width < 1280.0 { 335.0 } else { 365.0 }), SizeConstraint::Flex(1.0)],
                 |idx, col| {
                     if idx == 0 {
                         col.glass_card(300.0, |card| {
-                            card.heading("01   IMPORT & INSPECT");
+                            card.heading("01   SELECT YOUR MODEL");
                             card.label("Drop a GGUF, SafeTensors, or HF checkpoint folder.");
                             if card.text_input(source, if new_focus == Some(Focus::Model) { "Type/paste model path (Ctrl+V)..." } else { "Source model path (or drop file)..." }).clicked() {
                                 new_focus = Some(Focus::Model);
@@ -1201,7 +1230,7 @@ impl Workstation {
                         });
                         if *workspace_tab==0 {
                             col.glass_card(398.0, |card|{
-                                card.heading("02   AUTOMATIC MODEL OPTIMIZATION");
+                                card.heading("02   QUALITY-FIRST OPTIMIZATION");
                                 card.label("Find a smaller GGUF without measured task regression.");
                                 card.tabs(&["Model & Tasks","Quality Controls","Hardware","Search & Bench"], optimize_settings_tab);
                                 if *optimize_settings_tab==0 {
@@ -1296,10 +1325,10 @@ impl Workstation {
                                 card.label("Execution still requires real model, tool and hardware checks.");
                             });
                             col.card(252.0, |card|{
-                                card.heading("03   OPTIMIZATION WORKFLOW");
+                                card.heading("03   PLAN, TEST & REVIEW");
                                 card.tabs(&["Review & Run","Results & Logs"],optimize_review_tab);
                                 if *optimize_review_tab==0{
-                                    if card.button_secondary("1. Build Read-Only Plan").clicked(){
+                                    if card.button_secondary("Build Read-Only Plan").clicked(){
                                         advise=true;
                                     }
                                     let preview=opt_planned.map(|(_,plan)| (plan,optimizer_plan_current));
@@ -1322,7 +1351,7 @@ impl Workstation {
                                             }
                                         }
                                         if valid&&unchanged&&!busy{
-                                            if card.button("2. Approve & Run Selected Backend").clicked(){
+                                            if card.button("Approve & Run Selected Backend").clicked(){
                                                 opt_run=true;
                                             }
                                         }
@@ -1584,7 +1613,7 @@ impl ApplicationHandler for DesktopApp {
         if self.window.is_some() { return; }
         let attrs = WindowAttributes::default()
             .with_title("Ojon (ওজন)  |  Kalponic Studio")
-            .with_inner_size(LogicalSize::new(1340.0, 840.0))
+            .with_inner_size(LogicalSize::new(1500.0, 960.0))
             .with_min_inner_size(LogicalSize::new(1080.0, 720.0))
             .with_visible(false);
         match loop_.create_window(attrs) {
@@ -1716,12 +1745,12 @@ mod tests {
     #[test]
     fn ojon_gui_renders_clean_frame() {
         let mut ws = Workstation::new();
-        let cmds = ws.render(1340.0, 840.0);
+        let cmds = ws.render(1500.0, 960.0);
         assert!(!cmds.is_empty());
 
         let mut cpu = CpuBackend::new();
         let palette = ThemePalette::studio_graphite();
-        cpu.begin_frame(1340, 840, palette.canvas);
+        cpu.begin_frame(1500, 960, palette.canvas);
         cpu.submit(&cmds);
         assert!(cpu.end_frame().is_ok());
 
@@ -1730,7 +1759,7 @@ mod tests {
             .filter(|path| path.is_dir()) {
             let ppm_path = artifact_dir.join("ojon_workstation_render.ppm");
             let pixels = cpu.pixels();
-            let mut data = format!("P6\n{} {}\n255\n", 1340, 840).into_bytes();
+            let mut data = format!("P6\n{} {}\n255\n", 1500, 960).into_bytes();
             for &p in pixels {
                 data.push((p >> 16) as u8);
                 data.push((p >> 8) as u8);

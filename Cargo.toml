@@ -34,11 +34,11 @@ required-features = ["gui"]
 serde_json = "1"
 serde_yaml = "0.9"
 # Pinned public Kathamo framework; optional so the CLI stays lean and independent.
-ui-core     = { git = "https://github.com/jony100200/Kathamo", rev = "f3bed97837edd2814c4b9e2ed345e9effab6f94d", optional = true }
-ui-platform = { git = "https://github.com/jony100200/Kathamo", rev = "f3bed97837edd2814c4b9e2ed345e9effab6f94d", optional = true }
-ui-render   = { git = "https://github.com/jony100200/Kathamo", rev = "f3bed97837edd2814c4b9e2ed345e9effab6f94d", optional = true }
-ui-themes   = { git = "https://github.com/jony100200/Kathamo", rev = "f3bed97837edd2814c4b9e2ed345e9effab6f94d", optional = true }
-ui-widgets  = { git = "https://github.com/jony100200/Kathamo", rev = "f3bed97837edd2814c4b9e2ed345e9effab6f94d", optional = true }
+ui-core     = { git = "https://github.com/jony100200/Kathamo", rev = "d96108fb304afd63c0b32b79731829bcf04d3459", optional = true }
+ui-platform = { git = "https://github.com/jony100200/Kathamo", rev = "d96108fb304afd63c0b32b79731829bcf04d3459", optional = true }
+ui-render   = { git = "https://github.com/jony100200/Kathamo", rev = "d96108fb304afd63c0b32b79731829bcf04d3459", optional = true }
+ui-themes   = { git = "https://github.com/jony100200/Kathamo", rev = "d96108fb304afd63c0b32b79731829bcf04d3459", optional = true }
+ui-widgets  = { git = "https://github.com/jony100200/Kathamo", rev = "d96108fb304afd63c0b32b79731829bcf04d3459", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", optional = true, features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Memory"] }
