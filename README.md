@@ -352,6 +352,20 @@ without using the GPU for quality scoring.
 The text suite uses `ojon.task_suite.v1`: 6–256 tasks, at least two each
 from `coding`, `reasoning` and `tool_call`. Exact/JSON-answer matching
 does **not** execute generated code and is not a full agentic benchmark.
+
+Before committing compute to a large evaluation, users and local agents can
+validate the suite **without loading a model, running inference or printing
+private prompts**:
+
+```sh
+ojon task-suite-check /path/to/held-out-tasks.json --json
+```
+
+The stable `ojon.task_suite_inspection.v1` JSON reports the task count,
+category/matching coverage and `STRUCTURE_VALID_NOT_EVALUATED` status.
+It explicitly marks creative writing, real agent/tool execution, calibration
+independence, visual QA and quality parity **unverified**. A valid schema is
+only a preflight, never evidence that a quantized model retains its abilities.
 Optional vision suite example (real image files must already exist):
 
 ```json

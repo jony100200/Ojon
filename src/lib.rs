@@ -67,7 +67,7 @@ pub use exl3::{prepare_exl3, run_exl3, Exl3Plan};
 
 pub mod eval_session;
 pub mod task_eval;
-pub use task_eval::{parse_eval_suite, prepare_eval, run_eval, EvalPlan, EvalSuite};
+pub use task_eval::{parse_eval_suite, inspect_task_suite, prepare_eval, run_eval, EvalPlan, EvalSuite};
 
 pub mod adaptive;
 pub mod quant_parity;

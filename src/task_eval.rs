@@ -52,6 +52,36 @@ pub fn parse_eval_suite(path:&Path)->io::Result<EvalSuite> {
     Ok(EvalSuite{id,tasks})
 }
 
+/// Read-only suite preflight shared by humans and agent orchestrators.
+//// Schema validity is intentionally NOT an assertion that the data is held out,
+//// representative, independent of calibration, or sufficient to judge writing.
+pub fn inspect_task_suite(path:&Path)->io::Result<Value> {
+    let suite=parse_eval_suite(path)?;
+    let count=|category:&str|suite.tasks.iter().filter(|task|task.category==category).count();
+    let exact=suite.tasks.iter().filter(|task|task.matching=="exact").count();
+    let json_tasks=suite.tasks.len()-exact;
+    Ok(json!({
+        "schema":"ojon.task_suite_inspection.v1",
+        "id":suite.id,
+        "task_count":suite.tasks.len(),
+        "categories":{
+            "coding":count("coding"),
+            "reasoning":count("reasoning"),
+            "tool_call":count("tool_call")
+        },
+        "matching":{"exact":exact,"json":json_tasks},
+        "status":"STRUCTURE_VALID_NOT_EVALUATED",
+        "model_loaded":false,
+        "generated_code_executed":false,
+        "held_out_independence_verified":false,
+        "creative_writing_parity_verified":false,
+        "multimodal_quality_verified":false,
+        "quality_preservation_verified":false,
+        "next_step":"Evaluate against a matched baseline and candidate using independent representative tasks; add separate writing and real agent/vision tests before claiming general quality parity",
+        "warning":"A valid Ojon task suite only measures exact/JSON functional outputs. It cannot establish zero-loss writing, general reasoning, agentic performance or unobserved quality."
+    }))
+}
+
 fn answer_matches(task:&EvalTask,answer:&str)->bool {
     let text=answer.trim();
     if task.matching=="json" {
@@ -297,6 +327,16 @@ mod tests{
             "prompt":"Return 42","expected":"42","match":"exact"})).collect::<Vec<_>>();
         fs::write(&f,serde_json::to_vec(&json!({"schema":"ojon.task_suite.v1","id":"fixture","tasks":tasks})).unwrap()).unwrap();
         assert_eq!(parse_eval_suite(&f).unwrap().tasks.len(),6);
+        let inspection=inspect_task_suite(&f).unwrap();
+        assert_eq!(inspection["status"],"STRUCTURE_VALID_NOT_EVALUATED");
+        assert_eq!(inspection["categories"]["coding"],2);
+        assert_eq!(inspection["categories"]["reasoning"],2);
+        assert_eq!(inspection["categories"]["tool_call"],2);
+        assert_eq!(inspection["model_loaded"],false);
+        assert_eq!(inspection["creative_writing_parity_verified"],false);
+        // Prompts/expected answers are private benchmark data: never print them
+        // in the agent JSON preflight or mistake structure checks for quality.
+        assert!(!inspection.to_string().contains("Return 42"));
         fs::remove_file(f).unwrap();
     }
 }

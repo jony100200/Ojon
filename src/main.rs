@@ -14,7 +14,7 @@ use ojon_backend::{
     resource_plan, ResourceMode, prepare_bench, run_bench, compare_bench_files,
     prepare_exl3, run_exl3, prepare_eval, run_eval, prepare_adaptive, run_adaptive,
     extract_sensitivity_from_imatrix,
-    prepare_model_abliteration, run_model_abliteration,
+    prepare_model_abliteration, run_model_abliteration, inspect_task_suite,
 };
 use std::env;
 use std::ffi::OsString;
@@ -63,6 +63,7 @@ Commands:
   ojon quant-parity-run  <original-F16.gguf> <current-Q4_K_M.gguf> <suite.json> <output-dir> [same options] --confirm
   ojon adaptive-plan <original.gguf> <tensor-sensitivity.json> <existing-output-dir> <suite.json> [--targets 3.0,3.5,4.0] [--quantizer llama-quantize] [--eval-tool llama-cli] [--imatrix path] [--device Vulkan2] [--gpu-layers 99] [--max-loss 1.0] [--json]
   ojon adaptive-run <original.gguf> <tensor-sensitivity.json> <existing-output-dir> <suite.json> [options] --confirm
+  ojon task-suite-check <suite.json> [--json]   Validate held-out suite structure without loading models or exposing prompts
   ojon task-eval-plan <suite.json> <new-report.json> --baseline <original.gguf> --candidate <label=variant.gguf> [--candidate ...] [--tool llama-cli] [--gpu-layers 0] [--device Vulkan2] [--tokens 128]
   ojon task-eval-run <suite.json> <new-report.json> --baseline <original.gguf> --candidate <label=variant.gguf> [options] --confirm
   ojon bench-plan <model.gguf> [--tool llama-bench] [--prompt-tokens 512] [--gen-tokens 128] [--repetitions 3] [--gpu-layers 0] [--device SYCL0|CUDA0|Vulkan0] [--json]
@@ -1248,6 +1249,29 @@ fn run() -> io::Result<()> {
                 if json{println!("{results}");}
                 else{println!("provisional_smallest_task_passing_output: {}",results["provisional_smallest_task_passing_output"]);}
             }else{println!("{}",plan.as_json());}
+        }
+        Some("task-suite-check") => {
+            let path=PathBuf::from(next_argument(&mut args,"held-out task suite JSON")?);
+            let mut json=false;
+            while let Some(option)=args.next(){
+                match option.to_str(){
+                    Some("--json") if !json => json=true,
+                    _=>return Err(invalid("task-suite-check accepts only a suite file and optional --json"))
+                }
+            }
+            let inspection=inspect_task_suite(&path)?;
+            if json {
+                println!("{inspection}");
+            } else {
+                println!("suite: {}",inspection["id"].as_str().unwrap_or("unknown"));
+                println!("status: {}",inspection["status"].as_str().unwrap_or("unknown"));
+                println!("tasks: {}",inspection["task_count"]);
+                println!("coding: {}",inspection["categories"]["coding"]);
+                println!("reasoning: {}",inspection["categories"]["reasoning"]);
+                println!("tool_call: {}",inspection["categories"]["tool_call"]);
+                println!("quality_preservation_verified: false");
+                println!("warning: {}",inspection["warning"].as_str().unwrap_or(""));
+            }
         }
         Some("task-eval-plan") | Some("task-eval-run") => {
             let execute=cmd=="task-eval-run";
