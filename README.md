@@ -816,17 +816,21 @@ ComfyUI; it tests that question against your installed ComfyUI version.
    job to the local ComfyUI instance (default: loopback port 8188):
 
 ```sh
-python scripts/comfy_gguf_smoke.py --workflow /workflows/flux-api.json --model /models/flux-q4_0.gguf --receipt /results/flux-comfy.json --kind image
-python scripts/comfy_gguf_smoke.py --workflow /workflows/flux-api.json --model /models/flux-q4_0.gguf --receipt /results/flux-comfy.json --kind image --confirm
+ojon diffusion-gguf-comfy-plan /models/flux-q4_0.gguf /workflows/flux-api.json /results/flux-comfy.json --kind image
+ojon diffusion-gguf-comfy-run /models/flux-q4_0.gguf /workflows/flux-api.json /results/flux-comfy.json --kind image --confirm
 
 # Video with an existing compatible API-format workflow:
-python scripts/comfy_gguf_smoke.py --workflow /workflows/wan-api.json --model /models/wan-q4_0.gguf --receipt /results/wan-comfy.json --kind video --confirm
+ojon diffusion-gguf-comfy-run /models/wan-q4_0.gguf /workflows/wan-api.json /results/wan-comfy.json --kind video --confirm
 ```
 
 When a workflow has multiple GGUF diffusion loader nodes, select the
 intended one with `--node-id`. To compare sd.cpp and ComfyUI on the same
 candidate, require a successful **separate receipt from each backend**.
-The ComfyUI bridge uses only Python's standard library; it does not install
+The same adapter is available directly as
+`python scripts/comfy_gguf_smoke.py` when running from a source checkout.
+The native Ojon CLI embeds the adapter and uses `python` on PATH, or an
+explicit `--python /path/to/python`, so packaged binaries do not rely on
+relative script paths. The ComfyUI bridge uses only Python's standard library; it does not install
 packages, download models or expose a remote server.
 
 **Precision contract:** the sd-cli GGUF route is GGML **weight-only**
