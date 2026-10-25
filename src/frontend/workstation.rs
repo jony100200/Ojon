@@ -1068,7 +1068,7 @@ impl Workstation {
 
             // 1. Studio Telemetry & Header Bar
             ui.horizontal(72.0, |top| {
-                top.vertical(280.0, |brand| {
+                top.vertical(252.0, |brand| {
                     brand.bilingual_heading(&BilingualLabel::new("Ojon", "ওজন"));
                     brand.horizontal(22.0, |pills| {
                         pills.status_pill(if busy { "Processing" } else { "Idle" }, !busy);
@@ -1091,27 +1091,23 @@ impl Workstation {
                 } else {
                     ("No Model Loaded", "Drop File or Enter Path".into())
                 };
-                top.stat_card("SOURCE CHECKPOINT", model_title, &model_sub);
+                let title = model_title.chars().take(26).collect::<String>();
+                let subtitle = model_sub.chars().take(42).collect::<String>();
+                top.stat_card("SOURCE CHECKPOINT", &title, &subtitle);
 
-                let target_precision = match *recipe {
-                    1 => "Q4_K_M (Selected)",
-                    2 => "Q3_K_M (Selected)",
-                    3 => "Q6_K (Selected)",
-                    _ => "Q5_K_M (Default)",
-                };
-                top.stat_card("TARGET PRECISION",
-                    if *format_tab == 0 { target_precision } else { "Adapter not connected" },
-                    if *format_tab == 0 { "Not quality-benchmarked" } else { "GGUF only currently" });
+                // Header presents observed state, not a quantization quality claim.
+                top.stat_card("QUALITY POLICY", "Preserve abilities",
+                    "Reject task regressions");
 
                 let quantizer_ready = Path::new(quantizer.trim()).is_file()
                     || (quantizer.trim() == "llama-quantize"
                         && backends.iter().any(|b| b.spec.id == BackendId::LlamaQuantize && b.installed()));
-                top.stat_card("QUANTIZER TOOL", "llama-quantize", if quantizer_ready { "Executable Detected" } else { "Not Found / Unverified" });
-
                 let smoke_ready = Path::new(runtime.trim()).is_file()
                     || (runtime.trim() == "llama-cli"
                         && backends.iter().any(|b| b.spec.id == BackendId::LlamaCli && b.installed()));
-                top.stat_card("INFERENCE ENGINE", "llama-cli", if smoke_ready { "Executable Detected" } else { "Optional / Not Found" });
+                top.stat_card("LOCAL TOOLS",
+                    if quantizer_ready { "Quantizer detected" } else { "Setup required" },
+                    if smoke_ready { "Inference tool found" } else { "Inference tool missing" });
             });
 
             ui.separator();
@@ -1119,7 +1115,7 @@ impl Workstation {
                 steps.status_pill("1  SELECT / INSPECT", source_is_current && model_probe.is_some());
                 steps.status_pill("2  PLAN", opt_planned.is_some() && optimizer_plan_current);
                 steps.status_pill("3  TEST / COMPARE", opt_result.is_some());
-                steps.status_pill("4  REVIEW / SAVE", false);
+                steps.status_pill("4  REVIEW / SAVE", opt_result.is_some_and(|r| r["status"] == "PROVISIONAL_CANDIDATE_FOUND"));
             });
 
             // 2. Main Two-Column Workstation Layout
@@ -1130,7 +1126,7 @@ impl Workstation {
                     if idx == 0 {
                         col.glass_card(300.0, |card| {
                             card.heading("01   SELECT YOUR MODEL");
-                            card.label("Drop a GGUF, SafeTensors, or HF checkpoint folder.");
+                            card.label("Drop a model or paste its local file / folder path.");
                             if card.text_input(source, if new_focus == Some(Focus::Model) { "Type/paste model path (Ctrl+V)..." } else { "Source model path (or drop file)..." }).clicked() {
                                 new_focus = Some(Focus::Model);
                             }
@@ -1231,7 +1227,7 @@ impl Workstation {
                         if *workspace_tab==0 {
                             col.glass_card(398.0, |card|{
                                 card.heading("02   QUALITY-FIRST OPTIMIZATION");
-                                card.label("Find a smaller GGUF without measured task regression.");
+                                card.label("Smallest runnable GGUF that passes your quality checks.");
                                 card.tabs(&["Model & Tasks","Quality Controls","Hardware","Search & Bench"], optimize_settings_tab);
                                 if *optimize_settings_tab==0 {
                                     card.label("Current Q4 reference GGUF (leave blank if selected model is Q4)");
@@ -1492,6 +1488,7 @@ impl Workstation {
 
                         col.card(156.0, |card| {
                             card.heading("JOB STATUS & TELEMETRY");
+                            card.label("Agent interface: Ojon CLI with JSON outputs.");
                             card.status_pill(if busy { "Backend Processing" } else { "No Active Job" }, !busy);
                             if let Some(elapsed) = job_elapsed {
                                 card.label(&format!("Measured elapsed: {:.1}s", elapsed.as_secs_f64()));
@@ -1740,6 +1737,28 @@ mod tests {
         ws.source = "source-f16.gguf".into();
         ws.format_tab = 1;
         assert!(!ws.ready_to_convert(), "unimplemented formats must not start GGUF conversion");
+    }
+
+    #[test]
+    fn new_kathamo_navigation_routes_to_real_workstation_views() {
+        let mut ws = Workstation::new();
+        let hit = |ws: &mut Workstation, y: f32| {
+            ws.pointer.position = Vec2::new(23.0, y);
+            ws.click_pulse = true;
+            ws.render(1500.0, 960.0);
+        };
+        hit(&mut ws, 70.0);
+        assert_eq!(ws.workspace_tab, 0);
+        assert_eq!(ws.optimize_settings_tab, 2, "Hardware should open actual hardware controls");
+        hit(&mut ws, 114.0);
+        assert_eq!(ws.optimize_review_tab, 1, "Results should open real receipts");
+        hit(&mut ws, 158.0);
+        assert_eq!(ws.workspace_tab, 1, "Manual Tools must remain accessible");
+        hit(&mut ws, 26.0);
+        assert_eq!(ws.workspace_tab, 0);
+        assert_eq!(ws.optimize_settings_tab, 0);
+        assert_eq!(ws.optimize_review_tab, 0);
+        assert!(!ws.busy, "navigation must not trigger a conversion or model load");
     }
 
     #[test]
