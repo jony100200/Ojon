@@ -41,4 +41,16 @@ jobs:
         run: cargo check --locked --features gui --bin ojon-gui
 
       - name: Test GUI state and CPU rendering
+        env:
+          OJON_SCREENSHOT_DIR: ${{ runner.temp }}
         run: cargo test --locked --features gui --bin ojon-gui
+
+      - name: Convert real CPU-rendered UI preview
+        run: python scripts/ppm_to_png.py "${{ runner.temp }}/ojon_workstation_render.ppm" "${{ runner.temp }}/ojon_workstation_render.png"
+
+      - name: Upload Ojon workstation UI preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: ojon-kathamo-workstation-preview
+          path: ${{ runner.temp }}/ojon_workstation_render.png
+          if-no-files-found: error

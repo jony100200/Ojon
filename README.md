@@ -119,12 +119,25 @@ The full Kathamo UI is in `src/frontend/`, with a minimal
 `cargo run --features gui --bin ojon-gui` and separate GUI-free
 `cargo run --bin ojon` workflows.
 
-The Kathamo workspace uses the pinned, up-to-date
-[`f3bed978`](https://github.com/jony100200/Kathamo/commit/f3bed97837edd2814c4b9e2ed345e9effab6f94d)
-framework revision, including its new collapsible panels. The tool-discovery
-section is collapsed by default so the automatic optimization workflow
-is more prominent. No framework dependency bump or Cargo.lock refresh is
-needed for this refactor.
+The Kathamo workstation pins the reviewed
+[`d96108fb`](https://github.com/jony100200/Kathamo/commit/d96108fb304afd63c0b32b79731829bcf04d3459)
+framework revision, including the native navigation rail and updated input
+handling. The tool-discovery section remains collapsed by default.
+The app still uses the existing Rust quantization backend and portable settings.
+
+**Launch the desktop UI:** `cargo run --locked --features gui --bin ojon-gui`.
+The native navigation rail opens **Optimize, Hardware, Results,** and
+**Manual Tools**; the workflow strip reflects actual inspection/planning/test
+state, never fake progress. Drop a local model file or paste its path,
+inspect metadata, specify a held-out task suite and comparison reference,
+build a read-only plan, then explicitly approve conversion or evaluation.
+The first run can be demonstrated without loading or quantizing a model.
+
+**YouTube/visual QA:** Windows CI exercises GUI state and renders a real
+1500 × 960 CPU frame. The successful workflow run attaches
+`ojon-kathamo-workstation-preview` (PNG). This is a screenshot of
+actual drawing code, not a proof of native click/keyboard behavior or model
+quality; check real Windows scaling, paths and GPU backends before publication.
 
 ### Guided model optimization (Kathamo UI and Rust CLI)
 
