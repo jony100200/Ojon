@@ -37,6 +37,9 @@ jobs:
       - name: Syntax check bundled HQQ bridge
         run: python -c "import ast, pathlib; ast.parse(pathlib.Path('src/hqq_bridge.py').read_text(encoding='utf-8'))"
 
+      - name: Test ComfyUI GGUF adapter with offline mock API
+        run: python -m unittest discover -s scripts -p "test_comfy_gguf_smoke.py" -v
+
       - name: Check Kathamo desktop GUI
         run: cargo check --locked --features gui --bin ojon-gui
 
