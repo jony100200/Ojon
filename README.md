@@ -755,3 +755,53 @@ Actual capability depends on the selected model, converter, target loader, GPU/C
 No conversion output is represented as *quality preserved* merely because the file was written. The goal is to find the **smallest model that still passes representative tests on real hardware**, not to promise mathematically zero quality loss.
 
 See [USER_GUIDE.md](USER_GUIDE.md) for more commands and troubleshooting. Build checks are in [GitHub Actions](https://github.com/jony100200/Ojon/actions). License: [MIT](LICENSE).
+
+## Image/video GGUF: native Ojon orchestration, real sd-cli output
+
+Ojon now supports a second image/video route alongside SVDQuant INT4:
+**stable-diffusion.cpp** `sd-cli` converts compatible local standalone
+safetensors denoisers to GGUF (Q8_0/Q5_0/Q4_0/Q4_K/Q3_K), then performs a
+real image/video generation smoke test. No model download, Python backend,
+RebelUI workflow or Ojon-specific packed inference loader is required.
+
+The plan is strictly read-only; `--confirm` authorizes external processing.
+A model-specific `sd-cli` build, compatible text encoders, VAE and sometimes
+additional high-noise diffusion components are still required. Inference
+validation is a separate operation; **a GGUF container check is not a
+runtime-load test**.
+
+```sh
+# FLUX / Wan / other standalone diffusion denoiser (if your sd-cli supports it):
+ojon diffusion-gguf-plan /models/denoiser.safetensors /models/denoiser-q4_0.gguf --kind image --layout diffusion --format q4_0 --tool sd-cli
+ojon diffusion-gguf-run /models/denoiser.safetensors /models/denoiser-q4_0.gguf --kind image --layout diffusion --format q4_0 --tool sd-cli --confirm
+
+# Supply the actual companion files required by the model family:
+ojon diffusion-gguf-smoke-plan /models/denoiser-q4_0.gguf /results/preview.png --kind image --component vae=/models/vae.safetensors --component t5xxl=/models/t5.gguf --tool sd-cli
+ojon diffusion-gguf-smoke-run /models/denoiser-q4_0.gguf /results/preview.png --kind image --component vae=/models/vae.safetensors --component t5xxl=/models/t5.gguf --tool sd-cli --confirm
+
+# Video: Wan-type or other supported compatible standalone denoiser.
+# Component names: vae, audio-vae, clip_l, clip_g, t5xxl, llm,
+# llm_vision, high-noise-diffusion-model.
+ojon diffusion-gguf-plan /models/wan-low.safetensors /models/wan-low-q4_0.gguf --kind video --format q4_0
+ojon diffusion-gguf-run /models/wan-low.safetensors /models/wan-low-q4_0.gguf --kind video --format q4_0 --confirm
+ojon diffusion-gguf-smoke-plan /models/wan-low-q4_0.gguf /results/wan.webm --kind video --component vae=/models/wan-vae.safetensors --component t5xxl=/models/wan-t5.gguf --frames 9 --fps 8
+ojon diffusion-gguf-smoke-run /models/wan-low-q4_0.gguf /results/wan.webm --kind video --component vae=/models/wan-vae.safetensors --component t5xxl=/models/wan-t5.gguf --frames 9 --fps 8 --confirm
+```
+
+`--layout checkpoint` uses `sd-cli -m` for suitable full SD checkpoints;
+the default `--layout diffusion` uses `--diffusion-model` for FLUX/Wan and
+other standalone denoisers. The converter is selected by `--tool` or PATH.
+Converted files and receipts are created without overwriting existing files;
+they are staged in the output directory, validated structurally, and
+published only on command success. Both conversion and runtime preview
+results emit versioned JSON receipts. The smoke output is a real PNG or WebM
+whose file signature is checked.
+
+**Limitations:** architecture compatibility and running GPU memory depend
+on the installed `sd-cli`, not on metadata guesses. Text encoders and VAE
+may still need substantial memory. Nunchaku SVDQuant safetensors cannot be
+loaded as if they were sd-cli GGUF files. For quality evaluation, run the
+original and quantized model with the same model components, prompt,
+seed, sampler, dimensions and steps; inspect texture/detail, defects,
+and, for video, temporal stability. Ojon deliberately marks general visual
+quality and peak VRAM **unverified** until measured.

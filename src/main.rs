@@ -16,6 +16,10 @@ use ojon_backend::{
     extract_sensitivity_from_imatrix,
     prepare_model_abliteration, run_model_abliteration, inspect_task_suite,
 };
+use ojon_backend::diffusion_gguf::{
+    MediaKind, InputLayout, prepare_gguf_convert, run_gguf_convert,
+    prepare_gguf_smoke, run_gguf_smoke,
+};
 use std::env;
 use std::ffi::OsString;
 use std::io::{self, ErrorKind};
@@ -74,6 +78,10 @@ Commands:
   ojon eval-sweep <sweep-manifest.json> <held-out-corpus.txt> [--tool llama-perplexity] [--gpu-layers N] [--context 2048] [--max-degradation 1.0] --confirm
   ojon imatrix-plan <original-f16.gguf> <calibration.txt> <new-imatrix.gguf> [--gpu-layers 0] [--context 2048] [--tool path]
   ojon imatrix-run  <original-f16.gguf> <calibration.txt> <new-imatrix.gguf> [options] --confirm
+  ojon diffusion-gguf-plan <denoiser.safetensors> <output.gguf> [--tool sd-cli] [--kind image|video] [--layout diffusion|checkpoint] [--format q4_0|q5_0|q8_0|q4_K|q3_K]
+  ojon diffusion-gguf-run <denoiser.safetensors> <output.gguf> [same options] --confirm
+  ojon diffusion-gguf-smoke-plan <denoiser.gguf> <output.png|webm> [--kind image|video] [--component vae=vae.safetensors] [--component llm=encoder.gguf] [--prompt text] [--seed 42] [--steps 4]
+  ojon diffusion-gguf-smoke-run <denoiser.gguf> <output.png|webm> [same options] --confirm
   ojon diffusion-plan <local-source> <output.safetensors> --checkout <upstream> [--backend svdq] [--kind image|video] [--format int4] [--python python] [--samples 32]
   ojon pack-plan <original.safetensors> <output.ojonq> [--bits 4] [--group 64]
   ojon pack-run  <original.safetensors> <output.ojonq> [options] --confirm
@@ -819,6 +827,99 @@ fn run() -> io::Result<()> {
             let saved=unpack(&src,&out)?;
             println!("restored_safetensors: {}",saved.display());
             println!("warning: model weights are lossily reconstructed; no full task-quality claim");
+        }
+        Some("diffusion-gguf-plan") | Some("diffusion-gguf-run") => {
+            let execute=cmd=="diffusion-gguf-run";
+            let source=PathBuf::from(next_argument(&mut args,"local denoiser safetensors")?);
+            let output=PathBuf::from(next_argument(&mut args,"new output GGUF")?);
+            let mut tool=PathBuf::from("sd-cli");
+            let mut kind=MediaKind::Image;
+            let mut layout=InputLayout::Diffusion;
+            let mut precision="q4_0".to_string();
+            let mut confirm=false;
+            while let Some(opt)=args.next(){
+                match opt.to_str(){
+                    Some("--tool")=>tool=PathBuf::from(next_argument(&mut args,"sd-cli")?),
+                    Some("--kind")=>kind=MediaKind::parse(next_argument(&mut args,"image|video")?
+                        .to_str().ok_or_else(||invalid("invalid model kind"))?)?,
+                    Some("--layout")=>layout=InputLayout::parse(next_argument(&mut args,"diffusion|checkpoint")?
+                        .to_str().ok_or_else(||invalid("invalid layout"))?)?,
+                    Some("--format")=>precision=next_argument(&mut args,"GGUF quantization")?
+                        .to_str().ok_or_else(||invalid("invalid GGUF format"))?.to_owned(),
+                    Some("--confirm") if execute=>confirm=true,
+                    _=>return Err(invalid(format!("unknown diffusion GGUF option: {}",opt.to_string_lossy()))),
+                }
+            }
+            let plan=prepare_gguf_convert(&source,&output,&tool,kind,layout,&precision)?;
+            if execute {
+                if !confirm{return Err(invalid("real sd-cli conversion requires --confirm"));}
+                let result=run_gguf_convert(&plan,|line|eprintln!("{line}"))?;
+                println!("{result}");
+            }else{
+                println!("{}",plan.json());
+            }
+        }
+        Some("diffusion-gguf-smoke-plan") | Some("diffusion-gguf-smoke-run") => {
+            let execute=cmd=="diffusion-gguf-smoke-run";
+            let model=PathBuf::from(next_argument(&mut args,"converted GGUF denoiser")?);
+            let output=PathBuf::from(next_argument(&mut args,"new PNG or WebM output")?);
+            let mut tool=PathBuf::from("sd-cli");
+            let mut kind=MediaKind::Image;
+            let mut components:Vec<(String,PathBuf)>=Vec::new();
+            let mut prompt="a simple wooden cube on a plain background".to_owned();
+            let mut seed=42i64;
+            let mut steps=4u32;
+            let mut width=512u32;
+            let mut height=512u32;
+            let mut frames=9u32;
+            let mut fps=8u32;
+            let mut offload=false;
+            let mut confirm=false;
+            while let Some(opt)=args.next(){
+                match opt.to_str(){
+                    Some("--tool")=>tool=PathBuf::from(next_argument(&mut args,"sd-cli")?),
+                    Some("--kind")=>kind=MediaKind::parse(next_argument(&mut args,"image|video")?
+                        .to_str().ok_or_else(||invalid("invalid kind"))?)?,
+                    Some("--component")=>{
+                        let value=next_argument(&mut args,"name=local-file")?;
+                        let value=value.to_str().ok_or_else(||invalid("component must be UTF-8"))?;
+                        let (name,path)=value.split_once('=').ok_or_else(||invalid("component must be name=path"))?;
+                        components.push((name.to_owned(),PathBuf::from(path)));
+                    },
+                    Some("--prompt")=>prompt=next_argument(&mut args,"prompt")?.to_str()
+                        .ok_or_else(||invalid("prompt must be UTF-8"))?.into(),
+                    Some("--seed")=>seed=next_argument(&mut args,"seed")?.to_str()
+                        .ok_or_else(||invalid("seed must be numeric"))?.parse()
+                        .map_err(|_|invalid("invalid seed"))?,
+                    Some("--steps")=>steps=next_argument(&mut args,"steps")?.to_str()
+                        .ok_or_else(||invalid("steps must be numeric"))?.parse()
+                        .map_err(|_|invalid("invalid steps"))?,
+                    Some("--width")=>width=next_argument(&mut args,"width")?.to_str()
+                        .ok_or_else(||invalid("width must be numeric"))?.parse()
+                        .map_err(|_|invalid("invalid width"))?,
+                    Some("--height")=>height=next_argument(&mut args,"height")?.to_str()
+                        .ok_or_else(||invalid("height must be numeric"))?.parse()
+                        .map_err(|_|invalid("invalid height"))?,
+                    Some("--frames")=>frames=next_argument(&mut args,"frames")?.to_str()
+                        .ok_or_else(||invalid("frames must be numeric"))?.parse()
+                        .map_err(|_|invalid("invalid frames"))?,
+                    Some("--fps")=>fps=next_argument(&mut args,"fps")?.to_str()
+                        .ok_or_else(||invalid("fps must be numeric"))?.parse()
+                        .map_err(|_|invalid("invalid fps"))?,
+                    Some("--offload-to-cpu")=>offload=true,
+                    Some("--confirm") if execute=>confirm=true,
+                    _=>return Err(invalid(format!("unknown diffusion smoke option: {}",opt.to_string_lossy()))),
+                }
+            }
+            let plan=prepare_gguf_smoke(&model,&output,&tool,kind,
+                &components,&prompt,seed,steps,width,height,frames,fps,offload)?;
+            if execute{
+                if !confirm{return Err(invalid("generating media loads real weights and requires --confirm"));}
+                let result=run_gguf_smoke(&plan,|line|eprintln!("{line}"))?;
+                println!("{result}");
+            }else{
+                println!("{}",plan.json());
+            }
         }
         Some("diffusion-plan") | Some("diffusion-inspect") | Some("diffusion-run") => {
             let stage = cmd.to_string_lossy().to_string();
