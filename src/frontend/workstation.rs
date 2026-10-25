@@ -982,7 +982,7 @@ impl Workstation {
         let auto_generated_output = self.output == default_output(&self.source, previous_precision);
         let mut cmds = CommandBuffer::new();
         let palette = ThemePalette::studio_graphite();
-        let mut click_pointer = self.pointer;
+        let mut click_pointer = self.pointer.clone();
         click_pointer.primary_down = self.click_pulse;
         self.click_pulse = false;
         let navigation_width = 56.0;
