@@ -239,7 +239,7 @@ users the internal quantization options.
 - **Native Rust image/video weight storage:** inspect, pack and restore original safetensors models into 2/3/4-bit Ojon-packed containers; experimental SVDQuant INT4 route remains available separately.
 - Expose JSON model probes, backend discovery, candidate planning, and quality-report ranking for local agents.
 
-**Not yet universal:** image/video/speech/utility quantization adapters, full multimodal evaluation, automatic quality benchmarking across all model families, cancellation/resume, universal family-specific tests, and real peak memory prediction remain in development. Merely detecting a backend does not mean it is compatible.
+**Not yet universal:** image/video coverage is currently limited to compatible sd-cli diffusion GGUF workflows and optional SVDQuant experiments; speech/utility quantization, full multimodal evaluation, automatic quality benchmarking across all model families, cancellation/resume, universal family-specific tests, and real peak memory prediction remain in development. Merely detecting a backend does not mean it is compatible.
 
 ## Install
 

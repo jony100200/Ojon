@@ -832,7 +832,8 @@ fn run() -> io::Result<()> {
             let execute=cmd=="diffusion-gguf-run";
             let source=PathBuf::from(next_argument(&mut args,"local denoiser safetensors")?);
             let output=PathBuf::from(next_argument(&mut args,"new output GGUF")?);
-            let mut tool=PathBuf::from("sd-cli");
+            let mut tool=ojon_backend::discovered_path(BackendId::StableDiffusionCpp)
+                .unwrap_or_else(||PathBuf::from("sd-cli"));
             let mut kind=MediaKind::Image;
             let mut layout=InputLayout::Diffusion;
             let mut precision="q4_0".to_string();
@@ -863,7 +864,8 @@ fn run() -> io::Result<()> {
             let execute=cmd=="diffusion-gguf-smoke-run";
             let model=PathBuf::from(next_argument(&mut args,"converted GGUF denoiser")?);
             let output=PathBuf::from(next_argument(&mut args,"new PNG or WebM output")?);
-            let mut tool=PathBuf::from("sd-cli");
+            let mut tool=ojon_backend::discovered_path(BackendId::StableDiffusionCpp)
+                .unwrap_or_else(||PathBuf::from("sd-cli"));
             let mut kind=MediaKind::Image;
             let mut layout=InputLayout::Diffusion;
             let mut backend:Option<String>=None;

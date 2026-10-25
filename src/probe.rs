@@ -136,10 +136,10 @@ fn inspect_safetensors(path: &Path) -> io::Result<ModelProbe> {
         identification: if tensor_names.is_empty() { "unknown".into() } else {
             format!("{} tensors; first keys: {}", count, tensor_names.iter().take(3).copied().collect::<Vec<_>>().join(", "))
         }, confidence, bytes:file_size, tensor_count:Some(count as u64),
-        conversion_route:if category==ModelCategory::Diffusion{"public_rebelui_codebook_optional"}else{"none"},
-        conversion_status:if category==ModelCategory::Diffusion{"experimental_no_verified_loader"}else{"not_implemented_for_this_standalone_safetensors"},
+        conversion_route:if category==ModelCategory::Diffusion{"stable_diffusion_cpp_gguf_candidate"}else{"none"},
+        conversion_status:if category==ModelCategory::Diffusion{"sd_cli_conversion_requires_model_specific_runtime_test"}else{"not_implemented_for_this_standalone_safetensors"},
         notes:vec![
-            "Standalone diffusion safetensors may be eligible for external W4/W3/W2A8 codebook conversion; full loader compatibility is NOT verified.".into(),
+            "Standalone diffusion safetensors may be eligible for stable-diffusion.cpp GGUF conversion; installed backend support and real image/video generation must be checked.".into(),
             "Classification from tensor names is advisory; preserve architecture-specific metadata and sensitive tensors.".into(),
         ],
     })

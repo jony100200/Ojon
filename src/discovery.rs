@@ -128,8 +128,8 @@ const SPECS: [BackendSpec; 12] = [
         executable_names: &["sd-cli", "sd-cli.exe"],
         override_env: "OJON_SD_CLI",
         website: "https://github.com/leejet/stable-diffusion.cpp",
-        integration: Integration::DiscoveryOnly,
-        role: "Diffusion support requires a separate compatible adapter",
+        integration: Integration::Wired,
+        role: "Compatible image/video safetensors -> GGUF conversion and real preview smoke via sd-cli",
     },
     BackendSpec {
         id: BackendId::WhisperCpp,

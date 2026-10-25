@@ -126,7 +126,7 @@ fn plan_for(
         }
     } else if probe.category == ModelCategory::Diffusion && probe.format != "ojonq_packed_weights" {
         let is_pipeline = probe.format == "diffusers_pipeline_directory";
-        let is_weights = probe.format == "safetensors";
+        let is_weights = probe.format == "safetensors_single_file";
         options.push(candidate("diffusion_svdq", "diffuse-compressor",
             "SVDQuant transformer INT4", "SVDQ INT4",
             "specific supported Diffusers/CUDA runtime", if is_pipeline { "experimental" } else { "blocked_source_layout" },
@@ -139,11 +139,16 @@ fn plan_for(
             if is_weights { "Native packing is implemented but unpacking restores standard-sized safetensors; this is not a GPU memory reduction" }
             else { "Native packing accepts a standalone original safetensors weight file, not a Diffusers folder" },
             "pack-plan"));
-        options.push(candidate("diffusion_gguf_research", "ComfyUI-GGUF",
-            "model-specific diffusion GGUF export", "GGUF (unverified)",
-            "ComfyUI-GGUF with model-specific loader", "not_wired",
-            "No generic diffusion GGUF conversion adapter in Ojon; architecture and runtime support must be proven",
-            "none"));
+        options.push(candidate("diffusion_gguf_sdcli", "stable-diffusion.cpp",
+            "model-specific image/video denoiser conversion via sd-cli", "GGUF",
+            "stable-diffusion.cpp image/video runtime",
+            if is_weights { "requires_compatibility_test" } else { "blocked_source_layout" },
+            if is_weights {
+                "Standalone safetensors weights can be planned and converted. Exact sd-cli architecture support, text encoder/VAE, runtime load and visual parity still require verification"
+            } else {
+                "Generic Diffusers folders are not accepted by this standalone GGUF route; select a valid standalone denoiser safetensors file"
+            },
+            "diffusion-gguf-plan /path/denoiser.safetensors /path/denoiser-Q4.gguf --kind image|video --format q4_0"));
     } else if probe.format == "ojonq_packed_weights" {
         options.push(candidate("ojon_unpack", "ojon_native", "unpack storage container",
             "safetensors (lossily reconstructed)", "ordinary inference loader after unpack",
@@ -239,12 +244,14 @@ mod tests {
 
     #[test]
     fn diffusion_storage_does_not_claim_gpu_inference() {
-        let planned = plan_for(&fixture("safetensors", ModelCategory::Diffusion),
+        let planned = plan_for(&fixture("safetensors_single_file", ModelCategory::Diffusion),
             "cuda", &[], None).unwrap();
         assert_eq!(planned["options"].as_array().unwrap().len(), 3);
         assert_eq!(planned["options"][1]["state"], "storage_only");
         assert_eq!(planned["options"][1]["runtime_load_verified"], false);
-        assert_eq!(planned["options"][2]["state"], "not_wired");
+        assert_eq!(planned["options"][2]["state"], "requires_compatibility_test");
+        assert_eq!(planned["options"][2]["id"], "diffusion_gguf_sdcli");
+        assert_eq!(planned["options"][2]["runtime_load_verified"], false);
     }
 
     #[test]
