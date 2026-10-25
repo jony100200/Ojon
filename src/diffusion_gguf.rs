@@ -178,14 +178,14 @@ fn component_flag(name:&str)->Option<&'static str>{
 #[derive(Debug)]
 pub struct GgufSmokePlan{
     pub model:PathBuf,pub output:PathBuf,pub tool:PathBuf,
-    pub kind:MediaKind,pub components:Vec<(String,PathBuf)>,
+    pub kind:MediaKind,pub layout:InputLayout,pub components:Vec<(String,PathBuf)>,
     pub prompt:String,pub seed:i64,pub steps:u32,pub width:u32,pub height:u32,
-    pub frames:u32,pub fps:u32,pub offload:bool,
+    pub frames:u32,pub fps:u32,pub offload:bool,pub backend:Option<String>,
 }
 #[allow(clippy::too_many_arguments)]
 pub fn prepare_gguf_smoke(model:&Path,output:&Path,tool:&Path,kind:MediaKind,
-    components:&[(String,PathBuf)],prompt:&str,seed:i64,steps:u32,
-    width:u32,height:u32,frames:u32,fps:u32,offload:bool)->io::Result<GgufSmokePlan>{
+    layout:InputLayout,components:&[(String,PathBuf)],prompt:&str,seed:i64,steps:u32,
+    width:u32,height:u32,frames:u32,fps:u32,offload:bool,backend:Option<&str>)->io::Result<GgufSmokePlan>{
     if prompt.is_empty()||prompt.len()>4096 {return Err(bad("prompt must be 1..4096 bytes"));}
     if !(1..=100).contains(&steps)||width<128||height<128||width>1536||height>1536
         ||width%64!=0||height%64!=0 {
@@ -196,8 +196,29 @@ pub fn prepare_gguf_smoke(model:&Path,output:&Path,tool:&Path,kind:MediaKind,
         return Err(bad("video requires 2..257 frames and 1..60 FPS"));
     }
     let model=model.canonicalize()?;
-    let info=inspect_gguf(&model)?;
-    if info.tensor_count==0{return Err(bad("model GGUF has no tensors"));}
+    match model.extension().and_then(|s|s.to_str()) {
+        Some("gguf")=>{
+            let info=inspect_gguf(&model)?;
+            if info.tensor_count==0{return Err(bad("model GGUF has no tensors"));}
+        },
+        Some("safetensors")=>{
+            let info=probe_model(&model)?;
+            if info.format!="safetensors_single_file"||info.tensor_count==Some(0){
+                return Err(bad("baseline source lacks valid safetensors metadata"));
+            }
+        },
+        _=>return Err(bad("runtime smoke requires standalone GGUF or safetensors model")),
+    }
+    if kind==MediaKind::Video && layout==InputLayout::Checkpoint{
+        return Err(bad("video smoke requires a standalone diffusion denoiser"));
+    }
+    if let Some(name)=backend{
+        if name.is_empty()||name.len()>150||
+           !name.bytes().all(|b|b.is_ascii_alphanumeric()||
+               matches!(b,b'_'|b'-'|b'='|b','|b'&')){
+            return Err(bad("invalid sd-cli backend assignment"));
+        }
+    }
     let output=target(output,if kind==MediaKind::Image{"png"}else{"webm"})?;
     if model==output{return Err(bad("smoke output cannot overwrite model"));}
     let mut verified=Vec::new();
@@ -210,27 +231,28 @@ pub fn prepare_gguf_smoke(model:&Path,output:&Path,tool:&Path,kind:MediaKind,
         if !path.is_file(){return Err(bad("conditioning component must be a local file"));}
         verified.push((name.clone(),path));
     }
-    Ok(GgufSmokePlan{model,output,tool:checked_tool(tool)?,kind,
-        components:verified,prompt:prompt.into(),seed,steps,width,height,frames,fps,offload})
+    Ok(GgufSmokePlan{model,output,tool:checked_tool(tool)?,kind,layout,
+        components:verified,prompt:prompt.into(),seed,steps,width,height,frames,fps,offload,
+        backend:backend.map(str::to_owned)})
 }
 impl GgufSmokePlan{
     pub fn json(&self)->Value{
         json!({"schema":"ojon.diffusion_gguf_smoke_plan.v1","status":"PLAN_ONLY",
             "backend":"stable-diffusion.cpp","model":self.model.to_string_lossy(),
-            "kind":self.kind.name(),"output":self.output.to_string_lossy(),
+            "kind":self.kind.name(),"input_layout":self.layout.name(),"output":self.output.to_string_lossy(),
             "tool":self.tool.to_string_lossy(),"components":self.components.iter()
                 .map(|(k,v)|json!({"name":k,"path":v.to_string_lossy()})).collect::<Vec<_>>(),
             "seed":self.seed,"prompt":self.prompt,"steps":self.steps,
             "width":self.width,"height":self.height,
             "frames":if self.kind==MediaKind::Video{Some(self.frames)}else{None::<u32>},
             "fps":if self.kind==MediaKind::Video{Some(self.fps)}else{None::<u32>},
-            "offload_to_cpu":self.offload,"model_loaded":false,
+            "offload_to_cpu":self.offload,"runtime_backend":self.backend,"model_loaded":false,
             "warning":"Smoke only proves the installed sd-cli produced a structurally recognizable media file; compare visual output with a matched-seed original before quality approval."})
     }
     fn command(&self,dest:&Path)->Command{
         let mut cmd=Command::new(&self.tool);
         cmd.arg("-M").arg(if self.kind==MediaKind::Image{"img_gen"}else{"vid_gen"})
-            .arg("--diffusion-model").arg(&self.model)
+            .arg(self.layout.flag()).arg(&self.model)
             .arg("-o").arg(dest).arg("-p").arg(&self.prompt)
             .arg("-s").arg(self.seed.to_string())
             .arg("--steps").arg(self.steps.to_string())
@@ -244,6 +266,7 @@ impl GgufSmokePlan{
                 .arg("--fps").arg(self.fps.to_string());
         }
         if self.offload{cmd.arg("--offload-to-cpu");}
+        if let Some(name)=&self.backend{cmd.arg("--backend").arg(name);}
         cmd
     }
 }
@@ -273,6 +296,7 @@ pub fn run_gguf_smoke(plan:&GgufSmokePlan,mut log:impl FnMut(&str))->io::Result<
     let report=json!({"schema":"ojon.diffusion_gguf_smoke_result.v1",
         "status":"RUNTIME_GENERATION_COMPLETED_NOT_QUALITY_VERIFIED",
         "backend":"stable-diffusion.cpp","kind":plan.kind.name(),
+        "input_layout":plan.layout.name(),"runtime_backend":plan.backend,
         "model":plan.model.to_string_lossy(),"output":plan.output.to_string_lossy(),
         "output_bytes":bytes,"elapsed_seconds":start.elapsed().as_secs_f64(),
         "seed":plan.seed,"prompt":plan.prompt,"steps":plan.steps,

@@ -865,6 +865,8 @@ fn run() -> io::Result<()> {
             let output=PathBuf::from(next_argument(&mut args,"new PNG or WebM output")?);
             let mut tool=PathBuf::from("sd-cli");
             let mut kind=MediaKind::Image;
+            let mut layout=InputLayout::Diffusion;
+            let mut backend:Option<String>=None;
             let mut components:Vec<(String,PathBuf)>=Vec::new();
             let mut prompt="a simple wooden cube on a plain background".to_owned();
             let mut seed=42i64;
@@ -880,6 +882,10 @@ fn run() -> io::Result<()> {
                     Some("--tool")=>tool=PathBuf::from(next_argument(&mut args,"sd-cli")?),
                     Some("--kind")=>kind=MediaKind::parse(next_argument(&mut args,"image|video")?
                         .to_str().ok_or_else(||invalid("invalid kind"))?)?,
+                    Some("--layout")=>layout=InputLayout::parse(next_argument(&mut args,"diffusion|checkpoint")?
+                        .to_str().ok_or_else(||invalid("invalid layout"))?)?,
+                    Some("--backend")=>backend=Some(next_argument(&mut args,"sd-cli device assignment")?
+                        .to_str().ok_or_else(||invalid("invalid backend"))?.to_owned()),
                     Some("--component")=>{
                         let value=next_argument(&mut args,"name=local-file")?;
                         let value=value.to_str().ok_or_else(||invalid("component must be UTF-8"))?;
@@ -912,7 +918,8 @@ fn run() -> io::Result<()> {
                 }
             }
             let plan=prepare_gguf_smoke(&model,&output,&tool,kind,
-                &components,&prompt,seed,steps,width,height,frames,fps,offload)?;
+                layout,&components,&prompt,seed,steps,width,height,frames,fps,offload,
+                backend.as_deref())?;
             if execute{
                 if !confirm{return Err(invalid("generating media loads real weights and requires --confirm"));}
                 let result=run_gguf_smoke(&plan,|line|eprintln!("{line}"))?;

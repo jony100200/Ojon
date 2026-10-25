@@ -805,3 +805,14 @@ original and quantized model with the same model components, prompt,
 seed, sampler, dimensions and steps; inspect texture/detail, defects,
 and, for video, temporal stability. Ojon deliberately marks general visual
 quality and peak VRAM **unverified** until measured.
+
+For matched before/after preview generation, `diffusion-gguf-smoke-*`
+also accepts an original standalone `.safetensors` denoiser. Run the
+baseline and quantized checkpoint with matching `--seed`, `--steps`,
+`--prompt`, `--width`, `--height` and `--component` settings, into
+different output files. `--layout checkpoint` selects `sd-cli -m` for
+appropriate full single-file checkpoints. `--backend cuda0`,
+`--backend vulkan0`, `--backend cpu` or assignment forms such as
+`--backend diffusion=vulkan0,vae=cpu` explicitly select the target
+runtime backend. A successful load is necessary but does not establish
+image or video fidelity.
