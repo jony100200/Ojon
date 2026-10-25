@@ -797,6 +797,48 @@ published only on command success. Both conversion and runtime preview
 results emit versioned JSON receipts. The smoke output is a real PNG or WebM
 whose file signature is checked.
 
+### ComfyUI-GGUF: independent runtime generation check
+
+Ojon now provides a separate, **real** ComfyUI-GGUF smoke gate. It submits
+an existing **API-format workflow** to a local ComfyUI server and requires
+an actual GGUF loader node and retrievable media before writing its receipt.
+This does not silently claim that the GGUF created by sd-cli will load in
+ComfyUI; it tests that question against your installed ComfyUI version.
+
+1. Install the ComfyUI-GGUF custom node, place the candidate denoiser GGUF
+   in `ComfyUI/models/diffusion_models` (or `models/unet`) and provide the
+   actual VAE/text encoders expected by the image or video family.
+2. Export a working **API-format** generation workflow with a
+   `UnetLoaderGGUF` node (or `UnetLoaderGGUFAdvanced`). Save an image
+   with a SaveImage node; for video use a node that emits a retrievable
+   video or animated-media history output.
+3. Run the **non-executing** plan first. Use `--confirm` to submit a real
+   job to the local ComfyUI instance (default: loopback port 8188):
+
+```sh
+python scripts/comfy_gguf_smoke.py --workflow /workflows/flux-api.json --model /models/flux-q4_0.gguf --receipt /results/flux-comfy.json --kind image
+python scripts/comfy_gguf_smoke.py --workflow /workflows/flux-api.json --model /models/flux-q4_0.gguf --receipt /results/flux-comfy.json --kind image --confirm
+
+# Video with an existing compatible API-format workflow:
+python scripts/comfy_gguf_smoke.py --workflow /workflows/wan-api.json --model /models/wan-q4_0.gguf --receipt /results/wan-comfy.json --kind video --confirm
+```
+
+When a workflow has multiple GGUF diffusion loader nodes, select the
+intended one with `--node-id`. To compare sd.cpp and ComfyUI on the same
+candidate, require a successful **separate receipt from each backend**.
+The ComfyUI bridge uses only Python's standard library; it does not install
+packages, download models or expose a remote server.
+
+**Precision contract:** the sd-cli GGUF route is GGML **weight-only**
+quantization (Q4_0 is not W4A4). Conversion now refuses a GGUF containing
+zero tensors with the requested quantization storage type, and its receipt
+reports the exact tensor count and GGUF architecture. Standard Q4_0 is the
+conservative first cross-runtime candidate, followed by independently
+tested Q5_0/Q8_0. Dedicated SVDQuant/Nunchaku INT4 W4A4 is a **different**
+runtime format with fused activation-quantization kernels; it is **not**
+interchangeable with these GGUF files. Loader success alone does not
+establish quality, exact memory use, or cross-backend numeric equivalence.
+
 **Limitations:** architecture compatibility and running GPU memory depend
 on the installed `sd-cli`, not on metadata guesses. Text encoders and VAE
 may still need substantial memory. Nunchaku SVDQuant safetensors cannot be
