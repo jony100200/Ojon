@@ -82,6 +82,8 @@ Commands:
   ojon diffusion-gguf-run <denoiser.safetensors> <output.gguf> [same options] --confirm
   ojon diffusion-gguf-smoke-plan <denoiser.gguf> <output.png|webm> [--kind image|video] [--component vae=vae.safetensors] [--component llm=encoder.gguf] [--prompt text] [--seed 42] [--steps 4]
   ojon diffusion-gguf-smoke-run <denoiser.gguf> <output.png|webm> [same options] --confirm
+  ojon diffusion-gguf-comfy-plan <denoiser.gguf> <api-workflow.json> <receipt.json> [--kind image|video] [--python python] [--node-id ID] [--server http://127.0.0.1:8188]
+  ojon diffusion-gguf-comfy-run  <denoiser.gguf> <api-workflow.json> <receipt.json> [same options] --confirm
   ojon diffusion-plan <local-source> <output.safetensors> --checkout <upstream> [--backend svdq] [--kind image|video] [--format int4] [--python python] [--samples 32]
   ojon pack-plan <original.safetensors> <output.ojonq> [--bits 4] [--group 64]
   ojon pack-run  <original.safetensors> <output.ojonq> [options] --confirm
@@ -929,6 +931,54 @@ fn run() -> io::Result<()> {
             }else{
                 println!("{}",plan.json());
             }
+        }
+        Some("diffusion-gguf-comfy-plan") | Some("diffusion-gguf-comfy-run") => {
+            let execute=cmd=="diffusion-gguf-comfy-run";
+            let model=PathBuf::from(next_argument(&mut args,"local GGUF denoiser")?);
+            let workflow=PathBuf::from(next_argument(&mut args,"ComfyUI API-format workflow JSON")?);
+            let receipt=PathBuf::from(next_argument(&mut args,"new ComfyUI runtime receipt JSON")?);
+            let mut python=PathBuf::from("python");
+            let mut kind=MediaKind::Image;
+            let mut node_id=None::<String>;
+            let mut model_name=None::<String>;
+            let mut server=None::<String>;
+            let mut timeout=None::<u32>;
+            let mut confirmed=false;
+            while let Some(opt)=args.next(){
+                match opt.to_str(){
+                    Some("--python")=>python=PathBuf::from(next_argument(&mut args,"Python executable")?),
+                    Some("--kind")=>kind=MediaKind::parse(next_argument(&mut args,"image|video")?
+                        .to_str().ok_or_else(||invalid("invalid media kind"))?)?,
+                    Some("--node-id")=>node_id=Some(next_argument(&mut args,"ComfyUI loader node ID")?
+                        .to_str().ok_or_else(||invalid("invalid node ID"))?.to_owned()),
+                    Some("--model-name")=>model_name=Some(next_argument(&mut args,"ComfyUI listed model name")?
+                        .to_str().ok_or_else(||invalid("invalid model name"))?.to_owned()),
+                    Some("--server")=>server=Some(next_argument(&mut args,"loopback ComfyUI API URL")?
+                        .to_str().ok_or_else(||invalid("invalid server"))?.to_owned()),
+                    Some("--timeout")=>timeout=Some(next_argument(&mut args,"timeout seconds")?
+                        .to_str().ok_or_else(||invalid("invalid timeout"))?.parse()
+                        .map_err(|_|invalid("timeout must be integer seconds"))?),
+                    Some("--confirm") if execute=>confirmed=true,
+                    _=>return Err(invalid(format!("unknown ComfyUI GGUF option: {}",opt.to_string_lossy()))),
+                }
+            }
+            if execute&&!confirmed{
+                return Err(invalid("ComfyUI generation requires --confirm"));
+            }
+            // Embedding the stdlib-only adapter makes the compiled Ojon CLI
+            // independent of the caller's working directory and script files.
+            // No shell is used. The Python adapter itself requires loopback-only
+            // ComfyUI and refuses to publish a receipt for failed generations.
+            let mut command=std::process::Command::new(python);
+            command.arg("-c").arg(include_str!("../scripts/comfy_gguf_smoke.py"))
+                .arg("--model").arg(model).arg("--workflow").arg(workflow)
+                .arg("--receipt").arg(receipt).arg("--kind").arg(kind.name());
+            if let Some(value)=node_id{command.arg("--node-id").arg(value);}
+            if let Some(value)=model_name{command.arg("--model-name").arg(value);}
+            if let Some(value)=server{command.arg("--server").arg(value);}
+            if let Some(value)=timeout{command.arg("--timeout").arg(value.to_string());}
+            if execute{command.arg("--confirm");}
+            ojon_backend::jobs::run_with_log(&mut command,|line|println!("{line}"))?;
         }
         Some("diffusion-plan") | Some("diffusion-inspect") | Some("diffusion-run") => {
             let stage = cmd.to_string_lossy().to_string();
