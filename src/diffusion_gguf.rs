@@ -37,6 +37,38 @@ fn precision(text:&str)->io::Result<&str>{
     match text {"q8_0"|"q5_0"|"q4_0"|"q4_K"|"q3_K"=>Ok(text),
         _=>Err(bad("GGUF precision must be q8_0, q5_0, q4_0, q4_K or q3_K"))}
 }
+// Refuse packed SVDQ/Nunchaku checkpoints before passing them to a
+// converter expecting ordinary floating-point denoiser tensors. GGUF
+// output is weight-only; already packed modules need their native loader.
+fn verify_dense_media_source(path:&Path)->io::Result<()>{
+    let mut file=File::open(path)?;
+    let size=file.metadata()?.len();
+    let mut prefix=[0u8;8];
+    file.read_exact(&mut prefix)?;
+    let header_bytes=u64::from_le_bytes(prefix);
+    if header_bytes==0 || header_bytes>32*1024*1024 ||
+        header_bytes>size.saturating_sub(8){
+        return Err(bad("invalid or excessive safetensors header"));
+    }
+    let mut metadata=vec![0u8;header_bytes as usize];
+    file.read_exact(&mut metadata)?;
+    let value:Value=serde_json::from_slice(&metadata)
+        .map_err(|_|bad("invalid safetensors tensor catalog"))?;
+    let catalog=value.as_object().ok_or_else(||bad("invalid safetensors header object"))?;
+    let mut dense=0usize;
+    for (name,entry) in catalog.iter().filter(|(name,_)|name.as_str()!="__metadata__"){
+        if [".qweight",".qdata",".qzeros",".codebook",".wscales"].iter()
+            .any(|suffix|name.ends_with(suffix)){
+            return Err(bad("packed low-bit checkpoint detected; use the matching W4A4 runtime instead of sd-cli GGUF conversion"));
+        }
+        if matches!(entry["dtype"].as_str(),Some("F16"|"BF16"|"F32")){
+            dense+=1;
+        }
+    }
+    if dense==0{return Err(bad("GGUF conversion requires original floating-point model tensors"));}
+    Ok(())
+}
+
 // GGML tensor types, not activation quantization or Nunchaku W4A4.
 // The target backend may keep sensitive tensors at a higher precision.
 fn requested_storage_type(name:&str)->io::Result<u32>{
@@ -121,6 +153,7 @@ pub fn prepare_gguf_convert(source:&Path,output:&Path,tool:&Path,
     if info.format!="safetensors_single_file"||info.tensor_count==Some(0){
         return Err(bad("source lacks valid safetensors tensor descriptors"));
     }
+    verify_dense_media_source(&source)?;
     if kind==MediaKind::Video && layout==InputLayout::Checkpoint{
         return Err(bad("video requires a standalone diffusion denoiser"));
     }
@@ -360,6 +393,32 @@ mod tests{
         assert!(prepare_gguf_convert(Path::new("does_not_exist.safetensors"),
             Path::new("out.gguf"),Path::new("sd-cli"),MediaKind::Image,
             InputLayout::Diffusion,"q4_0").is_err());
+    }
+    #[test]
+    fn dense_input_allowed_but_prepacked_w4a4_rejected(){
+        fn make(path:&Path,packed:bool){
+            let mut map=serde_json::Map::new();
+            map.insert("transformer.blocks.0.attn.weight".into(),
+                json!({"dtype":"F16","shape":[2,2],"data_offsets":[0,8]}));
+            if packed{
+                map.insert("transformer.blocks.0.attn.qweight".into(),
+                    json!({"dtype":"I8","shape":[2,2],"data_offsets":[8,12]}));
+            }
+            let header=serde_json::to_vec(&Value::Object(map)).unwrap();
+            let mut file=File::create(path).unwrap();
+            file.write_all(&(header.len() as u64).to_le_bytes()).unwrap();
+            file.write_all(&header).unwrap();
+            file.write_all(&[0u8;12]).unwrap();
+        }
+        let root=std::env::temp_dir().join(format!("ojon-diff-gguf-dense-{}",std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let dense=root.join("dense.safetensors");
+        let packed=root.join("packed.safetensors");
+        make(&dense,false);
+        make(&packed,true);
+        assert!(verify_dense_media_source(&dense).is_ok());
+        assert!(verify_dense_media_source(&packed).is_err());
+        let _=fs::remove_dir_all(root);
     }
     #[test]
     fn requested_quantization_is_checked_in_tensor_catalog(){
