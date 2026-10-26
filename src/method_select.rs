@@ -48,10 +48,14 @@ pub struct MethodChoice {pub report:Value}
 impl MethodChoice {pub fn as_json(&self)->&Value {&self.report}}
 
 /// Example input: {"schema":"ojon.edit_method_scores.v1","baseline":{...},
-/// "max_capability_loss":0.02,"candidates":[{"name":"magnitude",...},
+/// "max_capability_loss":0.02,"max_refusal_rate":0.05,
+/// "candidates":[{"name":"magnitude",...},
 /// {"name":"ara",...}]}.
 /// "baseline" must contain the same measured metrics as candidates.
 /// Select only candidates meeting individual baseline capability tolerances.
+/// If max_refusal_rate is configured, refusal rate must also stay at/below it.
+/// The threshold is opt-in for backwards compatibility; an unset gate is not
+/// evidence that a model meets any uncensoring target.
 /// Among qualifying candidates: lowest refusal rate, then smaller bytes.
 /// If none passes, NO winner is selected.
 pub fn choose_edit_method(input:&Value)->io::Result<MethodChoice>{
@@ -59,6 +63,9 @@ pub fn choose_edit_method(input:&Value)->io::Result<MethodChoice>{
         return Err(invalid("expected ojon.edit_method_scores.v1"));
     }
     let loss=num(input,"max_capability_loss")?;
+    let max_refusal_rate=if input.get("max_refusal_rate").is_some(){
+        Some(num(input,"max_refusal_rate")?)
+    }else{None};
     let baseline=input.get("baseline").ok_or_else(||invalid("missing baseline measurements"))?;
     let vision=baseline.get("vision").is_some();
     let base=trial(baseline,vision)?;
@@ -83,6 +90,11 @@ pub fn choose_edit_method(input:&Value)->io::Result<MethodChoice>{
                 reasons.push("vision loss exceeds tolerance".to_owned());
             }
         }
+        if let Some(maximum)=max_refusal_rate {
+            if x.refusal_rate>maximum+1e-12 {
+                reasons.push(format!("refusal rate exceeds configured maximum {maximum:.4}"));
+            }
+        }
         if reasons.is_empty() {
             eligible.push(x.clone());
         }
@@ -103,6 +115,8 @@ pub fn choose_edit_method(input:&Value)->io::Result<MethodChoice>{
     Ok(MethodChoice{report:json!({
         "schema":"ojon.edit_method_choice.v1",
         "status":status,"max_capability_loss":loss,
+        "max_refusal_rate":max_refusal_rate,
+        "refusal_gate_configured":max_refusal_rate.is_some(),
         "vision_required":vision,
         "winner":selected.map(|v|json!({
             "method":v.name,"artifact":v.artifact,
@@ -146,6 +160,28 @@ mod tests{
         let data=json!({"schema":"ojon.edit_method_scores.v1",
         "max_capability_loss":0.03,"baseline":score("base",0.8,0.9,0.9,1000),
         "candidates":[no_vis]});
+        assert!(choose_edit_method(&data).is_err());
+    }
+    #[test]
+    fn threshold_blocks_high_refusal_even_when_capabilities_pass(){
+        let data=json!({"schema":"ojon.edit_method_scores.v1",
+          "max_capability_loss":0.04,"max_refusal_rate":0.05,
+          "baseline":score("base",0.75,0.9,0.9,1000),
+          "candidates":[score("still_refuses",0.40,0.9,0.9,100),
+                        score("accepted",0.04,0.89,0.89,200)]});
+        let result=choose_edit_method(&data).unwrap();
+        assert_eq!(result.as_json()["winner"]["method"],"accepted");
+        assert_eq!(result.as_json()["refusal_gate_configured"],true);
+        assert_eq!(result.as_json()["tested"][0]["quality_pass"],false);
+        assert!(result.as_json()["tested"][0]["rejection_reasons"][0]
+            .as_str().unwrap().contains("refusal rate exceeds"));
+    }
+    #[test]
+    fn impossible_refusal_gate_fails_input_validation(){
+        let data=json!({"schema":"ojon.edit_method_scores.v1",
+          "max_capability_loss":0.01,"max_refusal_rate":1.5,
+          "baseline":score("base",0.70,0.9,0.9,1000),
+          "candidates":[score("candidate",0.2,0.9,0.9,500)]});
         assert!(choose_edit_method(&data).is_err());
     }
     #[test]
