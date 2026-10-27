@@ -230,21 +230,21 @@ fn search_dirs() -> Vec<(PathBuf, &'static str)> {
     if let Ok(cwd) = env::current_dir() {
         for sub in [
             "bin",
-            "../llama.cpp",
-            "../llama.cpp/bin",
-            "../llama.cpp/build/bin",
             "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-vulkan/bin/Release",
+            "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-cuda/bin/Release",
             "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl/bin/Release",
             "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl",
-            "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-cuda/bin/Release",
-            "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/cpu",
             "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/vulkan",
             "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/cuda",
             "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/sycl",
-            "../KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/cpu",
+            "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/cpu",
             "../KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/vulkan",
             "../KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/cuda",
             "../KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/sycl",
+            "../KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/cpu",
+            "../llama.cpp",
+            "../llama.cpp/bin",
+            "../llama.cpp/build/bin",
          ] {
             dirs.push((cwd.join(sub), "adjacent workspace folder"));
         }
