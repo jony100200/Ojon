@@ -11,7 +11,7 @@
 
 use crate::gguf::{inspect_gguf, inspect_gguf_tensors, GgufTensor};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};

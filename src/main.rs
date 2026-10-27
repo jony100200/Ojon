@@ -9,10 +9,9 @@ use ojon_backend::{
     plan_diffusion, run_diffusion, inspect_diffusion_recipe, discover_diffusion,
     DiffusionEngine, DiffusionKind, DiffusionFormat,
     plan_pack, run_pack, unpack, prepare_imatrix, run_imatrix,
-    prepare_autoround_plan, run_autoround,
     prepare_research, ResearchKind,
     resource_plan, ResourceMode, prepare_bench, run_bench, compare_bench_files,
-    prepare_exl3, run_exl3, prepare_eval, run_eval, prepare_adaptive, run_adaptive,
+    prepare_exl3, run_exl3, run_eval, prepare_adaptive, run_adaptive,
     extract_sensitivity_from_imatrix,
     prepare_model_abliteration, run_model_abliteration, inspect_task_suite,
 };
@@ -2403,6 +2402,57 @@ fn run() -> io::Result<()> {
             println!("verification: GGUF_METADATA_AND_TENSOR_CATALOG_ONLY");
             println!("runtime_load_test: NOT_RUN");
             println!("task_quality_test: NOT_RUN");
+        }
+        Some("flint-inspect") => {
+            let path = PathBuf::from(next_argument(&mut args, "Flint GGUF file or directory")?);
+            let mut json = false;
+            while let Some(opt) = args.next() {
+                if opt.to_str() == Some("--json") { json = true; }
+            }
+            let topology = ojon_backend::inspect_flint_moe(&path)?;
+            if json {
+                println!("{}", topology.as_json());
+            } else {
+                println!("Flint 256-Expert MoE Architecture:");
+                println!("  model: {}", topology.model_path.display());
+                println!("  file_size: {:.2} GiB", topology.file_bytes as f64 / 1073741824.0);
+                println!("  total_tensors: {}", topology.total_tensors);
+                println!("  blocks: {}", topology.block_count);
+                println!("  experts: {} total, {} active per token, {} shared", topology.expert_count, topology.expert_used_count, topology.expert_shared_count);
+                println!("  context_length: {} tokens", topology.context_length);
+                println!("  router_tensors (frozen under RoCo): {}", topology.router_tensor_count);
+                println!("  packed_sparse_experts: {}", topology.packed_expert_tensor_count);
+                println!("  shared_experts: {}", topology.shared_expert_tensor_count);
+                println!("  attention_tensors: {}", topology.attention_tensor_count);
+            }
+        }
+        Some("flint-pipeline-plan") => {
+            let path = PathBuf::from(next_argument(&mut args, "Flint GGUF file or directory")?);
+            let mut json = false;
+            while let Some(opt) = args.next() {
+                if opt.to_str() == Some("--json") { json = true; }
+            }
+            let plan = ojon_backend::plan_flint_pipeline(&path)?;
+            if json {
+                println!("{}", plan.as_json());
+            } else {
+                println!("Flint Multi-Stage Optimization Pipeline Plan:");
+                println!("  flint_directory: {}", plan.flint_dir.display());
+                println!("  bf16_model: {}", plan.bf16_model.display());
+                if let Some(im) = &plan.imatrix_path { println!("  imatrix: {}", im.display()); }
+                if let Some(log) = &plan.baseline_logits { println!("  baseline_logits: {}", log.display()); }
+                println!("  pending_candidates: {}", plan.pending_candidates.len());
+                for (p, cand) in &plan.pending_candidates {
+                    println!("    - {:?}: {}", p, cand.display());
+                }
+                println!("  target_hardware: {} ({} MiB free VRAM)", plan.hardware_fit.target_device, plan.hardware_fit.vram_free_mib);
+                println!("  recommended_tier: {:?}", plan.hardware_fit.recommended_tier);
+                println!("  reasoning: {}", plan.hardware_fit.reasoning);
+                println!("  actions:");
+                for (i, act) in plan.recommended_actions.iter().enumerate() {
+                    println!("    {}. {}", i + 1, act);
+                }
+            }
         }
         Some("inspect-hf") => {
             let path = PathBuf::from(next_argument(&mut args, "HF model folder")?);

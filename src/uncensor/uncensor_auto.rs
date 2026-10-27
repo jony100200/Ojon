@@ -535,5 +535,34 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn uncensor_auto_plan_rejects_invalid_parameters() {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("ojon-uncensor-err-test-{}-{stamp}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("test-f16.gguf");
+        write_mock_model(&model);
+
+        // 1. Invalid strengths (> 1.0)
+        let mut req_bad_strength = UncensorAutoRequest::new(model.clone(), dir.clone());
+        req_bad_strength.allow_resource_risk = true;
+        req_bad_strength.strengths = vec![1.5];
+        assert!(prepare_uncensor_auto(req_bad_strength).is_err());
+
+        // 2. Invalid tokens (0)
+        let mut req_bad_tokens = UncensorAutoRequest::new(model.clone(), dir.clone());
+        req_bad_tokens.allow_resource_risk = true;
+        req_bad_tokens.refusal_tokens = 0;
+        assert!(prepare_uncensor_auto(req_bad_tokens).is_err());
+
+        // 3. Invalid blocks (> 4 blocks)
+        let mut req_bad_blocks = UncensorAutoRequest::new(model, dir.clone());
+        req_bad_blocks.allow_resource_risk = true;
+        req_bad_blocks.blocks = Some(vec![0, 1, 2, 3, 4]);
+        assert!(prepare_uncensor_auto(req_bad_blocks).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
 

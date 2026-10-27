@@ -6,7 +6,7 @@
 //! Exports the ojon.abliteration.v1 low-rank edit recipe for the Rust editor.
 
 use serde_json::{json,Value};
-use std::fs::{self,File,OpenOptions};
+use std::fs::{self,OpenOptions};
 use std::io::{self,ErrorKind,Write};
 use std::path::{Path,PathBuf};
 

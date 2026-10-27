@@ -8,8 +8,8 @@
 use crate::gguf::{inspect_gguf, inspect_gguf_tensors};
 use crate::jobs::run_with_log;
 use serde_json::{json, Value};
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, ErrorKind, Seek, Write};
+use std::fs::{self, OpenOptions};
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -247,6 +247,8 @@ pub fn run_adapter_smoke(plan:&AdapterSmokePlan,mut log:impl FnMut(&str))->io::R
 #[cfg(test)]
 mod tests{
     use super::*;
+    use std::fs::File;
+    use std::io::Seek;
     #[test]
     fn only_genuine_local_run_may_claim_success(){
         let result=AdapterSmokeResult{report:PathBuf::from("test.json"),
