@@ -58,7 +58,7 @@ fn safe_target(name:&str)->bool {
     let mut parts=name.split('.');
     matches!(parts.next(),Some("blk"))
         && parts.next().is_some_and(|part|!part.is_empty() && part.bytes().all(|b|b.is_ascii_digit()))
-        && matches!(parts.next(),Some("attn_output"|"ffn_down"))
+        && matches!(parts.next(),Some("attn_output"|"ffn_down"|"ffn_down_shexp"))
         && matches!(parts.next(),Some("weight"))
         && parts.next().is_none()
 }

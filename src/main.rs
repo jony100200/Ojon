@@ -34,6 +34,12 @@ Commands:
   ojon backends [--json]     Detect installed engines and show official download links
   ojon backends --probe [--json]     Explicitly probe installed runtime device IDs and quantizer formats\n  ojon settings path|show|set <key> <value>|clear <key>   Manage local per-user preferences
   ojon probe <model-path> [--json]   Identify model format/family without loading weights
+  ojon flint-inspect <model.gguf|dir> [--json]   Inspect Flint MoE 256-expert topology
+  ojon flint-pipeline-plan <model.gguf|dir> [--json]   Plan multi-stage RoCo quantization and hardware fit
+  ojon flint-evaluate <candidate.pending> [--reference-logits <path>] [--tool <perplexity>] [--gpu-layers N] [--json]
+  ojon flint-functional <model.gguf> [--tool <llama-cli>] [--gpu-layers N] [--json]
+  ojon flint-uncensor-plan <model.gguf> <output.gguf> [--strength 0.1] [--blocks 20,24,28,32] [--json]
+  ojon flint-promote <candidate.pending> --receipt <receipt.json> --confirm
   ojon optimize-workflow-run <model-path> [--baseline Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--imatrix calibration.imatrix] [--tensor-sensitivity scores.json] [--ppl-corpus heldout.txt] [--max-ppl-regression-pct 0] [--goal balanced|smallest] --confirm [--json]
   ojon optimize-workflow-plan <model-path> [--baseline current-Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--server-tool path-to-llama-server] [--goal balanced|smallest|fastest] [--precisions IQ4_XS,Q3_K_M] [--bench-prompt-tokens 512] [--bench-gen-tokens 128] [--bench-repetitions 3] [--balanced-speed-ratio 0.85] [--device auto|cpu|cuda|xpu] [--runtime-device SYCL0|CUDA0] [--gpu-layers 99] [--min-saving-percent 5] [--max-loss-points 0] [--json]
   ojon optimize-plan <model-path> [--device auto|cpu|cuda|xpu] [--json]   Compare candidate routes without converting
@@ -2453,6 +2459,206 @@ fn run() -> io::Result<()> {
                     println!("    {}. {}", i + 1, act);
                 }
             }
+        }
+        Some("flint-evaluate") => {
+            let candidate = PathBuf::from(next_argument(&mut args, "Flint pending candidate (.gguf.pending)")?);
+            let mut ref_logits: Option<PathBuf> = None;
+            let mut tool: Option<PathBuf> = None;
+            let mut gpu_layers: Option<i32> = None;
+            let mut json = false;
+
+            while let Some(opt) = args.next() {
+                match opt.to_str() {
+                    Some("--reference-logits") => {
+                        ref_logits = Some(PathBuf::from(next_argument(&mut args, "reference logits path")?));
+                    }
+                    Some("--tool") => {
+                        tool = Some(PathBuf::from(next_argument(&mut args, "llama-perplexity path")?));
+                    }
+                    Some("--gpu-layers") => {
+                        let val = next_argument(&mut args, "gpu layers")?;
+                        gpu_layers = Some(val.to_str().unwrap_or("0").parse().unwrap_or(0));
+                    }
+                    Some("--json") => json = true,
+                    _ => return Err(invalid(format!("unknown option: {}", opt.to_string_lossy()))),
+                }
+            }
+
+            let reference = match ref_logits {
+                Some(p) => p,
+                None => {
+                    let parent = candidate.parent().ok_or_else(|| invalid("candidate has no parent"))?;
+                    let v2 = parent.join("Flint-BF16-eval-v2.logits");
+                    if v2.is_file() {
+                        v2
+                    } else {
+                        parent.join("Flint-BF16-eval.logits")
+                    }
+                }
+            };
+
+            let perplexity = match tool {
+                Some(p) => p,
+                None => discovered_path(BackendId::LlamaPerplexity)
+                    .ok_or_else(|| invalid("llama-perplexity executable not found; install it or pass --tool"))?,
+            };
+
+            let receipt = ojon_backend::evaluate_flint_candidate_logits(
+                &candidate,
+                &reference,
+                &perplexity,
+                gpu_layers,
+                &mut |line| {
+                    if !json { eprintln!("{}", line); }
+                },
+            )?;
+
+            if json {
+                println!("{}", receipt.as_json());
+            } else {
+                println!("Flint Parity Evaluation Receipt:");
+                println!("  candidate: {}", receipt.candidate_model_path.display());
+                println!("  reference_logits: {}", receipt.reference_logits_path.display());
+                println!("  evaluated_tokens: {}", receipt.evaluated_tokens);
+                println!("  top1_token_agreement: {:.2}%", receipt.top1_token_agreement_pct);
+                println!("  kl_divergence: {:.4}", receipt.kl_divergence);
+                println!("  passes_negligible_loss_gate: {}", receipt.passes_negligible_loss_gate);
+                println!("  certified_for_production: {}", receipt.certified_for_production);
+            }
+        }
+        Some("flint-functional") => {
+            let model = PathBuf::from(next_argument(&mut args, "Flint model (.gguf)")?);
+            let mut tool: Option<PathBuf> = None;
+            let mut gpu_layers = 0i32;
+            let mut json = false;
+
+            while let Some(opt) = args.next() {
+                match opt.to_str() {
+                    Some("--tool") => {
+                        tool = Some(PathBuf::from(next_argument(&mut args, "llama-cli path")?));
+                    }
+                    Some("--gpu-layers") => {
+                        let val = next_argument(&mut args, "gpu layers")?;
+                        gpu_layers = val.to_str().unwrap_or("0").parse().unwrap_or(0);
+                    }
+                    Some("--json") => json = true,
+                    _ => return Err(invalid(format!("unknown option: {}", opt.to_string_lossy()))),
+                }
+            }
+
+            let cli = match tool {
+                Some(p) => p,
+                None => discovered_path(BackendId::LlamaCli)
+                    .ok_or_else(|| invalid("llama-cli executable not found; pass --tool"))?,
+            };
+
+            let report = ojon_backend::run_flint_functional_suite(
+                &model,
+                &cli,
+                gpu_layers,
+                &mut |line| {
+                    if !json { eprintln!("{}", line); }
+                },
+            )?;
+
+            if json {
+                println!("{}", report);
+            } else {
+                println!("Flint Functional Suite Result:");
+                println!("  model: {}", report["model"]);
+                println!("  all_passed: {}", report["all_passed"]);
+                println!("  cases_passed: {}/{}", report["passed_cases"], report["total_cases"]);
+            }
+        }
+        Some("flint-uncensor-plan") => {
+            let model = PathBuf::from(next_argument(&mut args, "source Flint model path")?);
+            let output = PathBuf::from(next_argument(&mut args, "output uncensored model path")?);
+            let mut strength = 0.10f64;
+            let mut blocks: Option<Vec<usize>> = None;
+            let mut json = false;
+
+            while let Some(opt) = args.next() {
+                match opt.to_str() {
+                    Some("--strength") => {
+                        let val = next_argument(&mut args, "strength")?;
+                        strength = val.to_str().unwrap_or("0.10").parse().unwrap_or(0.10);
+                    }
+                    Some("--blocks") => {
+                        let val = next_argument(&mut args, "comma-separated blocks")?;
+                        let val_str = val.to_str().unwrap_or("");
+                        let parsed: Vec<usize> = val_str
+                            .split(',')
+                            .filter_map(|s| s.trim().parse().ok())
+                            .collect();
+                        blocks = Some(parsed);
+                    }
+                    Some("--json") => json = true,
+                    _ => return Err(invalid(format!("unknown option: {}", opt.to_string_lossy()))),
+                }
+            }
+
+            let plan = ojon_backend::plan_flint_uncensor(
+                &model,
+                &output,
+                strength,
+                blocks.as_deref(),
+            )?;
+
+            if json {
+                println!("{}", plan.as_json());
+            } else {
+                println!("Flint MoE Uncensor Plan:");
+                println!("  source_model: {}", plan.source_model.display());
+                println!("  output_model: {}", plan.output_model.display());
+                println!("  target_blocks: {:?}", plan.target_blocks);
+                println!("  strength: {:.2}", plan.strength);
+                println!("  paired_prompts: {}", plan.paired_prompts_dir.display());
+                println!("  target_tensors: {} tensors", plan.target_tensors.len());
+                for t in &plan.target_tensors {
+                    println!("    - {}", t);
+                }
+                println!("  router_protection: ProQuant RoCo: all blk.N.ffn_gate_inp router matrices are 100% frozen");
+            }
+        }
+        Some("flint-promote") => {
+            let pending = PathBuf::from(next_argument(&mut args, "Flint candidate (.gguf.pending)")?);
+            let mut receipt_path: Option<PathBuf> = None;
+            let mut confirm = false;
+
+            while let Some(opt) = args.next() {
+                match opt.to_str() {
+                    Some("--receipt") => {
+                        receipt_path = Some(PathBuf::from(next_argument(&mut args, "receipt path")?));
+                    }
+                    Some("--confirm") => confirm = true,
+                    _ => return Err(invalid(format!("unknown option: {}", opt.to_string_lossy()))),
+                }
+            }
+
+            if !confirm {
+                return Err(invalid("flint-promote requires --confirm"));
+            }
+
+            let r_path = receipt_path.ok_or_else(|| invalid("flint-promote requires --receipt <receipt.json>"))?;
+            let raw = std::fs::read(&r_path)?;
+            let json_val: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| invalid(e.to_string()))?;
+
+            let receipt = ojon_backend::FlintParityReceipt {
+                reference_logits_path: PathBuf::from(json_val["reference_logits_path"].as_str().unwrap_or("")),
+                candidate_model_path: PathBuf::from(json_val["candidate_model_path"].as_str().unwrap_or("")),
+                evaluated_tokens: json_val["evaluated_tokens"].as_u64().unwrap_or(0) as usize,
+                vocab_size: json_val["vocab_size"].as_u64().unwrap_or(0) as usize,
+                top1_token_agreement_pct: json_val["top1_token_agreement_pct"].as_f64().unwrap_or(0.0),
+                top5_token_agreement_pct: json_val["top5_token_agreement_pct"].as_f64().unwrap_or(0.0),
+                average_cosine_similarity: json_val["average_cosine_similarity"].as_f64().unwrap_or(0.0),
+                kl_divergence: json_val["kl_divergence"].as_f64().unwrap_or(0.0),
+                passes_negligible_loss_gate: json_val["passes_negligible_loss_gate"].as_bool().unwrap_or(false),
+                certified_for_production: json_val["certified_for_production"].as_bool().unwrap_or(false),
+            };
+
+            let promoted = ojon_backend::promote_flint_candidate(&pending, &receipt)?;
+            println!("promoted_model: {}", promoted.display());
+            println!("status: PROMOTED_TO_OFFICIAL_PRODUCTION_GGUF");
         }
         Some("inspect-hf") => {
             let path = PathBuf::from(next_argument(&mut args, "HF model folder")?);

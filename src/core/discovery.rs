@@ -237,6 +237,14 @@ fn search_dirs() -> Vec<(PathBuf, &'static str)> {
             "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl/bin/Release",
             "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl",
             "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-cuda/bin/Release",
+            "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/cpu",
+            "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/vulkan",
+            "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/cuda",
+            "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/sycl",
+            "../KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/cpu",
+            "../KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/vulkan",
+            "../KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/cuda",
+            "../KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/sycl",
          ] {
             dirs.push((cwd.join(sub), "adjacent workspace folder"));
         }
@@ -248,6 +256,14 @@ fn search_dirs() -> Vec<(PathBuf, &'static str)> {
             "KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl/bin/Release",
             "KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl",
             "KS-RupayanFlow/UpStream/KS_llama.cpp/build-cuda/bin/Release",
+            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/cpu",
+            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/vulkan",
+            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/cuda",
+            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/sycl",
+            "KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/cpu",
+            "KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/vulkan",
+            "KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/cuda",
+            "KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/sycl",
             "llama.cpp/bin",
         ] {
             dirs.push((root.join(sub), "KS_WORKSPACE_ROOT"));

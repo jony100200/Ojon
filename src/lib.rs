@@ -137,6 +137,8 @@ pub use uncensor_auto::{
 pub use self::workflows::flint_pipeline;
 pub use self::workflows::flint_pipeline::{
     plan_flint_pipeline, inspect_flint_moe, assess_flint_hardware_fit,
-    promote_flint_candidate, FlintPipelinePlan, FlintMoETopology,
-    FlintHardwareFit, FlintParityReceipt,
+    promote_flint_candidate, evaluate_flint_candidate_logits,
+    run_flint_functional_suite, generate_flint_roco_recipe,
+    plan_flint_uncensor, FlintPipelinePlan, FlintMoETopology,
+    FlintHardwareFit, FlintParityReceipt, FlintUncensorPlan,
 };
