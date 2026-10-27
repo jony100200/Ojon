@@ -288,6 +288,8 @@ pub fn plan_optimize_workflow(
     }
     if suite.is_none(){
         checks.push("No held-out test suite supplied; result cannot prove quality parity.".into());
+    } else if input.suite.is_none() {
+        checks.push("One-click default: using bundled sanity task suite as baseline capability gate.".into());
     }
     if input.ppl_corpus.is_some() && executable(backends,BackendId::LlamaPerplexity).is_none(){
         checks.push("Perplexity corpus provided but llama-perplexity not detected. Execution requires this backend.".into());
@@ -296,7 +298,11 @@ pub fn plan_optimize_workflow(
         checks.push("Optional held-out perplexity gate not configured; the task suite alone may miss language-model degradation.".into());
     }
     if input.imatrix.is_none() && original_gguf{
-        checks.push("No calibrated importance matrix supplied; low-bit candidates will use uncalibrated recipes.".into());
+        if input.auto_imatrix || crate::discovery::bundled_data_file("calibration.txt").is_some() {
+            checks.push("One-click default: auto-imatrix will calibrate with bundled corpus when llama-imatrix is present.".into());
+        } else {
+            checks.push("No calibrated importance matrix supplied; low-bit candidates will use uncalibrated recipes.".into());
+        }
     }
     // Metadata + read-only host resource telemetry; never infer quantizer peak
     // RSS from GGUF size. Unknown resources do not authorize automatic writes.
@@ -550,10 +556,14 @@ pub fn run_optimize_workflow(
     }
     // Plan validated concrete CUDA/SYCL selection and free-memory telemetry.
     // Real runtime compatibility still requires the load and benchmark checks below.
-    let suite=request.suite.as_ref()
-        .ok_or_else(||invalid("a held-out task suite is mandatory"))?;
-    let out=request.output_dir.as_ref()
-        .ok_or_else(||invalid("an existing output directory is mandatory"))?;
+    let bundled_suite = crate::discovery::bundled_data_file("sanity-tasks.json");
+    let suite = request.suite.as_ref()
+        .or(bundled_suite.as_ref())
+        .ok_or_else(|| invalid("a held-out task suite is mandatory"))?;
+    let default_out = request.model.parent().map(Path::to_path_buf);
+    let out = request.output_dir.as_ref()
+        .or(default_out.as_ref())
+        .ok_or_else(|| invalid("an existing output directory is mandatory"))?;
     let mut options=configured_options(request,backends);
     let gpu_target=matches!(request.device.as_str(),"cuda"|"xpu");
     // Metadata-only planning never runs local binaries. Once approved, query
@@ -600,7 +610,7 @@ pub fn run_optimize_workflow(
     // One-click auto calibration: only on explicit request, with an installed
     // llama-imatrix, a bundled read-only corpus, and a quantizer that
     // advertises --imatrix. Otherwise the run proceeds uncalibrated and says so.
-    let auto_calibration_evidence=if request.auto_imatrix && request.imatrix.is_none()
+    let auto_calibration_evidence=if (request.auto_imatrix || request.imatrix.is_none())
         && matches!(action,"quantize_and_compare"|"adaptive_quantize_and_compare"){
         match (executable(backends,BackendId::LlamaImatrix),
             quantizer_evidence.get("supports_imatrix").and_then(Value::as_bool),

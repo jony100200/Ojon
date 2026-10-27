@@ -844,8 +844,14 @@ impl Workstation {
             return Err("Automatic refusal search needs an original F16/BF16/F32 GGUF source".into());
         }
         let paired=self.unc_paired.trim();
+        let paired=if paired.is_empty(){
+            ojon_backend::discovery::bundled_data_dir("paired")
+                .or_else(||ojon_backend::discovery::bundled_data_file("positive.txt").and_then(|p|p.parent().map(Path::to_path_buf)))
+                .map(|p|p.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        }else{paired.to_string()};
         if paired.is_empty(){
-            return Err("Select a folder with paired positive.txt and negative.txt behaviour examples".into());
+            return Err("Select a folder with paired positive.txt and negative.txt behaviour examples (or place them in data/paired)".into());
         }
         let refusal_suite=self.unc_refusal_suite.trim();
         let refusal_suite=if refusal_suite.is_empty(){
@@ -906,7 +912,8 @@ impl Workstation {
         self.needs_redraw=true;
         std::thread::spawn(move||{
             let result=ojon_backend::uncensor_auto::prepare_uncensor_auto(request.clone())
-                .map(|plan|plan.as_json());
+                .map(|plan|plan.as_json())
+                .map_err(|e|e.to_string());
             let _=tx.send(WorkerEvent::UncensorAutoPlan(request,result));
         });
     }
@@ -1254,6 +1261,9 @@ impl Workstation {
             Focus::UncOutput => &mut self.unc_output,
             Focus::UncStrength => &mut self.unc_strength,
             Focus::UncBlock => &mut self.unc_block,
+            Focus::UncPaired => &mut self.unc_paired,
+            Focus::UncRefusalSuite => &mut self.unc_refusal_suite,
+            Focus::UncTaskSuite => &mut self.unc_task_suite,
         };
         if self.control_held {
             if let Key::Character(ref key) = event.logical_key {
@@ -1533,6 +1543,7 @@ impl Workstation {
                                     BackendId::WhisperCpp => "Speech / Whisper",
                                     BackendId::IntelAutoRound => "Intel AutoRound (XPU)",
                                     BackendId::IntelSyclCli => "Intel SYCL / oneAPI",
+                                    BackendId::LlamaCvectorGenerator => "llama.cpp control-vector generator",
                                 };
                                 details.horizontal(22.0, |row| {
                                     row.label(&format!("{}:", label));

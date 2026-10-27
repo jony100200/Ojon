@@ -22,7 +22,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 fn invalid(s: impl Into<String>) -> io::Error { io::Error::new(ErrorKind::InvalidInput, s.into()) }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UncensorAutoRequest {
     pub source: PathBuf,
     pub output_dir: PathBuf,
@@ -115,12 +115,30 @@ fn default_sweep_blocks(blocks: &[usize]) -> Vec<usize> {
         .into_iter().collect()
 }
 
-pub fn prepare_uncensor_auto(request: UncensorAutoRequest) -> io::Result<UncensorAutoPlan> {
+pub fn prepare_uncensor_auto(mut request: UncensorAutoRequest) -> io::Result<UncensorAutoPlan> {
+    if request.cvector_generator.as_os_str().is_empty() || !request.cvector_generator.is_file() {
+        if let Some(tool) = crate::discovery::discovered_path(crate::discovery::BackendId::LlamaCvectorGenerator) {
+            request.cvector_generator = tool;
+        }
+    }
     if !request.cvector_generator.is_file() {
         return Err(invalid("automatic uncensoring requires an installed llama-cvector-generator executable"));
     }
+    if request.runtime.as_os_str().is_empty() || !request.runtime.is_file() {
+        if let Some(tool) = crate::discovery::discovered_path(crate::discovery::BackendId::LlamaCli) {
+            request.runtime = tool;
+        }
+    }
+    if request.server_runtime.is_none() {
+        request.server_runtime = crate::discovery::discovered_path(crate::discovery::BackendId::LlamaServer);
+    }
     if request.server_runtime.as_ref().is_some_and(|p| !p.is_file()) {
         return Err(invalid("configured llama-server executable does not exist"));
+    }
+    if request.quantize.is_some() && (!request.quantizer.is_file() || request.quantizer.as_os_str().is_empty()) {
+        if let Some(tool) = crate::discovery::discovered_path(crate::discovery::BackendId::LlamaQuantize) {
+            request.quantizer = tool;
+        }
     }
     let source = request.source.canonicalize()?;
     let info = inspect_gguf(&source)?;
@@ -129,12 +147,28 @@ pub fn prepare_uncensor_auto(request: UncensorAutoRequest) -> io::Result<Uncenso
     }
     let output_dir = request.output_dir.canonicalize()?;
     if !output_dir.is_dir() { return Err(invalid("output folder must exist")); }
+    if request.refusal_probes.as_os_str().is_empty() {
+        if let Some(bundled) = crate::discovery::bundled_data_file("refusal-probes.json") {
+            request.refusal_probes = bundled;
+        }
+    }
+    if request.capability_suite.as_os_str().is_empty() {
+        if let Some(bundled) = crate::discovery::bundled_data_file("sanity-tasks.json") {
+            request.capability_suite = bundled;
+        }
+    }
     if request.refusal_probes.as_os_str().is_empty() || request.capability_suite.as_os_str().is_empty() {
         return Err(invalid("refusal probes and capability suite files are both required"));
     }
     // Validate both suites now so a broken file never reaches the sweep.
     crate::refusal::parse_refusal_suite(&request.refusal_probes)?;
     crate::task_eval::parse_eval_suite(&request.capability_suite)?;
+    if request.paired_prompts.as_os_str().is_empty() {
+        if let Some(bundled) = crate::discovery::bundled_data_dir("paired")
+            .or_else(|| crate::discovery::bundled_data_file("positive.txt").and_then(|p| p.parent().map(Path::to_path_buf))) {
+            request.paired_prompts = bundled;
+        }
+    }
     let folder = request.paired_prompts.canonicalize()?;
     let positive = folder.join("positive.txt"); let negative = folder.join("negative.txt");
     if paired_file(&positive)? != paired_file(&negative)? {
@@ -425,3 +459,81 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
     drop(staging);
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Seek;
+
+    fn write_mock_model(path: &Path) {
+        fn write_str(f: &mut File, value: &str) {
+            f.write_all(&(value.len() as u64).to_le_bytes()).unwrap();
+            f.write_all(value.as_bytes()).unwrap();
+        }
+        let mut f = File::create(path).unwrap();
+        f.write_all(b"GGUF").unwrap();
+        f.write_all(&3u32.to_le_bytes()).unwrap();
+        f.write_all(&3u64.to_le_bytes()).unwrap(); // 3 tensors
+        f.write_all(&2u64.to_le_bytes()).unwrap(); // 2 kv metadata
+        write_str(&mut f, "general.architecture");
+        f.write_all(&8u32.to_le_bytes()).unwrap();
+        write_str(&mut f, "llama");
+        write_str(&mut f, "general.file_type");
+        f.write_all(&4u32.to_le_bytes()).unwrap();
+        f.write_all(&1u32.to_le_bytes()).unwrap(); // 1 = F16
+        // Tensor 0: blk.0.attn_output.weight
+        write_str(&mut f, "blk.0.attn_output.weight");
+        f.write_all(&2u32.to_le_bytes()).unwrap(); // 2 dims
+        f.write_all(&2u64.to_le_bytes()).unwrap();
+        f.write_all(&2u64.to_le_bytes()).unwrap();
+        f.write_all(&1u32.to_le_bytes()).unwrap(); // F16
+        f.write_all(&0u64.to_le_bytes()).unwrap();
+        // Tensor 1: blk.1.attn_output.weight
+        write_str(&mut f, "blk.1.attn_output.weight");
+        f.write_all(&2u32.to_le_bytes()).unwrap();
+        f.write_all(&2u64.to_le_bytes()).unwrap();
+        f.write_all(&2u64.to_le_bytes()).unwrap();
+        f.write_all(&1u32.to_le_bytes()).unwrap();
+        f.write_all(&32u64.to_le_bytes()).unwrap();
+        // Tensor 2: blk.2.attn_output.weight
+        write_str(&mut f, "blk.2.attn_output.weight");
+        f.write_all(&2u32.to_le_bytes()).unwrap();
+        f.write_all(&2u64.to_le_bytes()).unwrap();
+        f.write_all(&2u64.to_le_bytes()).unwrap();
+        f.write_all(&1u32.to_le_bytes()).unwrap();
+        f.write_all(&64u64.to_le_bytes()).unwrap();
+
+        let pos = f.stream_position().unwrap();
+        let pad = ((32 - pos % 32) % 32) as usize;
+        f.write_all(&vec![0u8; pad]).unwrap();
+        f.write_all(&[0u8; 96]).unwrap(); // 96 bytes aligned data
+    }
+
+    #[test]
+    fn uncensor_auto_plan_generates_grid_with_bundled_defaults() {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("ojon-uncensor-test-{}-{stamp}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("test-f16.gguf");
+        write_mock_model(&model);
+
+        let mut request = UncensorAutoRequest::new(model, dir.clone());
+        request.allow_resource_risk = true;
+        // Test with explicit blocks and strengths
+        request.strengths = vec![0.15, 0.30];
+        request.blocks = Some(vec![1]);
+
+        let plan = prepare_uncensor_auto(request).unwrap();
+        assert_eq!(plan.candidates.len(), 2);
+        assert_eq!(plan.strengths, vec![0.15, 0.30]);
+        assert_eq!(plan.blocks, vec![1]);
+
+        let json = plan.as_json();
+        assert_eq!(json["schema"], "ojon.uncensor_auto_plan.v1");
+        assert_eq!(json["status"], "PLAN_ONLY");
+        assert_eq!(json["candidate_count"], 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+

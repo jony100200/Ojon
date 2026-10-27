@@ -233,9 +233,64 @@ fn nvidia_devices() -> Vec<Value> {
     result
 }
 
-/// Optional Intel Level Zero telemetry. Missing xpu-smi, N/A and malformed data
-/// are UNKNOWN; we never infer free VRAM from the card's rated capacity.
-/// API: Intel XPU Manager 2.0 --query-gpu and --format=csv,noheader,nounits.
+fn llama_device_telemetry(vendor_filter: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    let candidates = [
+        crate::discovery::discovered_path(crate::discovery::BackendId::IntelSyclCli),
+        crate::discovery::discovered_path(crate::discovery::BackendId::LlamaCli),
+    ];
+    for path in candidates.into_iter().flatten() {
+        if let Ok(output) = Command::new(&path).arg("--list-devices").output() {
+            if output.status.success() {
+                if let Ok(text) = String::from_utf8(output.stdout) {
+                    for line in text.lines() {
+                        let line = line.trim();
+                        let Some((id_part, desc_part)) = line.split_once(':') else { continue; };
+                        let id = id_part.trim();
+                        let desc = desc_part.trim();
+                        let Some((name, mem_part)) = desc.split_once('(') else { continue; };
+                        let name = name.trim();
+                        let Some(mem_str) = mem_part.strip_suffix(')') else { continue; };
+                        let Some((total_str, free_str)) = mem_str.split_once(',') else { continue; };
+                        let total_mib = total_str.trim().strip_suffix("MiB").map(str::trim).and_then(|s| s.parse::<f64>().ok());
+                        let free_mib = free_str.trim().strip_suffix("MiB free").map(str::trim).and_then(|s| s.parse::<f64>().ok());
+                        if let (Some(t_mib), Some(f_mib)) = (total_mib, free_mib) {
+                            if t_mib > 0.0 && f_mib >= 0.0 && f_mib <= t_mib {
+                                let total_bytes = (t_mib * 1024.0 * 1024.0) as u64;
+                                let free_bytes = (f_mib * 1024.0 * 1024.0) as u64;
+                                let lower = name.to_lowercase();
+                                let vendor = if lower.contains("intel") || lower.contains("arc") || id.starts_with("SYCL") {
+                                    "intel"
+                                } else if lower.contains("nvidia") || lower.contains("geforce") || lower.contains("rtx") || id.starts_with("CUDA") {
+                                    "nvidia"
+                                } else {
+                                    "other"
+                                };
+                                if vendor == vendor_filter && !out.iter().any(|v: &Value| v["device_name"] == name) {
+                                    out.push(json!({
+                                        "vendor": vendor,
+                                        "device_id": id,
+                                        "device_name": name,
+                                        "total_vram_bytes": total_bytes,
+                                        "free_vram_bytes": free_bytes,
+                                        "telemetry_source": format!("{} --list-devices", path.file_name().unwrap_or_default().to_string_lossy()),
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !out.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+/// Optional Intel Level Zero / SYCL telemetry. Checks xpu-smi when available,
+/// falling back to real device memory advertised by the detected llama.cpp runtime.
 fn xpu_devices() -> Vec<Value> {
     let output = match Command::new("xpu-smi")
         .args([
@@ -244,13 +299,18 @@ fn xpu_devices() -> Vec<Value> {
         ])
         .output() {
             Ok(v) if v.status.success() => v,
-            _ => return vec![],
+            _ => return llama_device_telemetry("intel"),
         };
     let response = match String::from_utf8(output.stdout) {
         Ok(s) => s,
-        Err(_) => return vec![],
+        Err(_) => return llama_device_telemetry("intel"),
     };
-    parse_xpu_csv(&response)
+    let parsed = parse_xpu_csv(&response);
+    if parsed.is_empty() {
+        llama_device_telemetry("intel")
+    } else {
+        parsed
+    }
 }
 
 /// Used as an isolated fixture test, not a claim that the owner's driver works.

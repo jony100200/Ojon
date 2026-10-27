@@ -1983,6 +1983,22 @@ fn run() -> io::Result<()> {
             }
             if confirmed&&!execute{return Err(invalid("--confirm only works with uncensor-auto-run"));}
             if execute&&!confirmed{return Err(invalid("uncensor-auto-run edits model files and requires --confirm"));}
+            if request.refusal_probes.as_os_str().is_empty(){
+                if let Some(bundled)=ojon_backend::discovery::bundled_data_file("refusal-probes.json"){
+                    request.refusal_probes=bundled;
+                }
+            }
+            if request.capability_suite.as_os_str().is_empty(){
+                if let Some(bundled)=ojon_backend::discovery::bundled_data_file("sanity-tasks.json"){
+                    request.capability_suite=bundled;
+                }
+            }
+            if request.paired_prompts.as_os_str().is_empty(){
+                if let Some(bundled)=ojon_backend::discovery::bundled_data_dir("paired")
+                    .or_else(||ojon_backend::discovery::bundled_data_file("positive.txt").and_then(|p|p.parent().map(Path::to_path_buf))){
+                    request.paired_prompts=bundled;
+                }
+            }
             if request.cvector_generator.as_os_str().is_empty(){
                 request.cvector_generator=discovered_path(BackendId::LlamaCvectorGenerator)
                     .ok_or_else(||invalid("no llama-cvector-generator discovered; pass --cvector-generator"))?;
@@ -1993,6 +2009,10 @@ fn run() -> io::Result<()> {
             }
             if request.server_runtime.is_none(){
                 request.server_runtime=discovered_path(BackendId::LlamaServer);
+            }
+            if request.quantize.is_some() && request.quantizer.as_os_str().is_empty(){
+                request.quantizer=discovered_path(BackendId::LlamaQuantize)
+                    .unwrap_or_else(||PathBuf::from("llama-quantize"));
             }
             let plan=ojon_backend::uncensor_auto::prepare_uncensor_auto(request)?;
             if execute{
@@ -2129,6 +2149,15 @@ fn run() -> io::Result<()> {
             }
             if confirmed && !execute{return Err(invalid("--confirm is only valid with optimize-workflow-run"));}
             if execute && !confirmed{return Err(invalid("optimize-workflow-run requires --confirm"));}
+            if input.suite.is_none(){
+                input.suite=ojon_backend::discovery::bundled_data_file("sanity-tasks.json");
+            }
+            if input.output_dir.is_none(){
+                input.output_dir=input.model.parent().map(Path::to_path_buf);
+            }
+            if input.imatrix.is_none(){
+                input.auto_imatrix=true;
+            }
             let backends=discover_backends();
             let plan=ojon_backend::plan_optimize_workflow(&input,&backends)?;
             if execute {

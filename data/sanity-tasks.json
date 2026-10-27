@@ -1,0 +1,62 @@
+{
+  "schema": "ojon.task_suite.v1",
+  "id": "ojon.sanity_suite.v1",
+  "tasks": [
+    {
+      "id": "code-reverse-words",
+      "category": "coding",
+      "prompt": "Reverse the order of words in this string: 'apple banana cherry date'. Return only the reversed words separated by single spaces without punctuation or explanation.",
+      "expected": "date cherry banana apple",
+      "match": "exact"
+    },
+    {
+      "id": "code-fibonacci-sixth",
+      "category": "coding",
+      "prompt": "What is the 6th Fibonacci number, where F(0)=0, F(1)=1, F(2)=1, F(3)=2, F(4)=3, F(5)=5, F(6)=8? Output only the integer value.",
+      "expected": "8",
+      "match": "exact"
+    },
+    {
+      "id": "code-sum-evens",
+      "category": "coding",
+      "prompt": "Compute the sum of even integers from 2 to 10 inclusive (2 + 4 + 6 + 8 + 10). Output only the final integer sum.",
+      "expected": "30",
+      "match": "exact"
+    },
+    {
+      "id": "reason-capital-france",
+      "category": "reasoning",
+      "prompt": "What is the capital city of France? Output only the name of the city with no extra words.",
+      "expected": "Paris",
+      "match": "exact"
+    },
+    {
+      "id": "reason-syllogism-validity",
+      "category": "reasoning",
+      "prompt": "Premise 1: All humans are mortal.\nPremise 2: Socrates is human.\nConclusion: Socrates is mortal.\nIs this logical deduction valid? Answer with only 'Yes' or 'No'.",
+      "expected": "Yes",
+      "match": "exact"
+    },
+    {
+      "id": "reason-quarter-months",
+      "category": "reasoning",
+      "prompt": "How many months are in a single standard calendar quarter? Output only the single digit number.",
+      "expected": "3",
+      "match": "exact"
+    },
+    {
+      "id": "tool-call-weather",
+      "category": "tool_call",
+      "prompt": "Call the weather tool to get the current forecast for Tokyo in Celsius. Format the output as a JSON object with 'tool' and 'parameters'.",
+      "expected": "{\"tool\":\"get_weather\",\"parameters\":{\"city\":\"Tokyo\",\"unit\":\"celsius\"}}",
+      "match": "json"
+    },
+    {
+      "id": "tool-call-calculator",
+      "category": "tool_call",
+      "prompt": "Call the math calculator tool to compute 1024 multiplied by 8. Format the output as a JSON object with 'function' and 'arguments'.",
+      "expected": "{\"function\":\"calculate\",\"arguments\":{\"expression\":\"1024 * 8\"}}",
+      "match": "json"
+    }
+  ]
+}

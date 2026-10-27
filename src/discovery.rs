@@ -233,8 +233,24 @@ fn search_dirs() -> Vec<(PathBuf, &'static str)> {
             "../llama.cpp",
             "../llama.cpp/bin",
             "../llama.cpp/build/bin",
+            "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-vulkan/bin/Release",
+            "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl/bin/Release",
+            "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl",
+            "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-cuda/bin/Release",
          ] {
             dirs.push((cwd.join(sub), "adjacent workspace folder"));
+        }
+    }
+    if let Ok(root_env) = env::var("KS_WORKSPACE_ROOT") {
+        let root = PathBuf::from(root_env);
+        for sub in [
+            "KS-RupayanFlow/UpStream/KS_llama.cpp/build-vulkan/bin/Release",
+            "KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl/bin/Release",
+            "KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl",
+            "KS-RupayanFlow/UpStream/KS_llama.cpp/build-cuda/bin/Release",
+            "llama.cpp/bin",
+        ] {
+            dirs.push((root.join(sub), "KS_WORKSPACE_ROOT"));
         }
     }
     dirs
@@ -455,8 +471,37 @@ pub fn discovered_path(id: BackendId) -> Option<PathBuf> {
     discover_backends().into_iter().find(|b| b.spec.id == id)?.executable
 }
 
+/// Resolves a bundled read-only fixture directory next to the running executable
+/// or in the project root (`data/<name>`).
+pub fn bundled_data_dir(name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.len() > 128 || !name.bytes().all(|b|
+        b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')) {
+        return None;
+    }
+    let mut candidates = Vec::new();
+    if let Ok(exe) = env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join("data").join(name));
+            if let Some(p2) = parent.parent() {
+                candidates.push(p2.join("data").join(name));
+                if let Some(p3) = p2.parent() {
+                    candidates.push(p3.join("data").join(name));
+                }
+            }
+        }
+    }
+    if let Ok(manifest) = env::var("CARGO_MANIFEST_DIR") {
+        candidates.push(PathBuf::from(manifest).join("data").join(name));
+    }
+    if let Ok(cwd) = env::current_dir() {
+        candidates.push(cwd.join("data").join(name));
+    }
+    candidates.push(PathBuf::from("d:/KSAppDev/Ojon/data").join(name));
+    candidates.into_iter().find(|p| p.is_dir())
+}
+
 /// Resolves a bundled read-only fixture next to the running executable
-/// (`data/<name>`), or None when it is absent. Fixtures let one-click flows
+/// (`data/<name>`), in the project workspace, or None when it is absent. Fixtures let one-click flows
 /// run without user-supplied files; Ojon never downloads or generates them
 /// implicitly, and user-provided paths always win.
 pub fn bundled_data_file(name: &str) -> Option<PathBuf> {
@@ -464,9 +509,26 @@ pub fn bundled_data_file(name: &str) -> Option<PathBuf> {
         b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')) {
         return None;
     }
-    let exe = env::current_exe().ok()?;
-    let path = exe.parent()?.join("data").join(name);
-    path.is_file().then_some(path)
+    let mut candidates = Vec::new();
+    if let Ok(exe) = env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            candidates.push(parent.join("data").join(name));
+            if let Some(p2) = parent.parent() {
+                candidates.push(p2.join("data").join(name));
+                if let Some(p3) = p2.parent() {
+                    candidates.push(p3.join("data").join(name));
+                }
+            }
+        }
+    }
+    if let Ok(manifest) = env::var("CARGO_MANIFEST_DIR") {
+        candidates.push(PathBuf::from(manifest).join("data").join(name));
+    }
+    if let Ok(cwd) = env::current_dir() {
+        candidates.push(cwd.join("data").join(name));
+    }
+    candidates.push(PathBuf::from("d:/KSAppDev/Ojon/data").join(name));
+    candidates.into_iter().find(|p| p.is_file())
 }
 
 #[cfg(test)]
