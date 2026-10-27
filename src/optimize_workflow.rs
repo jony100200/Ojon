@@ -74,6 +74,9 @@ pub struct OptimizeWorkflowRequest {
     pub balanced_min_speed_ratio:f64,
     /// Explicit persistent evaluator, if selected; None discovers installed server.
     pub server_tool:Option<PathBuf>,
+    /// One-click default: when true and no imatrix path is given, an approved
+    /// run calibrates a bundled-corpus importance matrix before quantizing.
+    pub auto_imatrix:bool,
 }
 impl OptimizeWorkflowRequest{
     pub fn new(model:PathBuf)->Self{
@@ -83,7 +86,7 @@ impl OptimizeWorkflowRequest{
             goal:OptimizeGoal::Balanced,device:"auto".into(),runtime_device:None,gpu_layers:0,
             min_saving_percent:5.0,max_loss_points:0.0,
             precision_candidates:None,bench_prompt_tokens:512,bench_generation_tokens:128,
-            bench_repetitions:3,balanced_min_speed_ratio:0.85,server_tool:None
+            bench_repetitions:3,balanced_min_speed_ratio:0.85,server_tool:None,auto_imatrix:false
         }
     }
 }
@@ -486,6 +489,8 @@ pub fn plan_optimize_workflow(
         "current_baseline":base_text,
         "heldout_suite":suite.map(|p|path_text(&p)),
         "calibration_imatrix":input.imatrix.as_ref().map(|p|path_text(p)),
+        "auto_calibration_when_approved":if input.auto_imatrix && input.imatrix.is_none()
+            {"bundled_corpus_llama_imatrix"}else{"not_requested"},
         "tensor_sensitivity":input.tensor_sensitivity.as_ref().map(|p|path_text(p)),
         "heldout_perplexity_corpus":input.ppl_corpus.as_ref().map(|p|path_text(p)),
         "max_relative_perplexity_regression_pct":input.max_ppl_regression_pct,
@@ -592,6 +597,36 @@ pub fn run_optimize_workflow(
         }
         advertised
     }else{json!({"status":"NOT_APPLICABLE_NO_NEW_QUANTIZATION"})};
+    // One-click auto calibration: only on explicit request, with an installed
+    // llama-imatrix, a bundled read-only corpus, and a quantizer that
+    // advertises --imatrix. Otherwise the run proceeds uncalibrated and says so.
+    let auto_calibration_evidence=if request.auto_imatrix && request.imatrix.is_none()
+        && matches!(action,"quantize_and_compare"|"adaptive_quantize_and_compare"){
+        match (executable(backends,BackendId::LlamaImatrix),
+            quantizer_evidence.get("supports_imatrix").and_then(Value::as_bool),
+            crate::discovery::bundled_data_file("calibration.txt")){
+            (Some(tool),Some(true),Some(corpus))=>{
+                let stamp=SystemTime::now().duration_since(UNIX_EPOCH)
+                    .map(|d|d.as_nanos()).unwrap_or(0);
+                let output_imatrix=out.join(format!(
+                    "ojon-auto-imatrix-{}-{}.imatrix",std::process::id(),stamp));
+                match crate::calibration::prepare_imatrix(&request.model,&corpus,&output_imatrix,
+                    &tool,request.gpu_layers.max(0) as u32,2048)
+                    .and_then(|plan|crate::calibration::run_imatrix(&plan,|line|log(line)))
+                {
+                    Ok(done)=>{
+                        options.imatrix=Some(done.clone());
+                        json!({"status":"MEASURED","output":done.to_string_lossy(),
+                            "corpus":"bundled_data_calibration.txt"})
+                    }
+                    Err(e)=>json!({"status":"CALIBRATION_FAILED","reason":e.to_string(),
+                        "effect":"continuing without an importance matrix"}),
+                }
+            },
+            _=>json!({"status":"NOT_RUN_MISSING_TOOL_ADVERTISMENT_OR_BUNDLED_CORPUS",
+                "effect":"continuing without an importance matrix"}),
+        }
+    }else{json!({"status":"NOT_REQUESTED"})};
     log("[ojon] User approved optimizer; backend capabilities checked without loading model weights");
     let (kind,result)=match decision["next_action"].as_str(){
         Some("compare_existing_quants")=>{
@@ -723,7 +758,8 @@ pub fn run_optimize_workflow(
         "evaluation_engine":if options.server_tool.is_some(){"persistent_llama_server"}else{"llama_cli_per_task"},
         "evaluation_server_path":options.server_tool.as_ref().map(|p|path_text(p)),
         "backend_capability_evidence":{"quantizer":quantizer_evidence,
-            "runtime_device":runtime_device_evidence},
+            "runtime_device":runtime_device_evidence,
+            "auto_calibration":auto_calibration_evidence},
         "source_provenance":{"source_path":request.model.to_string_lossy(),
             "reference_path":decision["current_baseline"],
             "sensitivity":request.tensor_sensitivity.as_ref().map(|p|p.to_string_lossy().to_string()),

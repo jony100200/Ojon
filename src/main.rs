@@ -62,6 +62,12 @@ Commands:
   ojon abliterate-gguf-run <original-F16-BF16-GGUF> <direction-recipe.json> <new-model.gguf> --confirm [--json]
   ojon uncensor-cvector-plan <original-F16-BF16-GGUF> <control-vector.gguf> <new-model.gguf> --block N [--strength 0.7] [--json]
   ojon uncensor-cvector-run <original-F16-BF16-GGUF> <control-vector.gguf> <new-model.gguf> --block N [--strength 0.7] --confirm [--json]
+  ojon uncensor-auto-plan <original-F16-GGUF> <output-dir> --refusal-suite probes.json --task-suite tasks.json --paired prompts-folder [--strengths 0.1,0.2,0.35] [--blocks 13,14,15] [--max-capability-loss 0.02] [--max-refusal-rate 0.05] [--quantize Q5_K_M] [--server llama-server] [--gpu-layers N] [--device ID] [--json]
+  ojon uncensor-auto-run  <original-F16-GGUF> <output-dir> [same options] --confirm [--json]   Automatic refusal-edit sweep: every candidate is really measured; smallest-refusal quality-passing winner is published
+  ojon refusal-eval-plan <model.gguf> <probes.json> <report.json> [--tool llama-cli] [--server llama-server] [--gpu-layers N] [--device ID] [--tokens 96] [--json]
+  ojon refusal-eval-run  <model.gguf> <probes.json> <report.json> [same options] --confirm [--json]   Real probe run + bounded phrase classification
+  ojon simple-plan <source> <output-dir> [--precision Q4_K_M|Q5_K_M] [--refusal-edit prompts-folder] [--strength 0.1] [--block N] [--refusal-suite probes.json] [--task-suite tasks.json] [--gpu-layers N] [--json]
+  ojon simple-run  <source> <output-dir> [same options] --confirm [--json]   One click: optional refusal edit + quantize + real load smoke (+= measured suites when provided)
   ojon abliterate-model-plan <original-HF-folder> <direction-recipe.json> <new-model-folder> [--json]
   ojon abliterate-model-run <original-HF-folder> <direction-recipe.json> <new-model-folder> --confirm [--json]
   ojon abliterate-plan <original-shard.safetensors> <direction-recipe.json> <new-shard.safetensors> [--json]
@@ -1822,6 +1828,194 @@ fn run() -> io::Result<()> {
                 println!("{}", plan.json());
                 ojon_backend::autoround::run_autoround_with_policy(&plan, allow_resource_risk)?;
                 println!("autoround_status: COMPLETED");
+            }
+        }
+        Some("simple-plan") | Some("simple-run") => {
+            let execute=cmd=="simple-run";
+            let source=PathBuf::from(next_argument(&mut args,"original GGUF or HF model folder")?);
+            let output_dir=PathBuf::from(next_argument(&mut args,"existing output directory")?);
+            let mut request=ojon_backend::simple_workflow::SimpleRequest::new(source,output_dir);
+            let(mut confirmed,mut json)=(false,false);
+            while let Some(option)=args.next(){
+                match option.to_str(){
+                    Some("--precision")=>request.precision=Precision::from_str(
+                        next_argument(&mut args,"Q4_K_M or Q5_K_M")?.to_str()
+                        .ok_or_else(||invalid("precision must be UTF-8"))?)
+                        .map_err(invalid)?,
+                    Some("--quantizer")=>request.quantizer=PathBuf::from(
+                        next_argument(&mut args,"llama-quantize executable")?),
+                    Some("--runtime")=>request.runtime=PathBuf::from(
+                        next_argument(&mut args,"llama-cli executable")?),
+                    Some("--gpu-layers")=>request.gpu_layers=next_argument(&mut args,"GPU offload layers")?
+                        .to_string_lossy().parse().map_err(|_|invalid("GPU layers must be integer"))?,
+                    Some("--refusal-edit")=>request.refusal_examples=Some(
+                        PathBuf::from(next_argument(&mut args,"folder with paired positive.txt and negative.txt")?)),
+                    Some("--cvector-generator")=>request.cvector_generator=Some(
+                        PathBuf::from(next_argument(&mut args,"llama-cvector-generator executable")?)),
+                    Some("--strength")=>request.edit_strength=next_argument(&mut args,"edit strength")?
+                        .to_string_lossy().parse().map_err(|_|invalid("strength must be numeric"))?,
+                    Some("--block")=>request.edit_block=Some(next_argument(&mut args,"zero-based block index")?
+                        .to_string_lossy().parse::<usize>().map_err(|_|invalid("block must be an integer"))?),
+                    Some("--refusal-suite")=>request.refusal_suite=Some(
+                        PathBuf::from(next_argument(&mut args,"ojon.refusal_suite.v1 JSON")?)),
+                    Some("--task-suite")=>request.task_suite=Some(
+                        PathBuf::from(next_argument(&mut args,"ojon.task_suite.v1 JSON")?)),
+                    Some("--json")=>json=true,
+                    Some("--confirm")=>confirmed=true,
+                    _=>return Err(invalid(format!("unknown simple option: {}",option.to_string_lossy()))),
+                }
+            }
+            if confirmed&&!execute{return Err(invalid("--confirm only works with simple-run"));}
+            if execute&&!confirmed{return Err(invalid("simple-run writes model files and requires --confirm"));}
+            let plan=ojon_backend::simple_workflow::prepare_simple_run(request)?;
+            if execute{
+                let result=ojon_backend::simple_workflow::run_simple(&plan,|line|eprintln!("{line}"))?;
+                if json{println!("{result}");}else{println!("{}",serde_json::to_string_pretty(&result)?);}
+            }else if json{println!("{}",plan.as_json());}
+            else{
+                println!("output: {}",plan.as_json()["output"]);
+                println!("status: {}",plan.as_json()["status"]);
+            }
+        }
+        Some("refusal-eval-plan") | Some("refusal-eval-run") => {
+            let execute=cmd=="refusal-eval-run";
+            let model=PathBuf::from(next_argument(&mut args,"model GGUF")?);
+            let suite=PathBuf::from(next_argument(&mut args,"ojon.refusal_suite.v1 JSON")?);
+            let report=PathBuf::from(next_argument(&mut args,"new refusal report JSON")?);
+            let(mut tool,mut server,mut device)=(None,None,None);
+            let(mut gpu_layers,mut tokens)=(0i32,96u32);
+            let(mut confirmed,mut json)=(false,false);
+            while let Some(option)=args.next(){
+                match option.to_str(){
+                    Some("--tool")=>tool=Some(PathBuf::from(next_argument(&mut args,"llama-cli executable")?)),
+                    Some("--server")=>server=Some(PathBuf::from(next_argument(&mut args,"local llama-server executable")?)),
+                    Some("--gpu-layers")=>gpu_layers=next_argument(&mut args,"GPU offload layers")?
+                        .to_string_lossy().parse().map_err(|_|invalid("GPU layers must be integer"))?,
+                    Some("--device")=>device=Some(next_argument(&mut args,"llama.cpp device ID")?
+                        .to_string_lossy().into_owned()),
+                    Some("--tokens")=>tokens=next_argument(&mut args,"generation tokens")?
+                        .to_string_lossy().parse().map_err(|_|invalid("tokens must be integer"))?,
+                    Some("--json")=>json=true,
+                    Some("--confirm")=>confirmed=true,
+                    _=>return Err(invalid(format!("unknown refusal-eval option: {}",option.to_string_lossy()))),
+                }
+            }
+            if confirmed&&!execute{return Err(invalid("--confirm only works with refusal-eval-run"));}
+            if execute&&!confirmed{return Err(invalid("refusal-eval-run runs real inference and requires --confirm"));}
+            let tool=tool.or_else(||discovered_path(BackendId::LlamaCli))
+                .ok_or_else(||invalid("no llama-cli discovered; pass --tool"))?;
+            let plan=ojon_backend::refusal::prepare_refusal_eval_with_server(&model,&suite,
+                &tool,server.as_deref(),gpu_layers,device.as_deref(),tokens,&report)?;
+            if execute{
+                let result=ojon_backend::refusal::run_refusal_eval(&plan,|line|eprintln!("{line}"))?;
+                if json{println!("{result}");}else{
+                    println!("model: {}",result["model"]);
+                    println!("refusal_rate: {}",result["refusal_rate"]);
+                    println!("overrefusal_rate: {}",result["overrefusal_rate"].as_f64()
+                        .map(|v|v.to_string()).unwrap_or_else(||"NOT_CONFIGURED".to_owned()));
+                    println!("probes_measured: {}",result["results"].as_array().map(|r|r.len()).unwrap_or(0));
+                }
+            }else if json{println!("{}",plan.as_json());}
+            else{println!("probes: {}",plan.as_json()["probes"]);println!("status: PLAN_ONLY");}
+        }
+        Some("uncensor-auto-plan") | Some("uncensor-auto-run") => {
+            let execute=cmd=="uncensor-auto-run";
+            let source=PathBuf::from(next_argument(&mut args,"original F16/BF16/F32 GGUF")?);
+            let output_dir=PathBuf::from(next_argument(&mut args,"existing output directory")?);
+            let mut request=ojon_backend::uncensor_auto::UncensorAutoRequest::new(source,output_dir);
+            let(mut confirmed,mut json)=(false,false);
+            while let Some(option)=args.next(){
+                match option.to_str(){
+                    Some("--refusal-suite")=>request.refusal_probes=PathBuf::from(
+                        next_argument(&mut args,"ojon.refusal_suite.v1 JSON")?),
+                    Some("--task-suite")=>request.capability_suite=PathBuf::from(
+                        next_argument(&mut args,"ojon.task_suite.v1 JSON")?),
+                    Some("--paired")=>request.paired_prompts=PathBuf::from(
+                        next_argument(&mut args,"folder with paired positive.txt and negative.txt")?),
+                    Some("--cvector-generator")=>request.cvector_generator=PathBuf::from(
+                        next_argument(&mut args,"llama-cvector-generator executable")?),
+                    Some("--runtime")=>request.runtime=PathBuf::from(
+                        next_argument(&mut args,"llama-cli executable")?),
+                    Some("--server")=>request.server_runtime=Some(PathBuf::from(
+                        next_argument(&mut args,"local llama-server executable")?)),
+                    Some("--gpu-layers")=>request.gpu_layers=next_argument(&mut args,"GPU offload layers")?
+                        .to_string_lossy().parse().map_err(|_|invalid("GPU layers must be integer"))?,
+                    Some("--device")=>request.device=Some(next_argument(&mut args,"llama.cpp device ID")?
+                        .to_string_lossy().into_owned()),
+                    Some("--refusal-tokens")=>request.refusal_tokens=next_argument(&mut args,"refusal generation tokens")?
+                        .to_string_lossy().parse().map_err(|_|invalid("tokens must be integer"))?,
+                    Some("--task-tokens")=>request.task_tokens=next_argument(&mut args,"task generation tokens")?
+                        .to_string_lossy().parse().map_err(|_|invalid("tokens must be integer"))?,
+                    Some("--strengths")=>{
+                        let spec=next_argument(&mut args,"comma separated strengths")?.to_string_lossy().into_owned();
+                        let mut parsed=Vec::new();
+                        for part in spec.split(',').filter(|p|!p.trim().is_empty()){
+                            parsed.push(part.trim().parse::<f64>()
+                                .map_err(|_|invalid("each strength must be numeric"))?);
+                        }
+                        request.strengths=parsed;
+                    },
+                    Some("--blocks")=>{
+                        let spec=next_argument(&mut args,"comma separated block indices")?.to_string_lossy().into_owned();
+                        let mut parsed=Vec::new();
+                        for part in spec.split(',').filter(|p|!p.trim().is_empty()){
+                            parsed.push(part.trim().parse::<usize>()
+                                .map_err(|_|invalid("each block must be a nonnegative integer"))?);
+                        }
+                        request.blocks=Some(parsed);
+                    },
+                    Some("--max-capability-loss")=>request.max_capability_loss=next_argument(
+                        &mut args,"maximum capability fraction loss")?
+                        .to_string_lossy().parse().map_err(|_|invalid("loss must be numeric"))?,
+                    Some("--max-refusal-rate")=>request.max_refusal_rate=Some(next_argument(
+                        &mut args,"maximum measured refusal rate")?
+                        .to_string_lossy().parse().map_err(|_|invalid("rate must be numeric"))?),
+                    Some("--quantize")=>request.quantize=Some(Precision::from_str(
+                        next_argument(&mut args,"Q4_K_M, Q5_K_M or Q6_K")?.to_str()
+                        .ok_or_else(||invalid("precision must be UTF-8"))?).map_err(invalid)?),
+                    Some("--quantizer")=>request.quantizer=PathBuf::from(
+                        next_argument(&mut args,"llama-quantize executable")?),
+                    Some("--allow-resource-risk")=>request.allow_resource_risk=true,
+                    Some("--json")=>json=true,
+                    Some("--confirm")=>confirmed=true,
+                    _=>return Err(invalid(format!("unknown uncensor-auto option: {}",option.to_string_lossy()))),
+                }
+            }
+            if confirmed&&!execute{return Err(invalid("--confirm only works with uncensor-auto-run"));}
+            if execute&&!confirmed{return Err(invalid("uncensor-auto-run edits model files and requires --confirm"));}
+            if request.cvector_generator.as_os_str().is_empty(){
+                request.cvector_generator=discovered_path(BackendId::LlamaCvectorGenerator)
+                    .ok_or_else(||invalid("no llama-cvector-generator discovered; pass --cvector-generator"))?;
+            }
+            if request.runtime.as_os_str().is_empty(){
+                request.runtime=discovered_path(BackendId::LlamaCli)
+                    .ok_or_else(||invalid("no llama-cli discovered; pass --runtime"))?;
+            }
+            if request.server_runtime.is_none(){
+                request.server_runtime=discovered_path(BackendId::LlamaServer);
+            }
+            let plan=ojon_backend::uncensor_auto::prepare_uncensor_auto(request)?;
+            if execute{
+                let result=ojon_backend::uncensor_auto::run_uncensor_auto(&plan,|line|eprintln!("{line}"))?;
+                if json{println!("{result}");}else{
+                    println!("status: {}",result["status"]);
+                    println!("source: {}",result["source"]);
+                    println!("output_edited: {}",result["output_edited"]);
+                    println!("output_quantized: {}",result["output_quantized"].as_str().unwrap_or("NOT_REQUESTED"));
+                    println!("baseline_refusal_rate: {}",result["baseline"]["refusal_rate"]);
+                    for tested in result["candidates"].as_array().into_iter().flatten(){
+                        println!("candidate: {} refusal_rate={} quality_pass={}",tested["name"],
+                            tested["refusal_rate"],tested["quality_pass"]);
+                    }
+                    if let Some(w)=result["method_choice"]["winner"].as_object(){
+                        println!("winner: {} ({})",w["method"],w["artifact"]);
+                    }else{println!("winner: NONE");}
+                }
+            }else if json{println!("{}",plan.as_json());}
+            else{
+                println!("output: {}",plan.as_json()["output"]);
+                println!("candidates: {}",plan.as_json()["candidate_count"]);
+                println!("status: {}",plan.as_json()["status"]);
             }
         }
         Some("optimize-workflow-plan") | Some("optimize-workflow-run") => {

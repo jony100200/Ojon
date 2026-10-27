@@ -34,6 +34,7 @@ pub enum BackendId {
     LlamaFactory,
     StableDiffusionCpp,
     WhisperCpp,
+    LlamaCvectorGenerator,
     IntelAutoRound,
     IntelSyclCli,
 }
@@ -49,7 +50,7 @@ pub struct BackendSpec {
     pub role: &'static str,
 }
 
-const SPECS: [BackendSpec; 12] = [
+const SPECS: [BackendSpec; 13] = [
     BackendSpec {
         id: BackendId::LlamaQuantize,
         name: "llama.cpp quantizer",
@@ -139,6 +140,15 @@ const SPECS: [BackendSpec; 12] = [
         website: "https://github.com/ggml-org/whisper.cpp",
         integration: Integration::DiscoveryOnly,
         role: "Speech support requires a separate compatible adapter",
+    },
+    BackendSpec {
+        id: BackendId::LlamaCvectorGenerator,
+        name: "llama.cpp control vector generator",
+        executable_names: &["llama-cvector-generator", "llama-cvector-generator.exe"],
+        override_env: "OJON_LLAMA_CVECTOR",
+        website: "https://github.com/ggml-org/llama.cpp",
+        integration: Integration::Wired,
+        role: "Measured residual control vectors from paired GGUF prompts for directional edits",
     },
     BackendSpec {
         id: BackendId::IntelAutoRound,
@@ -443,6 +453,20 @@ pub fn resolve_backend_command(id:BackendId,fallback:&str)->std::io::Result<Path
 }
 pub fn discovered_path(id: BackendId) -> Option<PathBuf> {
     discover_backends().into_iter().find(|b| b.spec.id == id)?.executable
+}
+
+/// Resolves a bundled read-only fixture next to the running executable
+/// (`data/<name>`), or None when it is absent. Fixtures let one-click flows
+/// run without user-supplied files; Ojon never downloads or generates them
+/// implicitly, and user-provided paths always win.
+pub fn bundled_data_file(name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.len() > 128 || !name.bytes().all(|b|
+        b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')) {
+        return None;
+    }
+    let exe = env::current_exe().ok()?;
+    let path = exe.parent()?.join("data").join(name);
+    path.is_file().then_some(path)
 }
 
 #[cfg(test)]

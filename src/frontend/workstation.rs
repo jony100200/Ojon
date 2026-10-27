@@ -74,6 +74,7 @@ enum Focus {
     OptMinSaving, OptMaxLoss, OptMaxPpl, OptRuntimeDevice, OptPrecisions,
     OptBenchPrompt, OptBenchGeneration, OptBenchRepetitions, OptSpeedRatio,
     UncTrace, UncOutput, UncStrength, UncBlock,
+    UncPaired, UncRefusalSuite, UncTaskSuite,
 }
 
 #[derive(Clone,PartialEq)]
@@ -139,6 +140,8 @@ enum WorkerEvent {
     OptimizerRun(Result<serde_json::Value,String>),
     UncensorPlan(UncensorRequest,Result<serde_json::Value,String>),
     UncensorRun(Result<serde_json::Value,String>),
+    UncensorAutoPlan(ojon_backend::uncensor_auto::UncensorAutoRequest,Result<serde_json::Value,String>),
+    UncensorAutoRun(Result<serde_json::Value,String>),
     Quantized(Result<QuantizeResult, String>),
     HfQuantized(Result<HfQuantizeResult, String>),
     Smoke(Result<SmokeCapture, String>),
@@ -192,6 +195,13 @@ struct Workstation {
     unc_block:String,
     unc_planned:Option<(UncensorRequest,serde_json::Value)>,
     unc_result:Option<serde_json::Value>,
+    unc_tab:usize,
+    unc_paired:String,
+    unc_refusal_suite:String,
+    unc_task_suite:String,
+    unc_auto_quantize:usize,
+    unc_auto_planned:Option<(ojon_backend::uncensor_auto::UncensorAutoRequest,serde_json::Value)>,
+    unc_auto_result:Option<serde_json::Value>,
     focus: Option<Focus>,
     model: Option<GgufSummary>,
     hf_folder: Option<HfFolderInfo>,
@@ -319,6 +329,13 @@ impl Workstation {
             unc_block:String::new(),
             unc_planned:None,
             unc_result:None,
+            unc_tab:0,
+            unc_paired:String::new(),
+            unc_refusal_suite:String::new(),
+            unc_task_suite:String::new(),
+            unc_auto_quantize:0,
+            unc_auto_planned:None,
+            unc_auto_result:None,
             focus: None,
             model: None,
             hf_folder: None,
@@ -658,7 +675,14 @@ impl Workstation {
         let candidate=self.opt_candidate.trim();
         if !candidate.is_empty(){req.candidates.push(("smaller".into(),PathBuf::from(candidate)));}
         let suite=self.opt_suite.trim();
-        if !suite.is_empty(){req.suite=Some(PathBuf::from(suite));}
+        if !suite.is_empty(){
+            req.suite=Some(PathBuf::from(suite));
+        }else{
+            // One-click default: the bundled structural sanity suite keeps the
+            // guided search functional without user benchmark data. It is
+            // explicitly a MINIMUM gate, not a representative benchmark.
+            req.suite=ojon_backend::discovery::bundled_data_file("sanity-tasks.json");
+        }
         let output=self.opt_output.trim();
         if !output.is_empty(){
             req.output_dir=Some(PathBuf::from(output));
@@ -668,7 +692,13 @@ impl Workstation {
         let sensitivity=self.opt_sensitivity.trim();
         if !sensitivity.is_empty(){req.tensor_sensitivity=Some(PathBuf::from(sensitivity));}
         let imatrix=self.opt_imatrix.trim();
-        if !imatrix.is_empty(){req.imatrix=Some(PathBuf::from(imatrix));}
+        if !imatrix.is_empty(){
+            req.imatrix=Some(PathBuf::from(imatrix));
+        }else{
+            // One-click default: an approved run calibrates a bundled-corpus
+            // importance matrix itself when the backend exists.
+            req.auto_imatrix=true;
+        }
         let ppl=self.opt_ppl.trim();
         if !ppl.is_empty(){req.ppl_corpus=Some(PathBuf::from(ppl));}
         req.min_saving_percent=self.opt_min_saving.trim().parse()
@@ -806,6 +836,108 @@ impl Workstation {
                 let _=logger.send(WorkerEvent::Log(line.to_owned()));
             }).map_err(|e|e.to_string());
             let _=tx.send(WorkerEvent::UncensorRun(result));
+        });
+    }
+    fn uncensor_auto_request(&self)->Result<ojon_backend::uncensor_auto::UncensorAutoRequest,String>{
+        let source=self.source.trim();
+        if source.is_empty()||!source.ends_with(".gguf"){
+            return Err("Automatic refusal search needs an original F16/BF16/F32 GGUF source".into());
+        }
+        let paired=self.unc_paired.trim();
+        if paired.is_empty(){
+            return Err("Select a folder with paired positive.txt and negative.txt behaviour examples".into());
+        }
+        let refusal_suite=self.unc_refusal_suite.trim();
+        let refusal_suite=if refusal_suite.is_empty(){
+            ojon_backend::discovery::bundled_data_file("refusal-probes.json")
+        }else{Some(PathBuf::from(refusal_suite))};
+        let refusal_suite=refusal_suite
+            .ok_or_else(||"No refusal probe suite found; provide a ojon.refusal_suite.v1 JSON path".to_owned())?;
+        let task_suite=self.unc_task_suite.trim();
+        let task_suite=if task_suite.is_empty(){
+            ojon_backend::discovery::bundled_data_file("sanity-tasks.json")
+        }else{Some(PathBuf::from(task_suite))};
+        let task_suite=task_suite
+            .ok_or_else(||"No capability suite found; provide a ojon.task_suite.v1 JSON path".to_owned())?;
+        let output=self.unc_output.trim();
+        let output_dir=if output.is_empty(){
+            Path::new(source).parent().ok_or_else(||"Source has no parent folder".to_owned())?
+        }else{Path::new(output)};
+        let gpu_layers=self.gpu_layers.trim().parse::<i32>()
+            .map_err(|_|"GPU offload layers must be an integer".to_owned())?;
+        let quantize=match self.unc_auto_quantize{
+            1=>Some(Precision::Q4KM),2=>Some(Precision::Q5KM),3=>Some(Precision::Q6K),
+            _=>None,
+        };
+        let cvector_generator=self.backends.iter()
+            .find(|b|b.spec.id==BackendId::LlamaCvectorGenerator)
+            .and_then(|b|b.executable.clone());
+        let mut request=ojon_backend::uncensor_auto::UncensorAutoRequest::new(
+            PathBuf::from(source),output_dir.to_path_buf());
+        request.refusal_probes=refusal_suite;
+        request.capability_suite=task_suite;
+        request.paired_prompts=PathBuf::from(paired);
+        request.cvector_generator=cvector_generator
+            .ok_or_else(||"llama-cvector-generator was not detected; install it or use the CLI path".to_owned())?;
+        request.runtime=PathBuf::from(self.runtime.trim());
+        let server=self.eval_server.trim();
+        if !server.is_empty() && server!="llama-server"{
+            request.server_runtime=Some(PathBuf::from(server));
+        }
+        request.gpu_layers=gpu_layers;
+        request.quantize=quantize;
+        request.quantizer=PathBuf::from(self.quantizer.trim());
+        Ok(request)
+    }
+    fn start_uncensor_auto_plan(&mut self){
+        if self.busy{return;}
+        if self.inspected_source.as_deref()!=Some(self.source.as_str()){
+            self.status="Inspect the currently selected source before planning an automatic search.".into();
+            self.needs_redraw=true;return;
+        }
+        let request=match self.uncensor_auto_request(){
+            Ok(r)=>r,
+            Err(e)=>{self.status=e;self.needs_redraw=true;return;}
+        };
+        let tx=self.tx.clone();
+        self.unc_auto_planned=None;self.unc_auto_result=None;
+        self.busy=true;self.started_at=Some(Instant::now());
+        self.status="Planning the automatic refusal-edit sweep (read-only)".into();
+        self.needs_redraw=true;
+        std::thread::spawn(move||{
+            let result=ojon_backend::uncensor_auto::prepare_uncensor_auto(request.clone())
+                .map(|plan|plan.as_json());
+            let _=tx.send(WorkerEvent::UncensorAutoPlan(request,result));
+        });
+    }
+    fn start_uncensor_auto_run(&mut self){
+        if self.busy{return;}
+        let request=match self.uncensor_auto_request(){
+            Ok(r)=>r,
+            Err(e)=>{self.status=e;self.needs_redraw=true;return;}
+        };
+        let approved=matches!(self.unc_auto_planned.as_ref(),
+            Some((planned,value)) if *planned==request && value["status"]=="PLAN_ONLY");
+        if !approved{
+            self.status="Automatic search settings changed. Review a fresh plan before executing.".into();
+            self.unc_auto_planned=None;self.needs_redraw=true;return;
+        }
+        let tx=self.tx.clone();
+        self.unc_auto_planned=None; // one approved action per plan
+        self.unc_auto_result=None;self.log_tail.clear();
+        self.busy=true;self.started_at=Some(Instant::now());
+        self.status="Approved automatic search running: real edits, real refusal and capability measurements below.".into();
+        self.needs_redraw=true;
+        std::thread::spawn(move||{
+            let logger=tx.clone();
+            let plan=ojon_backend::uncensor_auto::prepare_uncensor_auto(request.clone());
+            let result=match plan{
+                Ok(plan)=>ojon_backend::uncensor_auto::run_uncensor_auto(&plan,|line|{
+                    let _=logger.send(WorkerEvent::Log(line.to_owned()));
+                }),
+                Err(e)=>Err(e),
+            }.map_err(|e|e.to_string());
+            let _=tx.send(WorkerEvent::UncensorAutoRun(result));
         });
     }
     fn ready_to_convert(&self) -> bool {
@@ -1028,6 +1160,28 @@ impl Workstation {
                 WorkerEvent::UncensorRun(Err(e))=>{
                     self.status=format!("Uncensor edit failed: {e}");
                 }
+                WorkerEvent::UncensorAutoPlan(request,Ok(value))=>{
+                    let count=value["candidate_count"].as_u64().unwrap_or(0);
+                    self.status=format!(
+                        "Automatic search plan ready: {count} candidates will be really edited and measured. Review and approve.");
+                    self.unc_auto_planned=Some((request,value));
+                }
+                WorkerEvent::UncensorAutoPlan(_,Err(e))=>{
+                    self.unc_auto_planned=None;
+                    self.status=format!("Automatic uncensor plan blocked: {e}");
+                }
+                WorkerEvent::UncensorAutoRun(Ok(value))=>{
+                    let published=value["status"].as_str()==Some("SELECTED_FROM_MEASURED_SCORES");
+                    self.status=if published{
+                        "Measured winner published. Review the refusal receipts and capability scores before use.".into()
+                    }else{
+                        "Search finished: no candidate passed the configured gates; nothing was published.".into()
+                    };
+                    self.unc_auto_result=Some(value);
+                }
+                WorkerEvent::UncensorAutoRun(Err(e))=>{
+                    self.status=format!("Automatic uncensor search failed: {e}");
+                }
                 WorkerEvent::Planned(Ok(text)) => self.status = text,
                 WorkerEvent::Planned(Err(e)) => self.status = format!("Preflight failed: {e}"),
                 WorkerEvent::Quantized(Ok(done)) => {
@@ -1187,6 +1341,13 @@ impl Workstation {
         let unc_block=&mut self.unc_block;
         let unc_planned=self.unc_planned.as_ref();
         let unc_result=self.unc_result.as_ref();
+        let unc_tab=&mut self.unc_tab;
+        let unc_paired=&mut self.unc_paired;
+        let unc_refusal_suite=&mut self.unc_refusal_suite;
+        let unc_task_suite=&mut self.unc_task_suite;
+        let unc_auto_quantize=&mut self.unc_auto_quantize;
+        let unc_auto_planned=self.unc_auto_planned.as_ref();
+        let unc_auto_result=self.unc_auto_result.as_ref();
         let model = if source_is_current { self.model.as_ref() } else { None };
         let hf_folder = if source_is_current { self.hf_folder.as_ref() } else { None };
         let model_probe = if source_is_current { self.probe.as_ref() } else { None };
@@ -1205,8 +1366,8 @@ impl Workstation {
         let mut download: Option<BackendId> = None;
         let mut new_focus = self.focus;
         let (mut inspect, mut plan, mut advise, mut opt_run, mut convert, mut smoke, mut bench,
-            mut unc_plan,mut unc_run) =
-            (false, false, false, false, false, false, false,false,false);
+            mut unc_plan,mut unc_run,mut unc_auto_plan,mut unc_auto_run) =
+            (false, false, false, false, false, false, false,false,false,false,false);
         {
             // New Kathamo navigation; each destination is an existing working view.
             let rail = NavigationRail::new()
@@ -1678,6 +1839,40 @@ impl Workstation {
                         }else{
                             col.glass_card(400.0, |card|{
                                 card.heading("02   UNCENSOR MODEL");
+                                card.tabs(&["Automatic search","Manual trace edit"], unc_tab);
+                                if *unc_tab==0{
+                                    card.label("One-click: capture the refusal direction once, really measure every candidate, publish the measured winner.");
+                                    card.label("Paired behaviour examples (folder with positive.txt and negative.txt)");
+                                    if card.text_input(unc_paired,"Folder with paired prompt files...").clicked(){
+                                        new_focus=Some(Focus::UncPaired);
+                                    }
+                                    card.label("Refusal probes (blank uses the bundled screening suite)");
+                                    if card.text_input(unc_refusal_suite,"ojon.refusal_suite.v1 JSON path...").clicked(){
+                                        new_focus=Some(Focus::UncRefusalSuite);
+                                    }
+                                    card.label("Capability suite (blank uses the bundled minimum suite)");
+                                    if card.text_input(unc_task_suite,"ojon.task_suite.v1 JSON path...").clicked(){
+                                        new_focus=Some(Focus::UncTaskSuite);
+                                    }
+                                    card.label("Results directory (must already exist)");
+                                    if card.text_input(unc_output,"Folder for the measured winner and receipts...").clicked(){
+                                        new_focus=Some(Focus::UncOutput);
+                                    }
+                                    card.label("Final quantization of the winner");
+                                    card.dropdown("Quantize winner to",unc_auto_quantize,&[
+                                        "No quantization (edited original precision)",
+                                        "Q4_K_M","Q5_K_M","Q6_K"
+                                    ]);
+                                    if card.button_secondary("Plan Automatic Search (read-only)").clicked(){unc_auto_plan=true;}
+                                    if let Some((_,plan))=unc_auto_planned{
+                                        let count=plan["candidate_count"].as_u64().unwrap_or(0);
+                                        card.status_pill("Automatic search plan ready",true);
+                                        card.label(&format!("{count} (strength, block) candidates; each is really edited, probed and scored."));
+                                        if !busy && card.button("Run Approved Automatic Search").clicked(){unc_auto_run=true;}
+                                    }else{
+                                        card.status_pill("Source, paired examples and probes required",false);
+                                    }
+                                }else{
                                 card.label("Edit a new F16/BF16 GGUF or HF checkpoint from model activations.");
                                 card.label("Paired activation JSONL or llama.cpp control-vector GGUF");
                                 if card.text_input(unc_trace,"Activation trace or control-vector GGUF path...").clicked(){
@@ -1705,10 +1900,32 @@ impl Workstation {
                                 }else{
                                     card.status_pill("Trace and source required",false);
                                 }
+                                }
                             });
                             col.card(245.0,|card|{
                                 card.heading("03   RESULT & EVIDENCE");
-                                if let Some(result)=unc_result{
+                                if let Some(result)=unc_auto_result{
+                                    let published=result["status"].as_str()==Some("SELECTED_FROM_MEASURED_SCORES");
+                                    if published{
+                                        card.status_pill("Measured winner published",true);
+                                    }else{
+                                        card.status_pill("No candidate passed the gates",false);
+                                    }
+                                    if let Some(rate)=result["baseline"]["refusal_rate"].as_f64(){
+                                        card.label(&format!("Original refusal rate: {:.0}%",rate*100.0));
+                                    }
+                                    if let Some(tested)=result["candidates"].as_array(){
+                                        for row in tested.iter().take(6){
+                                            card.label(&format!("{}: refusals {:.0}%, quality_pass={}",
+                                                row["name"].as_str().unwrap_or("?"),
+                                                100.0*row["refusal_rate"].as_f64().unwrap_or(0.0),
+                                                row["quality_pass"]));
+                                        }
+                                    }
+                                    if let Some(w)=result["method_choice"]["winner"].as_object(){
+                                        card.label(&format!("Winner: {} ({} bytes)",w["method"],w["bytes"]));
+                                    }
+                                }else if let Some(result)=unc_result{
                                     card.status_pill("Edited checkpoint written",true);
                                     let output=&result["model"]["output"];
                                     let location=output.as_str().or_else(||result["model"]["model"]["output"].as_str())
@@ -1756,6 +1973,8 @@ impl Workstation {
         else if opt_run { self.start_optimizer_run(); }
         else if unc_plan { self.start_uncensor_plan(); }
         else if unc_run { self.start_uncensor_run(); }
+        else if unc_auto_plan { self.start_uncensor_auto_plan(); }
+        else if unc_auto_run { self.start_uncensor_auto_run(); }
         else if convert { self.start_quantize(); }
         else if smoke { self.start_smoke(); }
         else if bench { self.start_bench(); }

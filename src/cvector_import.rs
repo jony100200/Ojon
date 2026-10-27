@@ -15,47 +15,64 @@ fn invalid(message:impl Into<String>)->io::Error {
 /// The residual direction is projected from the chosen block's attention
 /// output matrix only when its output width matches the vector exactly.
 pub fn recipe_from_control_vector(path:&Path,block:usize,strength:f64)->io::Result<Value> {
-    if block>1023 || !strength.is_finite() || strength<=0.0 || strength>1.0 {
-        return Err(invalid("block must be <=1023 and strength must be >0 and <=1"));
+    recipe_from_control_vector_blocks(path,&[(block,strength)])
+}
+
+/// Multi-block recipe: one edit per (block, strength) pair. Blocks must be
+/// unique, and gguf_edit's recipe limit of 256 edits still applies.
+pub fn recipe_from_control_vector_blocks(path:&Path,edits:&[(usize,f64)])->io::Result<Value> {
+    if edits.is_empty() || edits.len()>256 {
+        return Err(invalid("require 1..=256 (block, strength) edit pairs"));
+    }
+    let mut seen=std::collections::HashSet::new();
+    for (block,strength) in edits {
+        if *block>1023 || !strength.is_finite() || *strength<=0.0 || *strength>1.0 {
+            return Err(invalid("block must be <=1023 and strength must be >0 and <=1"));
+        }
+        if !seen.insert(*block){return Err(invalid("duplicate block in edit list"));}
     }
     let summary=inspect_gguf(path)?;
     if summary.architecture.as_deref()!=Some("controlvector") || summary.big_endian
         || summary.tensor_count==0 || summary.tensor_count>1024 {
         return Err(invalid("expected little-endian llama.cpp controlvector GGUF"));
     }
-    let name=format!("direction.{}",block+1);
     let tensors=inspect_gguf_tensors(path)?;
-    let tensor=tensors.iter().find(|t|t.name==name)
-        .ok_or_else(||invalid(format!("control vector lacks {name}")))?;
-    if tensor.storage_type!=0 || tensor.shape.len()!=1 || tensor.elements<2
-        || tensor.elements>131072 {
-        return Err(invalid("control direction must be a bounded 1D F32 tensor"));
+    let mut out=Vec::new();
+    for (block,strength) in edits {
+        let name=format!("direction.{}",block+1);
+        let tensor=tensors.iter().find(|t|t.name==name)
+            .ok_or_else(||invalid(format!("control vector lacks {name}")))?;
+        if tensor.storage_type!=0 || tensor.shape.len()!=1 || tensor.elements<2
+            || tensor.elements>131072 {
+            return Err(invalid("control direction must be a bounded 1D F32 tensor"));
+        }
+        let size=tensor.elements.checked_mul(4).ok_or_else(||invalid("control vector byte overflow"))?;
+        let offset=summary.data_offset.checked_add(tensor.relative_offset)
+            .ok_or_else(||invalid("control vector offset overflow"))?;
+        if offset.checked_add(size).is_none_or(|end|end>summary.file_bytes) {
+            return Err(invalid("control direction exceeds GGUF bounds"));
+        }
+        let mut file=File::open(path)?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut values=Vec::with_capacity(tensor.elements as usize);
+        let mut bytes=[0u8;4];
+        let mut norm=0.0f64;
+        for _ in 0..tensor.elements {
+            file.read_exact(&mut bytes)?;
+            let value=f32::from_le_bytes(bytes) as f64;
+            if !value.is_finite(){return Err(invalid("nonfinite control direction"));}
+            norm=norm.hypot(value);
+            values.push(value);
+        }
+        if !norm.is_finite() || norm<1e-30 {
+            return Err(invalid("control direction is zero or invalid"));
+        }
+        let direction=values.into_iter().map(|value|value/norm).collect::<Vec<_>>();
+        out.push(json!({"tensor":format!("blk.{block}.attn_output.weight"),
+            "direction":direction,"strength":strength}));
     }
-    let size=tensor.elements.checked_mul(4).ok_or_else(||invalid("control vector byte overflow"))?;
-    let offset=summary.data_offset.checked_add(tensor.relative_offset)
-        .ok_or_else(||invalid("control vector offset overflow"))?;
-    if offset.checked_add(size).is_none_or(|end|end>summary.file_bytes) {
-        return Err(invalid("control direction exceeds GGUF bounds"));
-    }
-    let mut file=File::open(path)?;
-    file.seek(SeekFrom::Start(offset))?;
-    let mut values=Vec::with_capacity(tensor.elements as usize);
-    let mut bytes=[0u8;4];
-    let mut norm=0.0f64;
-    for _ in 0..tensor.elements {
-        file.read_exact(&mut bytes)?;
-        let value=f32::from_le_bytes(bytes) as f64;
-        if !value.is_finite(){return Err(invalid("nonfinite control direction"));}
-        norm=norm.hypot(value);
-        values.push(value);
-    }
-    if !norm.is_finite() || norm<1e-30 {
-        return Err(invalid("control direction is zero or invalid"));
-    }
-    let direction=values.into_iter().map(|value|value/norm).collect::<Vec<_>>();
     Ok(json!({"schema":"ojon.abliteration.v1","preserve_row_norms":true,
-        "edits":[{"tensor":format!("blk.{block}.attn_output.weight"),
-            "direction":direction,"strength":strength}]}))
+        "edits":out}))
 }
 
 #[cfg(test)]

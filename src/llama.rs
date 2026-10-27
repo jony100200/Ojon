@@ -182,6 +182,20 @@ pub(crate) fn validate_original_precision(file_type: Option<u32>) -> io::Result<
     Ok(())
 }
 
+/// Detects Mixture-of-Experts routing tensors and returns bounded
+/// llama-quantize tensor-type override lines pinning the router to Q6_K.
+/// Routing selects the experts; lossy routing weights are a known regression
+/// source, so guided searches never reduce them below Q6_K. Returns None for
+/// dense models (no router tensors present).
+pub fn moe_router_pinning_recipe(tensors: &[crate::gguf::GgufTensor]) -> Option<String> {
+    let is_moe = tensors.iter().any(|t|
+        t.name.ends_with("ffn_gate_inp.weight") || t.name.ends_with("exp_probs_b.weight"));
+    if !is_moe { return None; }
+    Some(String::from(
+        "^blk\\.[0-9]+\\.ffn_gate_inp\\.weight$=Q6_K\n\
+         ^blk\\.[0-9]+\\.exp_probs_b\\.weight$=Q6_K\n"))
+}
+
 impl QuantizePlan {
     /// Optional importance matrix computed separately with the public
     /// llama-imatrix tool and representative calibration data. Never claims

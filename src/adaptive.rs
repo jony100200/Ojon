@@ -253,7 +253,7 @@ fn regex_literal(name:&str)->String{
     }
     pattern.push('$');pattern
 }
-fn write_recipe(path:&Path,allocation:&Value)->io::Result<()>{
+fn write_recipe(path:&Path,allocation:&Value,extra:&str)->io::Result<()>{
     let entries=allocation["assignments"].as_array().ok_or_else(||invalid("missing assignments"))?;
     let mut text=String::new();
     for row in entries{
@@ -261,6 +261,9 @@ fn write_recipe(path:&Path,allocation:&Value)->io::Result<()>{
         let q=row["type"].as_str().ok_or_else(||invalid("missing tensor precision"))?;
         text.push_str(&regex_literal(name));text.push('=');text.push_str(q);text.push('\n');
     }
+    // MoE router preservation: pin routing tensors to Q6_K so a guided search
+    // can never make expert selection a regression source. Empty for dense.
+    text.push_str(extra);
     let mut file=OpenOptions::new().create_new(true).write(true).open(path)?;
     file.write_all(text.as_bytes())?;
     file.sync_all()
@@ -272,6 +275,9 @@ pub fn run_adaptive(plan:&AdaptivePlan,mut log:impl FnMut(&str))->io::Result<Val
     let started=SystemTime::now().duration_since(UNIX_EPOCH)
         .map_err(|_|invalid("system time invalid"))?.as_nanos();
     let session=format!("ojon-adaptive-{}-{started}",std::process::id());
+    let suite_id=crate::task_eval::parse_eval_suite(&plan.suite)?.id;
+    let router_recipe=crate::llama::moe_router_pinning_recipe(
+        &crate::gguf::inspect_gguf_tensors(&plan.source)?).unwrap_or_default();
     let mut rows=Vec::new();
     let mut best:Option<(String,u64)>=None;
     let mut baseline_tasks:Option<Value>=None;
@@ -282,55 +288,86 @@ pub fn run_adaptive(plan:&AdaptivePlan,mut log:impl FnMut(&str))->io::Result<Val
         let recipe=plan.output_dir.join(format!("{prefix}.tensor-types.txt"));
         let evidence=plan.output_dir.join(format!("{prefix}.quality.json"));
         let alloc=allocate_bits(&plan.scores,*target)?;
-        write_recipe(&recipe,&alloc)?;
-        log(&format!("[ojon] quantizing tensor budget {:.3} BPW",target));
-        let converted=(||{
-            let mut q=prepare_gguf(&plan.source,&output,&plan.quantizer,Precision::Q4KM,plan.threads)?
-                .with_tensor_type_file(&recipe)?;
-            if let Some(i)=&plan.imatrix {q=q.with_imatrix(i)?;}
-            quantize_gguf_with_log(&q,|line|log(line))
-        })();
-        match converted{
+        // Resume: reuse an existing verified candidate instead of re-quantizing.
+        let reusable=match crate::quant_parity::verify_reusable_candidate(&plan.source,&output){
+            Ok(reusable)=>reusable,
             Err(e)=>{
-                rows.push(json!({"target":target,"status":"conversion_failed","reason":e.to_string(),
-                    "recipe":recipe.to_string_lossy()}));
+                rows.push(json!({"target":target,"status":"resume_verification_failed",
+                    "reason":e.to_string(),"output":output.to_string_lossy()}));
+                continue;
             }
-            Ok(done)=>{
-                let candidate=vec![(label.clone(),output.clone())];
-                let evaluated=(||{
-                    let test=prepare_eval_with_server(&plan.suite,&plan.reference,&candidate,&plan.eval_tool,
-                    plan.server_tool.as_deref(),
-                        plan.gpu_layers,plan.device.as_deref(),plan.tokens,&evidence)?;
-                    run_eval_reusing_baseline(&test,baseline_tasks.as_ref(),|line|log(line))
-                })();
-                match evaluated{
-                    Err(e)=>rows.push(json!({"target":target,"status":"quality_evaluation_failed",
-                        "reason":e.to_string(),"bytes":done.output_info.file_bytes,
-                        "output":output.to_string_lossy()})),
-                    Ok(report)=>{
-                        if baseline_tasks.is_none(){baseline_tasks=Some(report.clone());}
-                        let base=&report["baseline"]["metrics"];
-                        let cand=&report["candidates"][0]["metrics"];
-                        let mut comparisons=Vec::new();let mut passes=true;
-                        for metric in ["coding_accuracy","reasoning_accuracy","tool_call_accuracy"] {
-                            let b=base[metric].as_f64().unwrap_or(0.0);
-                            let c=cand[metric].as_f64().unwrap_or(0.0);
-                            // A suite the baseline cannot solve is not evidence of preserved ability.
-                            let pass=b>0.0 && c+1e-10>=b-plan.max_absolute_loss_pct;
-                            if !pass{passes=false;}
-                            comparisons.push(json!({"metric":metric,"baseline":b,"candidate":c,
-                                "allowed_drop_points":plan.max_absolute_loss_pct,"pass":pass}));
-                        }
-                        let size=done.output_info.file_bytes;
-                        if passes&&best.as_ref().is_none_or(|(_,bytes)|size<*bytes){
-                            best=Some((output.to_string_lossy().to_string(),size));
-                        }
-                        rows.push(json!({"target":target,"status":"measured_task_suite",
-                            "output":output.to_string_lossy(),"bytes":size,"task_quality_pass":passes,
-                            "comparisons":comparisons,"quality_receipt":evidence.to_string_lossy(),
-                            "tensor_type_file":recipe.to_string_lossy()}));
-                    }
+        };
+        let size=if let Some(bytes)=reusable{
+            log(&format!("[ojon] resume: reusing existing candidate {}",output.display()));
+            bytes
+        }else{
+            write_recipe(&recipe,&alloc,&router_recipe)?;
+            log(&format!("[ojon] quantizing tensor budget {:.3} BPW",target));
+            let converted=(||{
+                let mut q=prepare_gguf(&plan.source,&output,&plan.quantizer,Precision::Q4KM,plan.threads)?
+                    .with_tensor_type_file(&recipe)?;
+                if let Some(i)=&plan.imatrix {q=q.with_imatrix(i)?;}
+                quantize_gguf_with_log(&q,|line|log(line))
+            })();
+            match converted{
+                Err(e)=>{
+                    rows.push(json!({"target":target,"status":"conversion_failed","reason":e.to_string(),
+                        "recipe":recipe.to_string_lossy()}));
+                    continue;
                 }
+                Ok(done)=>done.output_info.file_bytes,
+            }
+        };
+        let prior=match crate::quant_parity::verify_prior_evidence(&evidence,
+            &plan.reference,&suite_id,&label,&output){
+            Ok(prior)=>prior,
+            Err(e)=>{
+                rows.push(json!({"target":target,"status":"existing_evidence_not_reusable",
+                    "reason":e.to_string(),"bytes":size,"output":output.to_string_lossy()}));
+                continue;
+            }
+        };
+        let prior_used=prior.is_some();
+        let evaluated=if let Some(report)=prior{
+            log("[ojon] resume: reusing verified held-out task evidence (baseline unchanged)");
+            Ok(report)
+        }else{
+            (||{
+                let candidate=vec![(label.clone(),output.clone())];
+                let test=prepare_eval_with_server(&plan.suite,&plan.reference,&candidate,&plan.eval_tool,
+                plan.server_tool.as_deref(),
+                    plan.gpu_layers,plan.device.as_deref(),plan.tokens,&evidence)?;
+                run_eval_reusing_baseline(&test,baseline_tasks.as_ref(),|line|log(line))
+            })()
+        };
+        match evaluated{
+            Err(e)=>rows.push(json!({"target":target,"status":"quality_evaluation_failed",
+                "reason":e.to_string(),"bytes":size,
+                "output":output.to_string_lossy()})),
+            Ok(report)=>{
+                if baseline_tasks.is_none(){baseline_tasks=Some(report.clone());}
+                let base=&report["baseline"]["metrics"];
+                let cand=&report["candidates"][0]["metrics"];
+                let mut comparisons=Vec::new();let mut passes=true;
+                for metric in ["coding_accuracy","reasoning_accuracy","tool_call_accuracy"] {
+                    let b=base[metric].as_f64().unwrap_or(0.0);
+                    let c=cand[metric].as_f64().unwrap_or(0.0);
+                    // A suite the baseline cannot solve is not evidence of preserved ability.
+                    let pass=b>0.0 && c+1e-10>=b-plan.max_absolute_loss_pct;
+                    if !pass{passes=false;}
+                    comparisons.push(json!({"metric":metric,"baseline":b,"candidate":c,
+                        "allowed_drop_points":plan.max_absolute_loss_pct,"pass":pass}));
+                }
+                if passes&&best.as_ref().is_none_or(|(_,bytes)|size<*bytes){
+                    best=Some((output.to_string_lossy().to_string(),size));
+                }
+                rows.push(json!({"target":target,"status":"measured_task_suite",
+                    "output":output.to_string_lossy(),"bytes":size,"task_quality_pass":passes,
+                    "resumed_quantization":reusable.is_some(),
+                    "resumed_task_evidence":prior_used,
+                    "moe_router_pinned":!router_recipe.is_empty(),
+                    "comparisons":comparisons,"quality_receipt":evidence.to_string_lossy(),
+                    "tensor_type_file":recipe.to_string_lossy()}));
             }
         }
     }

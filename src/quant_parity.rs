@@ -21,6 +21,14 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 fn invalid(s:impl Into<String>)->io::Error {io::Error::new(ErrorKind::InvalidInput,s.into())}
 const MAX_VISION_SUITE:u64=2*1024*1024;
 
+fn write_new_file(path:&Path,bytes:&[u8])->io::Result<()>{
+    let mut file=OpenOptions::new().write(true).create_new(true).open(path)?;
+    if let Err(e)=file.write_all(bytes).and_then(|_|file.sync_all()){
+        drop(file);let _=fs::remove_file(path);return Err(e);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 struct VisionTask {
     id:String,
@@ -340,10 +348,78 @@ fn task_reference_informative(metrics:&Value)->bool {
     metrics.as_array().is_some_and(|rows|rows.len()==3 && rows.iter().all(|row|
         row["reference_pct"].as_f64().is_some_and(|score|score>0.0)))
 }
+/// Resume support: an already existing candidate GGUF may be reused ONLY when
+/// it is a single file with the same tensor catalog as the full-precision
+/// source. Anything else fails closed; Ojon never overwrites.
+pub(crate) fn verify_reusable_candidate(source:&Path,output:&Path)->io::Result<Option<u64>>{
+    if output.symlink_metadata().is_err(){return Ok(None);}
+    let info=inspect_gguf(output)?;
+    if info.split_count.unwrap_or(1)>1||info.tensor_count==0{
+        return Err(invalid(format!(
+            "existing candidate {} is not a usable single-file GGUF; remove it manually",
+            output.display())));
+    }
+    let src=inspect_gguf(source)?;
+    if info.architecture.is_none()||info.architecture!=src.architecture{
+        return Err(invalid("existing candidate architecture differs from the full-precision source"));
+    }
+    let original:BTreeMap<_,_>=inspect_gguf_tensors(source)?.into_iter()
+        .map(|t|(t.name,t.shape)).collect();
+    let existing:BTreeMap<_,_>=inspect_gguf_tensors(output)?.into_iter()
+        .map(|t|(t.name,t.shape)).collect();
+    if original!=existing{
+        return Err(invalid("existing candidate tensor names/shapes disagree with the source"));
+    }
+    Ok(Some(info.file_bytes))
+}
+
+/// Resume support: reuse a prior ojon.quality_evidence.v1 receipt only when the
+/// baseline model, suite identity, and candidate artifact all still match.
+/// Anything else fails closed; existing evidence is never overwritten.
+pub(crate) fn verify_prior_evidence(
+    evidence:&Path,baseline:&Path,suite_id:&str,candidate_label:&str,candidate:&Path,
+)->io::Result<Option<Value>>{
+    if evidence.symlink_metadata().is_err(){return Ok(None);}
+    let size=fs::metadata(evidence)?.len();
+    if size==0||size>2*1024*1024{return Err(invalid("existing evidence exceeds 2 MiB"));}
+    let value:Value=serde_json::from_slice(&fs::read(evidence)?)
+        .map_err(|e|invalid(format!("existing evidence is not valid JSON: {e}")))?;
+    if value.get("schema").and_then(Value::as_str)!=Some("ojon.quality_evidence.v1"){
+        return Err(invalid("existing evidence has an unexpected schema"));
+    }
+    if value["evaluation_suite"]!=json!(suite_id){
+        return Err(invalid("existing evidence used a different task suite"));}
+    let baseline_canonical=baseline.canonicalize()?;
+    if value["baseline"]["model"]!=json!(baseline_canonical.to_string_lossy().to_string()){
+        return Err(invalid("existing evidence used a different baseline model"));
+    }
+    if value["evaluation_config"]["baseline_file_bytes"]!=json!(fs::metadata(baseline)?.len()){
+        return Err(invalid("existing evidence baseline size differs from the current baseline"));
+    }
+    let candidates=value["candidates"].as_array()
+        .ok_or_else(||invalid("existing evidence lacks candidates"))?;
+    let found=candidates.iter().find(|c|c["label"]==json!(candidate_label))
+        .ok_or_else(||invalid("existing evidence lacks this candidate"))?;
+    if found["bytes"]!=json!(fs::metadata(candidate)?.len()){
+        return Err(invalid("existing evidence candidate size differs from the current candidate"));
+    }
+    let detailed=value["detailed_candidate_results"].as_array()
+        .ok_or_else(||invalid("existing evidence lacks detailed results"))?;
+    let candidate_canonical=candidate.canonicalize()?;
+    if !detailed.iter().any(|d|d["model"]==json!(candidate_canonical.to_string_lossy().to_string())){
+        return Err(invalid("existing evidence detailed result is a different artifact"));
+    }
+    Ok(Some(value))
+}
+
 pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Result<Value>{
     let timestamp=SystemTime::now().duration_since(UNIX_EPOCH)
         .map_err(|_|invalid("system clock invalid"))?.as_nanos();
     let prefix=format!("ojon-parity-{}-{timestamp}",std::process::id());
+    let suite_id=parse_eval_suite(&plan.suite)?.id;
+    // MoE router preservation: routing tensors are pinned to Q6_K for every
+    // candidate in this run; dense models get no override.
+    let router_recipe=crate::llama::moe_router_pinning_recipe(&inspect_gguf_tensors(&plan.source)?);
     let mut rows=Vec::new();
     let mut best:Option<(PathBuf,u64)>=None;
     let mut base_vision:Option<Value>=None;
@@ -354,43 +430,78 @@ pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Res
         let output=plan.output_dir.join(format!("{key}.gguf"));
         let evidence=plan.output_dir.join(format!("{key}.task-evidence.json"));
         log(&format!("[ojon] candidate {} from full-precision source (NOT from Q4 reference)",precision));
-        let converted=(||{
-            let mut quant=prepare_gguf(&plan.source,&output,&plan.options.quantizer,*precision,plan.options.threads)?;
-            if let Some(path)=&plan.options.imatrix{quant=quant.with_imatrix(path)?;}
-            if let Some(mib)=plan.options.max_buffer_mib{quant=quant.with_max_buffer_mib(mib)?;}
-            quantize_gguf_with_log(&quant,|line|log(line))
-        })();
-        let done=match converted{
-            Ok(done)=>done,
+        // Resume: reuse an existing verified candidate instead of re-quantizing.
+        let reusable=match verify_reusable_candidate(&plan.source,&output){
+            Ok(reusable)=>reusable,
             Err(e)=>{
-                rows.push(json!({"type":precision.as_str(),"status":"QUANTIZATION_FAILED",
-                    "error":e.to_string()}));
+                rows.push(json!({"type":precision.as_str(),"status":"RESUME_VERIFICATION_FAILED",
+                    "error":e.to_string(),"output":output.to_string_lossy()}));
                 continue;
             }
         };
-        let size=done.output_info.file_bytes;
+        let size=match reusable{
+            Some(bytes)=>{
+                log(&format!("[ojon] resume: reusing existing quantized candidate {}",output.display()));
+                bytes
+            }
+            None=>{
+                let converted=(||{
+                    let mut quant=prepare_gguf(&plan.source,&output,&plan.options.quantizer,*precision,plan.options.threads)?;
+                    if let Some(text)=&router_recipe{
+                        let path=plan.output_dir.join(format!("{key}.router-types.txt"));
+                        write_new_file(&path,text.as_bytes())?;
+                        quant=quant.with_tensor_type_file(&path)?;
+                    }
+                    if let Some(path)=&plan.options.imatrix{quant=quant.with_imatrix(path)?;}
+                    if let Some(mib)=plan.options.max_buffer_mib{quant=quant.with_max_buffer_mib(mib)?;}
+                    quantize_gguf_with_log(&quant,|line|log(line))
+                })();
+                match converted{
+                    Ok(done)=>done.output_info.file_bytes,
+                    Err(e)=>{
+                        rows.push(json!({"type":precision.as_str(),"status":"QUANTIZATION_FAILED",
+                            "error":e.to_string()}));
+                        continue;
+                    }
+                }
+            }
+        };
         let savings=100.0*(1.0-size as f64/plan.baseline_bytes as f64);
-        let size_pass=size<plan.baseline_bytes &&
-            savings+1e-10>=plan.options.min_saving_percent;
-        if !size_pass{
+        if !(size<plan.baseline_bytes && savings+1e-10>=plan.options.min_saving_percent){
             rows.push(json!({"type":precision.as_str(),"status":"NOT_SMALL_ENOUGH",
                 "bytes":size,"savings_pct":savings,"output":output.to_string_lossy(),
                 "reference_bytes":plan.baseline_bytes}));
             continue;
         }
-        let results=(||{
-            let candidates=vec![(format!("smaller_{ordinal}"),output.clone())];
-            let eval=prepare_eval_with_server(&plan.suite,&plan.baseline,&candidates,
-                &plan.options.eval_tool,plan.options.server_tool.as_deref(),plan.options.gpu_layers,
-                plan.options.device.as_deref(),plan.options.tokens,&evidence)?;
-            run_eval_reusing_baseline(&eval,baseline_tasks.as_ref(),|line|log(line))
-        })();
-        let task_report=match results{
-            Ok(r)=>r,
+        let prior=match verify_prior_evidence(&evidence,&plan.baseline,&suite_id,
+            &format!("smaller_{ordinal}"),&output){
+            Ok(prior)=>prior,
             Err(e)=>{
-                rows.push(json!({"type":precision.as_str(),"status":"TASK_EVALUATION_FAILED",
+                rows.push(json!({"type":precision.as_str(),"status":"EXISTING_EVIDENCE_NOT_REUSABLE",
                     "error":e.to_string(),"bytes":size,"output":output.to_string_lossy()}));
                 continue;
+            }
+        };
+        let mut prior_used=false;
+        let task_report=if let Some(report)=prior{
+            log("[ojon] resume: reusing verified held-out task evidence (baseline unchanged)");
+            prior_used=true;
+            report
+        }else{
+            let results=(||{
+                let candidates=vec![(format!("smaller_{ordinal}"),output.clone())];
+                let eval=prepare_eval_with_server(&plan.suite,&plan.baseline,&candidates,
+                    &plan.options.eval_tool,plan.options.server_tool.as_deref(),plan.options.gpu_layers,
+                    plan.options.device.as_deref(),plan.options.tokens,&evidence)?;
+                run_eval_reusing_baseline(&eval,baseline_tasks.as_ref(),|line|log(line))
+            })();
+            match results{
+                Ok(r)=>r,
+                Err(e)=>{
+                    rows.push(json!({"type":precision.as_str(),"status":"TASK_EVALUATION_FAILED",
+                        "error":e.to_string(),"bytes":size,"output":output.to_string_lossy()}));
+                    continue;
+                }
             }
         };
         if baseline_tasks.is_none(){baseline_tasks=Some(task_report.clone());}
@@ -466,6 +577,9 @@ pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Res
                 else {"CAPABILITY_REGRESSION"},
             "output":output.to_string_lossy(),"bytes":size,
             "savings_pct":savings,"reference_bytes":plan.baseline_bytes,
+            "resumed_quantization":reusable.is_some(),
+            "resumed_task_evidence":prior_used,
+            "moe_router_pinned":router_recipe.is_some(),
             "text_tasks":task_metrics,"vision":vision_evidence,
             "perplexity":ppl_evidence,
             "evidence_scope":scope,"task_report":evidence.to_string_lossy(),
