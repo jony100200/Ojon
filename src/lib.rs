@@ -80,6 +80,7 @@ pub mod model_edit;
 pub mod activation_trace;
 pub mod uncensor_trace;
 pub mod gguf_edit;
+pub mod cvector_import;
 pub mod model_build;
 pub mod compressed_edit;
 pub mod adapter_smoke;

@@ -41,4 +41,7 @@ Quantized, router, expert and vision tensors are excluded from this route.
 The editor reports unmeasured refusal and capability results as
 `NOT_EVALUATED`. A model is ready to quantize for use only after real load,
 refusal, and capability tests against the original. Activation capture and
-automatic strength selection are not provided by this route.
+automatic strength selection are not provided by this route. Ojon can also
+import a llama.cpp control-vector GGUF made from paired prompts; projecting
+its residual-stream direction from one attention output matrix is an
+experimental choice that requires the same validation.

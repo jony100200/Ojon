@@ -10,6 +10,7 @@ use ojon_backend::{LocalSettings,load_settings,save_settings};
 use ojon_backend::{OptimizeWorkflowRequest, OptimizeGoal, plan_optimize_workflow, run_optimize_workflow};
 use ojon_backend::{compile_activation_recipe, prepare_gguf_abliteration_value,
     run_gguf_abliteration, prepare_uncensor_from_trace, run_uncensor_from_trace};
+use ojon_backend::cvector_import::recipe_from_control_vector;
 use ojon_backend::{GgufSummary, HfFolderInfo, ModelProbe, HfQuantizeResult, SmokeCapture, Precision, QuantizeResult, FoundBackend, BackendId, discover_backends, open_official_download_page};
 use std::path::{Path, PathBuf};
 use std::collections::VecDeque;
@@ -72,7 +73,7 @@ enum Focus {
     OptBaseline, OptCandidate, OptSuite, OptOutput, OptImatrix, OptSensitivity, OptPpl,
     OptMinSaving, OptMaxLoss, OptMaxPpl, OptRuntimeDevice, OptPrecisions,
     OptBenchPrompt, OptBenchGeneration, OptBenchRepetitions, OptSpeedRatio,
-    UncTrace, UncOutput, UncStrength,
+    UncTrace, UncOutput, UncStrength, UncBlock,
 }
 
 #[derive(Clone,PartialEq)]
@@ -81,10 +82,17 @@ struct UncensorRequest {
     trace:PathBuf,
     output:PathBuf,
     strength:f64,
+    block:Option<usize>,
 }
 
 fn plan_uncensor(request:&UncensorRequest)->std::io::Result<serde_json::Value>{
-    if request.source.extension().and_then(|x|x.to_str())==Some("gguf"){
+    if let Some(block)=request.block {
+        let recipe=recipe_from_control_vector(&request.trace,block,request.strength)?;
+        let plan=prepare_gguf_abliteration_value(&request.source,&recipe,&request.output)?;
+        Ok(serde_json::json!({"model_edit":plan.as_json(),"activation_tensors":1,
+            "direction_origin":"LLAMA_CPP_RESIDUAL_CONTROL_VECTOR","selected_block":block,
+            "refusal_rate":"NOT_EVALUATED","capability_retention":"NOT_EVALUATED","status":"PLAN_ONLY"}))
+    }else if request.source.extension().and_then(|x|x.to_str())==Some("gguf"){
         let activation=compile_activation_recipe(&request.trace,request.strength,true)?;
         let plan=prepare_gguf_abliteration_value(&request.source,&activation.recipe,&request.output)?;
         Ok(serde_json::json!({"model_edit":plan.as_json(),
@@ -99,7 +107,15 @@ fn plan_uncensor(request:&UncensorRequest)->std::io::Result<serde_json::Value>{
 }
 
 fn execute_uncensor(request:&UncensorRequest,mut log:impl FnMut(&str))->std::io::Result<serde_json::Value>{
-    if request.source.extension().and_then(|x|x.to_str())==Some("gguf"){
+    if let Some(block)=request.block {
+        let recipe=recipe_from_control_vector(&request.trace,block,request.strength)?;
+        let plan=prepare_gguf_abliteration_value(&request.source,&recipe,&request.output)?;
+        let model=run_gguf_abliteration(&plan,|line|log(line))?;
+        Ok(serde_json::json!({"model":model,"activation_tensors":1,
+            "direction_origin":"LLAMA_CPP_RESIDUAL_CONTROL_VECTOR","selected_block":block,
+            "refusal_rate":"NOT_EVALUATED","capability_retention":"NOT_EVALUATED",
+            "status":"EDITED_GGUF_NOT_VALIDATED"}))
+    }else if request.source.extension().and_then(|x|x.to_str())==Some("gguf"){
         let activation=compile_activation_recipe(&request.trace,request.strength,true)?;
         let plan=prepare_gguf_abliteration_value(&request.source,&activation.recipe,&request.output)?;
         let model=run_gguf_abliteration(&plan,|line|log(line))?;
@@ -173,6 +189,7 @@ struct Workstation {
     unc_trace:String,
     unc_output:String,
     unc_strength:String,
+    unc_block:String,
     unc_planned:Option<(UncensorRequest,serde_json::Value)>,
     unc_result:Option<serde_json::Value>,
     focus: Option<Focus>,
@@ -299,6 +316,7 @@ impl Workstation {
             unc_trace:String::new(),
             unc_output:String::new(),
             unc_strength:"0.7".into(),
+            unc_block:String::new(),
             unc_planned:None,
             unc_result:None,
             focus: None,
@@ -735,8 +753,18 @@ impl Workstation {
         if !strength.is_finite()||strength<=0.0||strength>1.0{
             return Err("Edit strength must be >0 and <=1".into());
         }
+        let block=if self.unc_block.trim().is_empty(){None}else{
+            Some(self.unc_block.trim().parse::<usize>()
+                .map_err(|_|"Control-vector block must be a nonnegative integer".to_owned())?)
+        };
+        if block.is_some() && (!trace.ends_with(".gguf") || !source.ends_with(".gguf")){
+            return Err("Control-vector mode requires GGUF source and vector paths".into());
+        }
+        if block.is_none() && trace.ends_with(".gguf"){
+            return Err("Enter the zero-based block index for a control-vector GGUF".into());
+        }
         Ok(UncensorRequest{source:PathBuf::from(source),trace:PathBuf::from(trace),
-            output:PathBuf::from(output),strength})
+            output:PathBuf::from(output),strength,block})
     }
     fn start_uncensor_plan(&mut self){
         if self.busy{return;}
@@ -1071,6 +1099,7 @@ impl Workstation {
             Focus::UncTrace => &mut self.unc_trace,
             Focus::UncOutput => &mut self.unc_output,
             Focus::UncStrength => &mut self.unc_strength,
+            Focus::UncBlock => &mut self.unc_block,
         };
         if self.control_held {
             if let Key::Character(ref key) = event.logical_key {
@@ -1155,6 +1184,7 @@ impl Workstation {
         let unc_trace=&mut self.unc_trace;
         let unc_output=&mut self.unc_output;
         let unc_strength=&mut self.unc_strength;
+        let unc_block=&mut self.unc_block;
         let unc_planned=self.unc_planned.as_ref();
         let unc_result=self.unc_result.as_ref();
         let model = if source_is_current { self.model.as_ref() } else { None };
@@ -1646,12 +1676,16 @@ impl Workstation {
                             }
                         });
                         }else{
-                            col.glass_card(340.0, |card|{
+                            col.glass_card(400.0, |card|{
                                 card.heading("02   UNCENSOR MODEL");
-                                card.label("Edit a new F16/BF16 GGUF or HF checkpoint from paired refusal activations.");
-                                card.label("Paired activation trace JSONL (captured by an instrumented runtime)");
-                                if card.text_input(unc_trace,"Path to good/bad activations.jsonl...").clicked(){
+                                card.label("Edit a new F16/BF16 GGUF or HF checkpoint from model activations.");
+                                card.label("Paired activation JSONL or llama.cpp control-vector GGUF");
+                                if card.text_input(unc_trace,"Activation trace or control-vector GGUF path...").clicked(){
                                     new_focus=Some(Focus::UncTrace);
+                                }
+                                card.label("Control-vector block index (zero-based; blank for JSONL)");
+                                if card.text_input(unc_block,"e.g. 19 for direction.20...").clicked(){
+                                    new_focus=Some(Focus::UncBlock);
                                 }
                                 card.label("New output GGUF or model folder (source stays untouched)");
                                 if card.text_input(unc_output,"New edited output path...").clicked(){

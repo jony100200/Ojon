@@ -60,6 +60,8 @@ Commands:
   ojon uncensor-trace-run <original-HF-folder-or-F16-GGUF> <paired-activations.jsonl> <new-model-folder-or-GGUF> [same options] --confirm
   ojon abliterate-gguf-plan <original-F16-BF16-GGUF> <direction-recipe.json> <new-model.gguf> [--json]
   ojon abliterate-gguf-run <original-F16-BF16-GGUF> <direction-recipe.json> <new-model.gguf> --confirm [--json]
+  ojon uncensor-cvector-plan <original-F16-BF16-GGUF> <control-vector.gguf> <new-model.gguf> --block N [--strength 0.7] [--json]
+  ojon uncensor-cvector-run <original-F16-BF16-GGUF> <control-vector.gguf> <new-model.gguf> --block N [--strength 0.7] --confirm [--json]
   ojon abliterate-model-plan <original-HF-folder> <direction-recipe.json> <new-model-folder> [--json]
   ojon abliterate-model-run <original-HF-folder> <direction-recipe.json> <new-model-folder> --confirm [--json]
   ojon abliterate-plan <original-shard.safetensors> <direction-recipe.json> <new-shard.safetensors> [--json]
@@ -592,6 +594,39 @@ fn run() -> io::Result<()> {
             let plan=ojon_backend::prepare_gguf_abliteration(&source,&recipe,&output)?;
             let result=if execute{ojon_backend::run_gguf_abliteration(&plan,|message|eprintln!("{message}"))?}
                 else{plan.as_json()};
+            if json{println!("{result}");}else{println!("{}",serde_json::to_string_pretty(&result)?);}
+        }
+        Some("uncensor-cvector-plan") | Some("uncensor-cvector-run") => {
+            let execute=cmd=="uncensor-cvector-run";
+            let source=PathBuf::from(next_argument(&mut args,"original float GGUF")?);
+            let vector=PathBuf::from(next_argument(&mut args,"llama.cpp control vector GGUF")?);
+            let output=PathBuf::from(next_argument(&mut args,"new edited GGUF")?);
+            let(mut block,mut strength,mut confirmed,mut json)=(None,0.7f64,false,false);
+            while let Some(option)=args.next(){
+                match option.to_str(){
+                    Some("--block")=>block=Some(next_argument(&mut args,"zero-based block index")?
+                        .to_string_lossy().parse::<usize>().map_err(|_|invalid("block must be a nonnegative integer"))?),
+                    Some("--strength")=>strength=next_argument(&mut args,"strength")?
+                        .to_string_lossy().parse().map_err(|_|invalid("strength must be numeric"))?,
+                    Some("--confirm")=>confirmed=true,
+                    Some("--json")=>json=true,
+                    _=>return Err(invalid(format!("unknown uncensor-cvector option: {}",option.to_string_lossy()))),
+                }
+            }
+            if confirmed&&!execute{return Err(invalid("--confirm only works with uncensor-cvector-run"));}
+            if execute&&!confirmed{return Err(invalid("uncensor-cvector-run requires --confirm"));}
+            let block=block.ok_or_else(||invalid("--block N is required"))?;
+            let recipe=ojon_backend::cvector_import::recipe_from_control_vector(&vector,block,strength)?;
+            let plan=ojon_backend::prepare_gguf_abliteration_value(&source,&recipe,&output)?;
+            let model=if execute{ojon_backend::run_gguf_abliteration(&plan,|line|eprintln!("{line}"))?}
+                else{plan.as_json()};
+            let result=serde_json::json!({"schema":"ojon.uncensor_cvector_result.v1",
+                "model":model,"control_vector":vector,"selected_block":block,
+                "direction_origin":"LLAMA_CPP_RESIDUAL_CONTROL_VECTOR",
+                "projection_target":"ATTENTION_OUTPUT_WEIGHT",
+                "model_load":"NOT_TESTED","refusal_rate":"NOT_EVALUATED",
+                "capability_retention":"NOT_EVALUATED",
+                "status":if execute{"EDITED_GGUF_NOT_VALIDATED"}else{"PLAN_ONLY"}});
             if json{println!("{result}");}else{println!("{}",serde_json::to_string_pretty(&result)?);}
         }
         Some("abliterate-model-plan") | Some("abliterate-model-run") => {

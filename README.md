@@ -473,6 +473,22 @@ verified refusal reduction. Capture, automatic strength search, refusal
 evaluation and capability retention are still separate work. Load and test
 the edited GGUF before quantizing it or deleting another original checkpoint.
 
+An installed `llama-cvector-generator` can capture residual-stream directions
+directly from an original GGUF using paired positive/negative prompt files.
+Ojon can import one chosen layer from that control-vector GGUF without a
+safetensors checkpoint:
+
+```powershell
+llama-cvector-generator -m 'D:\Models\original-BF16.gguf' --positive-file 'D:\Bench\positive.txt' --negative-file 'D:\Bench\negative.txt' --method mean -o 'D:\Bench\control-vector.gguf'
+ojon uncensor-cvector-plan 'D:\Models\original-BF16.gguf' 'D:\Bench\control-vector.gguf' 'D:\Models\edited-BF16.gguf' --block 19 --strength 0.1 --json
+ojon uncensor-cvector-run 'D:\Models\original-BF16.gguf' 'D:\Bench\control-vector.gguf' 'D:\Models\edited-BF16.gguf' --block 19 --strength 0.1 --confirm
+```
+
+`--block` is zero-based; block 19 reads `direction.20`. Ojon validates the
+vector and matching output matrix shape. A residual-stream vector projected
+from an attention output weight is an experimental edit. The prompt pairs,
+layer and strength require held-out refusal and capability evaluation.
+
 ### Native editing and VLM build pipeline (experimental)
 
 The native Rust editor can **now** modify full safetensors Hugging Face
