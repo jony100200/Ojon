@@ -106,7 +106,7 @@ fn plan_for(
                 "HQQ native qmodel.pt (not GGUF)",
                 "HQQ AutoHQQHFModel loader only (unverified)",
                 "external_python_unverified",
-                "Needs installed torch, hqq and transformers; full HF checkpoint loaded; no GGUF converter or B60 kernel compatibility implied",
+                "Needs installed torch, hqq and transformers; full HF checkpoint loaded; no GGUF converter or Intel XPU kernel compatibility implied",
                 "research-plan hqq <source> <new-output> --bits 4 --group 64"));
             for (id, ratio) in [("hf_openvino_int4", "1.0"), ("hf_openvino_mixed", "0.8")] {
                 options.push(candidate(id, "openvino_nncf",

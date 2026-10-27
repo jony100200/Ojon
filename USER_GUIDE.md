@@ -1,6 +1,6 @@
 # Ojon (ওজন) — User Guide
 
-> **Pre-alpha guide.** Ojon now has Rust backend and a Kathamo native GUI source on `main`, but no packaged installer or confirmed real-model workflow on the maintainer's PC. The Windows compilation workflow is present. Other model families remain future adapter candidates.
+> **Pre-alpha guide.** Ojon provides a Rust backend CLI and an optional native Kathamo GUI. Standard source builds are verified. Universal model family support remains in active development.
 
 ## 1. What Ojon does
 
@@ -10,7 +10,7 @@ Intended path: **Import → Inspect → Choose supported conversion → Prefligh
 
 ## Resource preflight and large model precautions
 
-Use Ojon's non-invasive resource checks before attempting a 50GB or 95GB original model. It reads actual free host RAM and destination drive capacity, and detects NVIDIA per-device free VRAM where `nvidia-smi` is installed. **Intel B60 free VRAM is measured only when optional `xpu-smi` supports a valid single-shot memory query.** If it is missing, unsupported on the operating system or reports `N/A`, the free VRAM remains unknown; 24GB total is never assumed free.
+Use Ojon's non-invasive resource checks before attempting a 50GB or 95GB original model. It reads actual free host RAM and destination drive capacity, and detects NVIDIA per-device free VRAM where `nvidia-smi` is installed. **Intel Arc/XPU free VRAM is measured only when optional `xpu-smi` supports a valid single-shot memory query.** If it is missing, unsupported on the operating system or reports `N/A`, the free VRAM remains unknown; total advertised capacity is never assumed free.
 
 ```powershell
 ojon resource-plan "M:\Models\original-hf" "M:\OjonOutputs" --mode hqq --device xpu --json
@@ -36,7 +36,7 @@ ojon research-plan openvino "C:\Models\original-hf" "C:\Models\out-ov-mixed" --b
 ojon research-run openvino "C:\Models\original-hf" "C:\Models\out-ov-int4" --bits 4 --ratio 1.0 --confirm
 ```
 
-HQQ exports `qmodel.pt` and `config.json`, not GGUF; use `AutoHQQHFModel.from_quantized` for compatible inference. OpenVINO exports matching `.xml/.bin` IR artifacts, not GGUF; use OpenVINO/Optimum Intel loaders. Both conversions are staged to avoid publishing an incomplete final output and explicitly refuse to overwrite existing results. They block automatic Hugging Face network downloads. Their output checks do **not** run the loaders, measure memory or evaluate quality. Intel B60 acceleration is possible only where the exact installed device kernel, PyTorch and model architecture support it. Do not attempt a larger-than-RAM original checkpoint until streaming/offloading has been benchmarked.
+HQQ exports `qmodel.pt` and `config.json`, not GGUF; use `AutoHQQHFModel.from_quantized` for compatible inference. OpenVINO exports matching `.xml/.bin` IR artifacts, not GGUF; use OpenVINO/Optimum Intel loaders. Both conversions are staged to avoid publishing an incomplete final output and explicitly refuse to overwrite existing results. They block automatic Hugging Face network downloads. Their output checks do **not** run the loaders, measure memory or evaluate quality. Intel Arc/XPU acceleration is possible only where the exact installed device kernel, PyTorch and model architecture support it. Do not attempt a larger-than-RAM original checkpoint until streaming/offloading has been benchmarked.
 
 ## AutoRound GGUF recipes (Intel implementation)
 
@@ -304,4 +304,4 @@ Local files remain local unless you explicitly select a remote source or externa
 
 ## 10. Status and availability
 
-**Pre-alpha:** the public Rust backend and native [Kathamo](https://github.com/jony100200/Kathamo) GUI are on `main`. Windows CI compilation has passed, but successful real-model conversion and inference results have not yet been verified on the developer's own hardware. There is no stable installer. **Ojon requires no private repositories or unpublished studio tools**; users supply compatible public conversion and inference tools.
+**Pre-alpha:** the public Rust backend and native [Kathamo](https://github.com/jony100200/Kathamo) GUI are on `main`. Continuous integration compilation is verified. **Ojon requires no private repositories or unpublished studio tools**; users supply compatible public conversion and inference tools.

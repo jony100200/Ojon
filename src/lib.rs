@@ -85,7 +85,7 @@ pub use llama::{
 pub use smoke::{smoke_gguf, smoke_gguf_capture, SmokeCapture};
 pub use probe::{probe_model, ModelCategory, ModelProbe};
 pub use train::{prepare_train, run_train, TrainPlan};
-pub use quality::{parse_quality_report, recommend, QualityReport};
+pub use quality::{evaluate_optimization_readiness, parse_quality_report, recommend, QualityReport};
 pub use sweep::{execute_sweep, parse_precisions, prepare_sweep, SweepPlan};
 pub use ppl::{evaluate_sweep, parse_final_perplexity, PplSettings};
 pub use advanced::{

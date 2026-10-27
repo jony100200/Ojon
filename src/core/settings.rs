@@ -395,7 +395,7 @@ mod tests{
         let mut settings=LocalSettings::default();
         settings.set("backend.llama_cli",
             &std::env::temp_dir().join("ojon-cli-test.exe").to_string_lossy()).unwrap();
-        settings.set("last_model","C:/models/model.gguf").unwrap();
+        settings.set("last_model","models/model.gguf").unwrap();
         settings.set("optimization.goal","smallest").unwrap();
         save_to_path(&path,&settings).unwrap();
         assert_eq!(load_from_path(&path).unwrap(),settings);

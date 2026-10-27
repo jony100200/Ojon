@@ -28,6 +28,14 @@
 *.partial
 *.part
 *.tmp
+*.pending
+*.logits
+*.imatrix
+*.receipt.json
+*.recipe.json
+_reports/
+_logs/
+_scratch/
 
 # Local/private development test and benchmark material
 /tests/

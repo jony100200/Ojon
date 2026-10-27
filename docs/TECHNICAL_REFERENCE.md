@@ -270,16 +270,16 @@ no download or installation is performed by Ojon.
 
 ```powershell
 # Inspect what will run; does not load weights or consume VRAM:
-ojon adapter-smoke-plan "D:\\Models\\edited-adapter" "D:\\Models\\smoke.json" --json
+ojon adapter-smoke-plan "models/edited-adapter" "models/smoke.json" --json
 
 # Run a quick CPU-only load/generation test when ready:
-ojon adapter-smoke-run "D:\\Models\\edited-adapter" "D:\\Models\\smoke.json" --tool "C:\\llama.cpp\\build\\bin\\Release\\llama-cli.exe" --gpu-layers 0 --confirm
+ojon adapter-smoke-run "models/edited-adapter" "models/smoke.json" --tool "llama-cli" --gpu-layers 0 --confirm
 
 # Check which GPU IDs llama.cpp actually exposes (mapping varies by build):
 llama-cli --list-devices
 
 # Optionally use only a selected *available* GPU, e.g. its reported Vulkan0:
-ojon adapter-smoke-run "D:\\Models\\edited-adapter" "D:\\Models\\vision-smoke.json" --tool "C:\\llama.cpp\\build\\bin\\Release\\llama-cli.exe" --gpu-layers 12 --device Vulkan0 --image "D:\\Images\\sample.jpg" --prompt "Describe the image briefly." --confirm
+ojon adapter-smoke-run "models/edited-adapter" "models/vision-smoke.json" --tool "llama-cli" --gpu-layers 12 --device Vulkan0 --image "images/sample.jpg" --prompt "Describe the image briefly." --confirm
 ```
 
 The `--image` option requires an mmproj path already present in the
@@ -493,7 +493,7 @@ unknown vision scores are not accepted for VLM selection.
 
 All output receipts explicitly mark inference, refusal, coding, tool-use and
 vision testing as **NOT RUN**. For 27B/35B weights, a full-precision edited
-checkpoint plus intermediate GGUF may exceed available RAM/disk; B60 24 GB
+checkpoint plus intermediate GGUF may exceed available RAM/disk; target GPU 24 GB
 quantized inference feasibility does not establish large-model editing
 feasibility.
 
@@ -577,7 +577,7 @@ Cargo's `target/` directory is a **rebuildable cache**, not Ojon's model storage
 On Windows, you can move build outputs to another disk:
 
 ```powershell
-$env:CARGO_TARGET_DIR = "D:\\RustBuild\\Ojon"
+$env:CARGO_TARGET_DIR = "target/custom"
 cargo build --release --bin ojon
 ```
 
@@ -596,8 +596,8 @@ For GGUF conversion, install or build public [llama.cpp](https://github.com/ggml
 
 ```powershell
 ojon inspect "source-f16.gguf"
-ojon plan "source-f16.gguf" "model-Q5_K_M.gguf" --precision Q5_K_M --tool "C:\Tools\llama.cpp\llama-quantize.exe"
-ojon quantize "source-f16.gguf" "model-Q5_K_M.gguf" --precision Q5_K_M --tool "C:\Tools\llama.cpp\llama-quantize.exe"
+ojon plan "source-f16.gguf" "model-Q5_K_M.gguf" --precision Q5_K_M --tool "llama-quantize"
+ojon quantize "source-f16.gguf" "model-Q5_K_M.gguf" --precision Q5_K_M --tool "llama-quantize"
 ojon verify "model-Q5_K_M.gguf"
 ```
 
@@ -700,11 +700,11 @@ ojon research-plan openvino "C:\Models\hf-original" "C:\Models\ov-int4-mixed" --
 # After reviewing one plan, change research-plan to research-run and add --confirm.
 ```
 
-Both routes stage conversion beside the destination and publish only after checking expected output files, without overwriting originals or downloading dependencies. They set Hugging Face offline flags during execution. **Successful export is not successful inference**: loader compatibility, model correctness, speed, VRAM, machine RAM and held-out quality still need measured tests. In particular, the original HF checkpoint is loaded into memory for HQQ quantization and may not fit a 32GB RAM workstation. Runtime performance on Intel B60 is unverified.
+Both routes stage conversion beside the destination and publish only after checking expected output files, without overwriting originals or downloading dependencies. They set Hugging Face offline flags during execution. **Successful export is not successful inference**: loader compatibility, model correctness, speed, VRAM, machine RAM and held-out quality still need measured tests. In particular, the original HF checkpoint is loaded into memory for HQQ quantization and may not fit limited RAM hosts. Runtime performance on discrete Intel Arc GPUs is unverified.
 
 ## Resource preflight — measure capacity before quantization
 
-Ojon measures **available host RAM** and **free space on the actual destination volume**, plus per-physical-device NVIDIA free VRAM where `nvidia-smi` is installed. Intel Arc Pro B60 free VRAM is read only from valid, optional Intel `xpu-smi` telemetry. When it is absent, unsupported on the host or returns `N/A`, capacity remains **unknown** rather than assuming the advertised 24 GB is free.
+Ojon measures **available host RAM** and **free space on the actual destination volume**, plus per-physical-device NVIDIA free VRAM where `nvidia-smi` is installed. Intel Arc / XPU free VRAM is read only from valid, optional Intel `xpu-smi` telemetry. When it is absent, unsupported on the host or returns `N/A`, capacity remains **unknown** rather than assuming advertised total capacity is free.
 
 ```powershell
 ojon resource-plan "C:\Models\hf-source" "M:\OjonOutputs" --mode hqq --device xpu --json

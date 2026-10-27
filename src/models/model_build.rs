@@ -223,7 +223,7 @@ mod tests{
     use super::*;
     #[test]
     fn result_does_not_claim_model_verified() {
-        let r=ModelBuildResult{directory:PathBuf::from("C:\\Models\\out"),
+        let r=ModelBuildResult{directory:PathBuf::from("models/out"),
             has_mmproj:true,model_bytes:123,mmproj_bytes:Some(34)};
         assert_eq!(r.as_json()["status"],"UNVERIFIED_LOCAL_ARTIFACTS_CREATED");
         assert_eq!(r.as_json()["vision_quality"],"NOT_TESTED");

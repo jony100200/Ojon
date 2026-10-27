@@ -312,6 +312,72 @@ pub fn recommend(report: &QualityReport) -> Value {
         "warning":"User-supplied evidence is not independently verified by Ojon; benchmark protocol, sample size, and comparability must be audited. No model was run to compute this ranking.",
     })
 }
+
+/// Evaluate whether any quality- and hardware-verified candidate also achieves
+/// the required minimum byte-size reduction against `baseline_bytes`.
+pub fn evaluate_optimization_readiness(
+    report: &QualityReport,
+    baseline_bytes: u64,
+    min_saving_percent: f64,
+) -> io::Result<Value> {
+    if baseline_bytes == 0 {
+        return Err(bad("baseline_bytes must be positive"));
+    }
+    if !min_saving_percent.is_finite() || !(0.0..=95.0).contains(&min_saving_percent) {
+        return Err(bad("min_saving_percent must be within 0..=95 percent"));
+    }
+    let rec = recommend(report);
+    let ranked = rec["candidates"].as_array().cloned().unwrap_or_default();
+    let mut evaluated = Vec::with_capacity(ranked.len());
+    let mut any_quality_eligible = false;
+    for item in ranked {
+        let bytes = item["bytes"].as_u64().unwrap_or(0);
+        let eligible = item["eligible"].as_bool() == Some(true);
+        if eligible {
+            any_quality_eligible = true;
+        }
+        let saving_bytes = baseline_bytes.saturating_sub(bytes);
+        let saving_percent = if bytes <= baseline_bytes {
+            ((baseline_bytes - bytes) as f64 / baseline_bytes as f64) * 100.0
+        } else {
+            -(((bytes - baseline_bytes) as f64 / baseline_bytes as f64) * 100.0)
+        };
+        let saving_passes = bytes < baseline_bytes && saving_percent + 1e-12 >= min_saving_percent;
+        let readiness_pass = eligible && saving_passes;
+        evaluated.push(json!({
+            "label": item["label"],
+            "bytes": bytes,
+            "quality_and_hardware_eligible": eligible,
+            "saving_bytes": saving_bytes,
+            "saving_percent": saving_percent,
+            "saving_passes": saving_passes,
+            "readiness_pass": readiness_pass,
+            "reasons": item["reasons"]
+        }));
+    }
+    let selected = evaluated
+        .iter()
+        .find(|c| c["readiness_pass"].as_bool() == Some(true))
+        .cloned();
+    let verdict = if selected.is_some() {
+        "PASS"
+    } else if any_quality_eligible {
+        "REJECT_INSUFFICIENT_SAVING"
+    } else {
+        "REJECT_QUALITY_OR_HARDWARE"
+    };
+    Ok(json!({
+        "schema": "ojon.optimization_readiness_gate.v1",
+        "evaluation_suite": report.evaluation_suite,
+        "baseline_bytes": baseline_bytes,
+        "min_saving_percent": min_saving_percent,
+        "ready": selected.is_some(),
+        "verdict": verdict,
+        "selected_candidate": selected,
+        "candidates": evaluated
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,5 +515,32 @@ mod tests {
         let result=parse_quality_report(&path).unwrap();
         fs::remove_file(&path).unwrap();
         assert!(recommend(&result)["recommendation"].is_null());
+    }
+
+    #[test]
+    fn readiness_gate_selects_smallest_quality_and_size_passing_candidate() {
+        let r = report(vec![
+            candidate("Q3_DEGRADED", 400, 0.80),
+            candidate("Q4_PASS", 700, 0.895),
+            candidate("Q8_TOO_LARGE", 980, 0.90),
+        ]);
+        let gate = evaluate_optimization_readiness(&r, 1000, 20.0).unwrap();
+        assert_eq!(gate["schema"], "ojon.optimization_readiness_gate.v1");
+        assert_eq!(gate["ready"], true);
+        assert_eq!(gate["verdict"], "PASS");
+        assert_eq!(gate["selected_candidate"]["label"], "Q4_PASS");
+        assert_eq!(gate["selected_candidate"]["saving_bytes"], 300);
+    }
+
+    #[test]
+    fn exact_boundary_saving_passes_readiness_gate() {
+        let r = report(vec![candidate("Q4_BOUNDARY", 750, 0.898)]);
+        let gate = evaluate_optimization_readiness(&r, 1000, 25.0).unwrap();
+        assert_eq!(gate["ready"], true);
+        assert_eq!(gate["verdict"], "PASS");
+        assert_eq!(gate["selected_candidate"]["label"], "Q4_BOUNDARY");
+        let rejected = evaluate_optimization_readiness(&r, 1000, 30.0).unwrap();
+        assert_eq!(rejected["ready"], false);
+        assert_eq!(rejected["verdict"], "REJECT_INSUFFICIENT_SAVING");
     }
 }

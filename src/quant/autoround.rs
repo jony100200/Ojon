@@ -371,7 +371,7 @@ mod tests {
     fn test_autoround_plan_rejects_missing_model() {
         let res = prepare_autoround_plan(
             Path::new("nonexistent-model-folder"),
-            Path::new("C:\\Outputs\\out"),
+            Path::new("outputs/out"),
             4,
             "xpu",
             Path::new("python"),

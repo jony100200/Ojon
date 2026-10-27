@@ -496,7 +496,6 @@ pub fn bundled_data_dir(name: &str) -> Option<PathBuf> {
     if let Ok(cwd) = env::current_dir() {
         candidates.push(cwd.join("data").join(name));
     }
-    candidates.push(PathBuf::from("d:/KSAppDev/Ojon/data").join(name));
     candidates.into_iter().find(|p| p.is_dir())
 }
 
@@ -527,7 +526,6 @@ pub fn bundled_data_file(name: &str) -> Option<PathBuf> {
     if let Ok(cwd) = env::current_dir() {
         candidates.push(cwd.join("data").join(name));
     }
-    candidates.push(PathBuf::from("d:/KSAppDev/Ojon/data").join(name));
     candidates.into_iter().find(|p| p.is_file())
 }
 

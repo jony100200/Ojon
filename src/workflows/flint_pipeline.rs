@@ -6,8 +6,7 @@
 //! - ProQuant (MoE PTQ): Routing-Consistent RMSNorm (RoCo) and Prune-or-Prioritize (PoP) expert preservation.
 //! - AutoRound / SignRoundV2: Signed gradient descent on weight rounding to minimize output block error.
 //! - Heretic & Refusal Direction: Multi-block contrastive abliteration with frozen router gating invariants.
-//!
-//! Targets local hardware: Intel Arc Pro B60 (24GB VRAM) + NVIDIA RTX 4060 Ti (16GB VRAM) + 32GB Host RAM.
+//! Targets host hardware dynamically: evaluates available GPU VRAM, CPU threads, and Host RAM.
 
 use crate::gguf::{inspect_gguf, inspect_gguf_tensors};
 use crate::llama::Precision;
@@ -180,7 +179,7 @@ impl FlintHardwareFit {
     }
 }
 
-/// Assess hardware fit for Flint MoE on local Intel Arc B60 (24GB) or RTX 4060 Ti (16GB).
+/// Assess hardware fit for Flint MoE based on dynamically probed GPU VRAM and Host RAM.
 pub fn assess_flint_hardware_fit(preferred_device: Option<&str>) -> io::Result<FlintHardwareFit> {
     let dev = preferred_device.unwrap_or("auto");
     let res = crate::core::resource::assess_resources(1024, Path::new("."), crate::core::resource::ResourceMode::Gguf, dev)?;
@@ -199,13 +198,13 @@ pub fn assess_flint_hardware_fit(preferred_device: Option<&str>) -> io::Result<F
         };
         if matches {
             dev_name = name.to_string();
-            vram_total = g["total_vram_bytes"].as_u64().unwrap_or(24576 * 1024 * 1024) / (1024 * 1024);
-            vram_free = g["free_vram_bytes"].as_u64().unwrap_or(23000 * 1024 * 1024) / (1024 * 1024);
+            vram_total = g["total_vram_bytes"].as_u64().unwrap_or(0) / (1024 * 1024);
+            vram_free = g["free_vram_bytes"].as_u64().unwrap_or(0) / (1024 * 1024);
             break;
         }
     }
 
-    let ram_free = res.available_ram_bytes.unwrap_or(16 * 1024 * 1024 * 1024) / (1024 * 1024);
+    let ram_free = res.available_ram_bytes.unwrap_or(0) / (1024 * 1024);
 
     // Flint exact sizes from actual quantized files on disk:
     // IQ3_M: 17,518,056,736 bytes = ~16,706 MiB

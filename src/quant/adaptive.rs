@@ -376,7 +376,7 @@ pub fn run_adaptive(plan:&AdaptivePlan,mut log:impl FnMut(&str))->io::Result<Val
         "candidates":rows,"provisional_smallest_task_passing_output":best.as_ref().map(|p|p.0.clone()),
         "provisional_smallest_bytes":best.map(|p|p.1),
         "hardware_residency_verified":false,"near_lossless_generalization_verified":false,
-        "warning":"Winner passes only requested held-out deterministic tasks; verify B60 RAM/VRAM and larger real coding tasks before deployment."});
+        "warning":"Winner passes only requested held-out deterministic tasks; verify target GPU RAM/VRAM and larger real coding tasks before deployment."});
     let receipt=plan.output_dir.join(format!("{session}.json"));
     let mut file=OpenOptions::new().create_new(true).write(true).open(&receipt)?;
     file.write_all(&serde_json::to_vec_pretty(&report).map_err(io::Error::other)?)?;

@@ -190,7 +190,7 @@ pub fn plan_rco_database(
         arguments,expected_output:Some(output),model:Some(model),
         warnings:vec![
             "Requires working CUDA PyTorch; Intel Arc XPU is NOT supported for this stage",
-            "Qwen3-only entrypoint untested on RTX 4060 Ti 16GB; offload may still require more RAM/VRAM",
+            "Qwen3-only entrypoint untested on 16GB consumer GPUs; offload may still require more RAM/VRAM",
             "fineweb_edu calibration must already be cached locally in offline mode",
             "Upstream writes multiple per-bit tensors into nested folders; budget substantial scratch space",
             "Local checkout and input data must be trusted; offline environment variables are not a network sandbox",
