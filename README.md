@@ -146,7 +146,7 @@ execution workflow. The GUI defaults to CPU; the CLI additionally accepts
 explicit CUDA/SYCL device IDs with live vendor telemetry preflight. The **Kathamo desktop app** now defaults to the
 **Automatic Optimize** view; the existing quantization and inference controls
 remain under **Manual Tools**. The guided view inspects a selected model,
-current Q4 reference, optional smaller GGUF, held-out task suite and output
+optional Q4 reference, optional smaller GGUF, held-out task suite and output
 folder to determine a valid next step **without running a model**.
 
 The interface has **Model & Tasks** and **Quality Controls** pages,
@@ -160,9 +160,11 @@ progress or performance measurements.
 
 **Guided limits:** current GUI supports one comparison candidate per run;
 the CLI supports up to six. The UI still needs a genuine held-out task suite
-and a current compressed Q4 reference (unless the selected model itself is
-the reference). Quantization from original F16/BF16 GGUF can search IQ4/IQ3
-when compatible tools, source, suite, disk/RAM policy and Q4 reference exist.
+and an original F16/BF16 GGUF or an existing compressed reference. When the
+selected source is original F16/BF16, leaving the reference blank compares
+new Q4/Q5/IQ4/Q3 candidates directly to that original teacher. Supplying an
+existing Q4 reference retains the smaller-than-Q4 comparison workflow.
+Both routes require compatible tools, a held-out suite and disk/RAM preflight.
 No automatic dataset generation, automatic model downloads, large-model
 runtime-fit proof, VLM verification, resume/cancel or GPU availability
 guarantee is claimed. Those belong to the future integration milestone.
@@ -171,8 +173,8 @@ guarantee is claimed. Those belong to the future integration milestone.
 # Your current Q4 is the reference. Compare a smaller candidate when ready:
 ojon optimize-workflow-plan 'D:\Models\current-Q4_K_M.gguf' --candidate iq3='D:\Models\smaller-IQ3_M.gguf' --suite 'D:\Bench\coding-suite.json' --output-dir 'D:\Bench' --goal smallest --json
 
-# To try creating new candidates, use an original F16/BF16 GGUF source:
-ojon optimize-workflow-plan 'D:\Models\original-F16.gguf' --baseline 'D:\Models\current-Q4_K_M.gguf' --suite 'D:\Bench\coding-suite.json' --output-dir 'D:\Bench' --goal balanced --json
+# To create Q4/Q5 and smaller candidates, use an original F16/BF16 GGUF source:
+ojon optimize-workflow-plan 'D:\Models\original-F16.gguf' --suite 'D:\Bench\coding-suite.json' --output-dir 'D:\Bench' --goal balanced --json
 ```
 
 An approved run uses the **same validated Rust adapters**, without executing a
@@ -181,9 +183,9 @@ shell string. CPU is the default; GPU requires `--device cuda|xpu`,
 GPU telemetry and real backend checks. The GPU device name is never guessed.
 For adaptive mixed precision, add `--tensor-sensitivity scores.json` from an
 already validated sensitivity extraction; the adaptive runner reuses the held-out
-suite and compares against the existing Q4 reference. Optional PPL is currently
+suite and compares against an explicitly supplied Q4 reference. Optional PPL is currently
 not available on that adaptive route, and requesting PPL for an explicitly
-selected GPU blocks that route rather than switching devices. Both steps require a real held-out task suite and a current Q4 reference.
+selected GPU blocks that route rather than switching devices. All routes require a real held-out task suite; adaptive search still requires a current Q4 reference.
 The run does not overwrite originals or silently allocate a GPU.
 Comparison receipt filenames are allocated without overwriting earlier reports.
 
@@ -315,23 +317,28 @@ GGUF. Both require actual model inference only for `*-run`, not `*-plan`.
 
 
 
-**Quantization takes priority over editing.** The success reference is the
-actual model GGUF you already run (for example, a Q4_K_M), not a theoretical
-F16 score. Ojon's `quant-parity-*` workflow quantizes a separate high-precision
-GGUF and compares the candidate on the **same** deterministic coding,
+**Quantization takes priority over editing.** Use either the original
+F16/BF16/F32 GGUF or a matching, already accepted Q4 GGUF as the quality
+reference. Ojon's `quant-parity-*` workflow quantizes the high-precision
+GGUF and compares each candidate on the **same** deterministic coding,
 reasoning and tool-call suite, with optional vision image tasks and PPL.
 
 **Important:** Do **not** use an existing Q4_K_M as the quantization input.
 Requantizing low-precision weights typically compounds error. The original
-F16/BF16/F32 GGUF is needed as source; the existing Q4_K_M is the reference.
-If you only have the Q4 file, retain it while preparing or downloading a
-matching original checkpoint. Ojon checks GGUF architecture and full
+F16/BF16/F32 GGUF is needed as source. Pass that file as both the source and
+reference if no accepted Q4 exists; use a matching Q4 as reference when you
+want to beat its size without losing its observed capability. If you only
+have the Q4 file, use `quant-compare-*` to compare already available smaller
+GGUFs. Ojon checks GGUF architecture and full
 tensor-name/shape agreement; this does not cryptographically verify that
 both files came from the same model revision.
 
 ```powershell
 # Plan without loading model weights or using a GPU:
 ojon quant-parity-plan 'D:\Models\original-F16.gguf' 'D:\Models\my-Q4_K_M.gguf' 'D:\Bench\coding-suite.json' 'D:\Bench\candidates' --precisions IQ4_XS,IQ3_M,Q3_K_M --max-buffer-mib 512 --gpu-layers 0 --json
+
+# With only an original single-file GGUF, use it as its own teacher reference:
+ojon quant-parity-plan 'D:\Models\original-F16.gguf' 'D:\Models\original-F16.gguf' 'D:\Bench\coding-suite.json' 'D:\Bench\candidates' --precisions Q4_K_M,Q5_K_M --max-buffer-mib 512 --gpu-layers 0 --json
 
 # Later: compute candidates, run the same tasks against reference and candidates:
 ojon quant-parity-run 'D:\Models\original-F16.gguf' 'D:\Models\my-Q4_K_M.gguf' 'D:\Bench\coding-suite.json' 'D:\Bench\candidates' --precisions IQ4_XS,IQ3_M,Q3_K_M --imatrix 'D:\Bench\calibration.imatrix.gguf' --max-buffer-mib 512 --gpu-layers 0 --confirm
@@ -352,6 +359,8 @@ without using the GPU for quality scoring.
 The text suite uses `ojon.task_suite.v1`: 6–256 tasks, at least two each
 from `coding`, `reasoning` and `tool_call`. Exact/JSON-answer matching
 does **not** execute generated code and is not a full agentic benchmark.
+The reference must score above zero in every category. If it does not,
+Ojon reports `BASELINE_UNINFORMATIVE` and selects no candidate.
 
 Before committing compute to a large evaluation, users and local agents can
 validate the suite **without loading a model, running inference or printing
@@ -437,6 +446,32 @@ the exporter alone does not collect them or magically reduce refusals.
 For a model larger than available RAM, use an existing quantized GGUF or
 a separately validated out-of-core quantizer; Ojon's current llama.cpp
 conversion/quantization pipeline is not guaranteed to be streaming.
+
+### Edit an original GGUF directly (experimental)
+
+An original, single-file, little-endian F16/BF16/F32 GGUF can be the
+editing source. A separate Hugging Face safetensors copy is **not** required
+for this route. Ojon streams the source into a new staged GGUF, edits exact
+`blk.N.attn_output.weight` or `blk.N.ffn_down.weight` float matrices, verifies
+the GGUF container, and leaves the original file unchanged. Router, expert,
+vision and quantized tensors are not editable by this route. Allow free disk
+space for the new full-size GGUF plus a safety margin. Successful edits save
+the exact recipe and result in `<output>.ojon-recipe.json`.
+
+```powershell
+# The JSONL needs real good/bad output activations captured from this exact model.
+ojon uncensor-trace-plan 'D:\Models\original-BF16.gguf' 'D:\Bench\paired-activations.jsonl' 'D:\Models\edited-BF16.gguf' --json
+ojon uncensor-trace-run 'D:\Models\original-BF16.gguf' 'D:\Bench\paired-activations.jsonl' 'D:\Models\edited-BF16.gguf' --strength 0.7 --confirm
+
+# Alternatively use an existing ojon.abliteration.v1 direction recipe.
+ojon abliterate-gguf-run 'D:\Models\original-BF16.gguf' 'D:\Bench\directions.json' 'D:\Models\edited-BF16.gguf' --confirm
+```
+
+The activation trace must use GGUF tensor names and vectors matching each
+target matrix's output dimension. The edit is a weight transform, **not** a
+verified refusal reduction. Capture, automatic strength search, refusal
+evaluation and capability retention are still separate work. Load and test
+the edited GGUF before quantizing it or deleting another original checkpoint.
 
 ### Native editing and VLM build pipeline (experimental)
 

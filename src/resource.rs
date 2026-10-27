@@ -165,7 +165,7 @@ fn available_ram() -> Option<u64> {
 fn available_ram() -> Option<u64> { None }
 
 #[cfg(windows)]
-fn free_disk(directory: &Path) -> Option<u64> {
+pub(crate) fn free_disk(directory: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name="kernel32")]
     extern "system" {
@@ -189,7 +189,7 @@ fn free_disk(directory: &Path) -> Option<u64> {
 }
 
 #[cfg(not(windows))]
-fn free_disk(directory: &Path) -> Option<u64> {
+pub(crate) fn free_disk(directory: &Path) -> Option<u64> {
     // POSIX 'df' requires no Python dependency; safely passes path as an
     // argument (never through a shell). Failure => UNKNOWN, never 0.
     let result = Command::new("df").arg("-Pk").arg(directory).output().ok()?;

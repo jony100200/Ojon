@@ -8,6 +8,8 @@ use ojon_backend::{inspect_gguf, prepare_gguf, quantize_gguf_with_log, inspect_h
 use ojon_backend::{resource_plan, ResourceMode, prepare_bench, run_bench};
 use ojon_backend::{LocalSettings,load_settings,save_settings};
 use ojon_backend::{OptimizeWorkflowRequest, OptimizeGoal, plan_optimize_workflow, run_optimize_workflow};
+use ojon_backend::{compile_activation_recipe, prepare_gguf_abliteration_value,
+    run_gguf_abliteration, prepare_uncensor_from_trace, run_uncensor_from_trace};
 use ojon_backend::{GgufSummary, HfFolderInfo, ModelProbe, HfQuantizeResult, SmokeCapture, Precision, QuantizeResult, FoundBackend, BackendId, discover_backends, open_official_download_page};
 use std::path::{Path, PathBuf};
 use std::collections::VecDeque;
@@ -70,6 +72,46 @@ enum Focus {
     OptBaseline, OptCandidate, OptSuite, OptOutput, OptImatrix, OptSensitivity, OptPpl,
     OptMinSaving, OptMaxLoss, OptMaxPpl, OptRuntimeDevice, OptPrecisions,
     OptBenchPrompt, OptBenchGeneration, OptBenchRepetitions, OptSpeedRatio,
+    UncTrace, UncOutput, UncStrength,
+}
+
+#[derive(Clone,PartialEq)]
+struct UncensorRequest {
+    source:PathBuf,
+    trace:PathBuf,
+    output:PathBuf,
+    strength:f64,
+}
+
+fn plan_uncensor(request:&UncensorRequest)->std::io::Result<serde_json::Value>{
+    if request.source.extension().and_then(|x|x.to_str())==Some("gguf"){
+        let activation=compile_activation_recipe(&request.trace,request.strength,true)?;
+        let plan=prepare_gguf_abliteration_value(&request.source,&activation.recipe,&request.output)?;
+        Ok(serde_json::json!({"model_edit":plan.as_json(),
+            "activation_records":activation.records,"activation_tensors":activation.tensors,
+            "activation_capture":"EXTERNAL_INSTRUMENTED_RUNTIME",
+            "refusal_rate":"NOT_EVALUATED","capability_retention":"NOT_EVALUATED",
+            "status":"PLAN_ONLY"}))
+    }else{
+        Ok(prepare_uncensor_from_trace(&request.source,&request.trace,&request.output,
+            request.strength,true)?.as_json())
+    }
+}
+
+fn execute_uncensor(request:&UncensorRequest,mut log:impl FnMut(&str))->std::io::Result<serde_json::Value>{
+    if request.source.extension().and_then(|x|x.to_str())==Some("gguf"){
+        let activation=compile_activation_recipe(&request.trace,request.strength,true)?;
+        let plan=prepare_gguf_abliteration_value(&request.source,&activation.recipe,&request.output)?;
+        let model=run_gguf_abliteration(&plan,|line|log(line))?;
+        Ok(serde_json::json!({"model":model,"activation_records":activation.records,
+            "activation_tensors":activation.tensors,"activation_capture":"EXTERNAL_INSTRUMENTED_RUNTIME",
+            "refusal_rate":"NOT_EVALUATED","capability_retention":"NOT_EVALUATED",
+            "status":"EDITED_GGUF_NOT_VALIDATED"}))
+    }else{
+        let plan=prepare_uncensor_from_trace(&request.source,&request.trace,&request.output,
+            request.strength,true)?;
+        run_uncensor_from_trace(&plan,|line|log(line))
+    }
 }
 
 enum WorkerEvent {
@@ -79,6 +121,8 @@ enum WorkerEvent {
     Planned(Result<String, String>),
     OptimizerPlan(OptimizeWorkflowRequest, Result<serde_json::Value,String>),
     OptimizerRun(Result<serde_json::Value,String>),
+    UncensorPlan(UncensorRequest,Result<serde_json::Value,String>),
+    UncensorRun(Result<serde_json::Value,String>),
     Quantized(Result<QuantizeResult, String>),
     HfQuantized(Result<HfQuantizeResult, String>),
     Smoke(Result<SmokeCapture, String>),
@@ -126,6 +170,11 @@ struct Workstation {
     opt_speed_ratio:String,
     opt_planned: Option<(OptimizeWorkflowRequest,serde_json::Value)>,
     opt_result: Option<serde_json::Value>,
+    unc_trace:String,
+    unc_output:String,
+    unc_strength:String,
+    unc_planned:Option<(UncensorRequest,serde_json::Value)>,
+    unc_result:Option<serde_json::Value>,
     focus: Option<Focus>,
     model: Option<GgufSummary>,
     hf_folder: Option<HfFolderInfo>,
@@ -247,6 +296,11 @@ impl Workstation {
             opt_speed_ratio:settings.balanced_min_speed_ratio.to_string(),
             opt_planned: None,
             opt_result: None,
+            unc_trace:String::new(),
+            unc_output:String::new(),
+            unc_strength:"0.7".into(),
+            unc_planned:None,
+            unc_result:None,
             focus: None,
             model: None,
             hf_folder: None,
@@ -669,6 +723,63 @@ impl Workstation {
             let _=tx.send(WorkerEvent::OptimizerRun(result));
         });
     }
+    fn uncensor_request(&self)->Result<UncensorRequest,String>{
+        let source=self.source.trim();
+        let trace=self.unc_trace.trim();
+        let output=self.unc_output.trim();
+        if source.is_empty()||trace.is_empty()||output.is_empty(){
+            return Err("Select a source, paired activation trace, and new output path".into());
+        }
+        let strength=self.unc_strength.trim().parse::<f64>()
+            .map_err(|_|"Edit strength must be a number".to_owned())?;
+        if !strength.is_finite()||strength<=0.0||strength>1.0{
+            return Err("Edit strength must be >0 and <=1".into());
+        }
+        Ok(UncensorRequest{source:PathBuf::from(source),trace:PathBuf::from(trace),
+            output:PathBuf::from(output),strength})
+    }
+    fn start_uncensor_plan(&mut self){
+        if self.busy{return;}
+        if self.inspected_source.as_deref()!=Some(self.source.as_str()){
+            self.status="Inspect the currently selected source before planning an edit.".into();
+            self.needs_redraw=true;return;
+        }
+        let request=match self.uncensor_request(){
+            Ok(r)=>r,Err(e)=>{self.status=e;self.needs_redraw=true;return;}
+        };
+        let tx=self.tx.clone();
+        self.unc_planned=None;self.unc_result=None;
+        self.busy=true;self.started_at=Some(Instant::now());
+        self.status="Checking trace and model tensors without changing the source".into();
+        self.needs_redraw=true;
+        std::thread::spawn(move||{
+            let result=plan_uncensor(&request).map_err(|e|e.to_string());
+            let _=tx.send(WorkerEvent::UncensorPlan(request,result));
+        });
+    }
+    fn start_uncensor_run(&mut self){
+        if self.busy{return;}
+        let request=match self.uncensor_request(){
+            Ok(r)=>r,Err(e)=>{self.status=e;self.needs_redraw=true;return;}
+        };
+        let approved=matches!(self.unc_planned.as_ref(),Some((planned,_)) if *planned==request);
+        if !approved{
+            self.status="Edit settings changed. Review a fresh plan before running.".into();
+            self.unc_planned=None;self.needs_redraw=true;return;
+        }
+        let tx=self.tx.clone();
+        self.unc_planned=None;self.unc_result=None;self.log_tail.clear();
+        self.busy=true;self.started_at=Some(Instant::now());
+        self.status="Writing a new edited checkpoint; original source remains untouched".into();
+        self.needs_redraw=true;
+        std::thread::spawn(move||{
+            let logger=tx.clone();
+            let result=execute_uncensor(&request,|line|{
+                let _=logger.send(WorkerEvent::Log(line.to_owned()));
+            }).map_err(|e|e.to_string());
+            let _=tx.send(WorkerEvent::UncensorRun(result));
+        });
+    }
     fn ready_to_convert(&self) -> bool {
         self.format_tab == 0
             && self.inspected_source.as_deref() == Some(self.source.as_str())
@@ -874,6 +985,21 @@ impl Workstation {
                 WorkerEvent::OptimizerRun(Err(e))=>{
                     self.status=format!("Optimization failed: {e}");
                 }
+                WorkerEvent::UncensorPlan(request,Ok(value))=>{
+                    self.status="Edit plan ready. Review the target and run; refusal/capability tests are still required.".into();
+                    self.unc_planned=Some((request,value));
+                }
+                WorkerEvent::UncensorPlan(_,Err(e))=>{
+                    self.unc_planned=None;
+                    self.status=format!("Uncensor edit plan blocked: {e}");
+                }
+                WorkerEvent::UncensorRun(Ok(value))=>{
+                    self.status="Edited checkpoint written. Runtime load and refusal/capability evaluation remain to be done.".into();
+                    self.unc_result=Some(value);
+                }
+                WorkerEvent::UncensorRun(Err(e))=>{
+                    self.status=format!("Uncensor edit failed: {e}");
+                }
                 WorkerEvent::Planned(Ok(text)) => self.status = text,
                 WorkerEvent::Planned(Err(e)) => self.status = format!("Preflight failed: {e}"),
                 WorkerEvent::Quantized(Ok(done)) => {
@@ -942,6 +1068,9 @@ impl Workstation {
             Focus::OptBenchGeneration => &mut self.opt_bench_generation,
             Focus::OptBenchRepetitions => &mut self.opt_bench_repetitions,
             Focus::OptSpeedRatio => &mut self.opt_speed_ratio,
+            Focus::UncTrace => &mut self.unc_trace,
+            Focus::UncOutput => &mut self.unc_output,
+            Focus::UncStrength => &mut self.unc_strength,
         };
         if self.control_held {
             if let Key::Character(ref key) = event.logical_key {
@@ -1023,6 +1152,11 @@ impl Workstation {
         let opt_speed_ratio=&mut self.opt_speed_ratio;
         let opt_planned=self.opt_planned.as_ref();
         let opt_result=self.opt_result.as_ref();
+        let unc_trace=&mut self.unc_trace;
+        let unc_output=&mut self.unc_output;
+        let unc_strength=&mut self.unc_strength;
+        let unc_planned=self.unc_planned.as_ref();
+        let unc_result=self.unc_result.as_ref();
         let model = if source_is_current { self.model.as_ref() } else { None };
         let hf_folder = if source_is_current { self.hf_folder.as_ref() } else { None };
         let model_probe = if source_is_current { self.probe.as_ref() } else { None };
@@ -1040,16 +1174,19 @@ impl Workstation {
         let mut save_local_settings = false;
         let mut download: Option<BackendId> = None;
         let mut new_focus = self.focus;
-        let (mut inspect, mut plan, mut advise, mut opt_run, mut convert, mut smoke, mut bench) =
-            (false, false, false, false, false, false, false);
+        let (mut inspect, mut plan, mut advise, mut opt_run, mut convert, mut smoke, mut bench,
+            mut unc_plan,mut unc_run) =
+            (false, false, false, false, false, false, false,false,false);
         {
             // New Kathamo navigation; each destination is an existing working view.
             let rail = NavigationRail::new()
-                .with_selected(if *workspace_tab == 1 { "manual" }
+                .with_selected(if *workspace_tab == 2 { "uncensor" }
+                    else if *workspace_tab == 1 { "manual" }
                     else if *optimize_review_tab == 1 { "results" }
                     else if *optimize_settings_tab == 2 { "hardware" }
                     else { "optimize" })
                 .add_main(NavigationRailItem::new("optimize", StudioIcon::Sparkles, "Optimize"))
+                .add_main(NavigationRailItem::new("uncensor", StudioIcon::Sparkles, "Uncensor"))
                 .add_main(NavigationRailItem::new("hardware", StudioIcon::Cpu, "Hardware"))
                 .add_main(NavigationRailItem::new("results", StudioIcon::Check, "Results"))
                 .add_main(NavigationRailItem::new("manual", StudioIcon::Settings, "Manual Tools"));
@@ -1061,6 +1198,7 @@ impl Workstation {
                     "hardware" => { *workspace_tab=0; *optimize_settings_tab=2; *optimize_review_tab=0; }
                     "results" => { *workspace_tab=0; *optimize_review_tab=1; }
                     "manual" => { *workspace_tab=1; }
+                    "uncensor" => { *workspace_tab=2; }
                     _ => {}
                 }
             }
@@ -1222,7 +1360,7 @@ impl Workstation {
                         });
                     } else {
                         col.card(54.0, |bar|{
-                            bar.tabs(&["Automatic Optimize","Manual Tools"], workspace_tab);
+                            bar.tabs(&["Optimize Model","Manual Tools","Uncensor Model"], workspace_tab);
                         });
                         if *workspace_tab==0 {
                             col.glass_card(398.0, |card|{
@@ -1230,8 +1368,8 @@ impl Workstation {
                                 card.label("Smallest runnable GGUF that passes your quality checks.");
                                 card.tabs(&["Model & Tasks","Quality Controls","Hardware","Search & Bench"], optimize_settings_tab);
                                 if *optimize_settings_tab==0 {
-                                    card.label("Current Q4 reference GGUF (leave blank if selected model is Q4)");
-                                    if card.text_input(opt_baseline,"Q4 baseline GGUF path...").clicked(){
+                                    card.label("Quality reference (optional: original F16/BF16 is used when blank)");
+                                    if card.text_input(opt_baseline,"Optional existing Q4 reference GGUF path...").clicked(){
                                         new_focus=Some(Focus::OptBaseline);
                                     }
                                     card.label("Held-out coding, reasoning and tool-use suite (required)");
@@ -1297,8 +1435,8 @@ impl Workstation {
                                     if card.text_input(eval_server,"llama-server executable path...").clicked(){
                                         new_focus=Some(Focus::EvalServer);
                                     }
-                                    card.label("Q4-parity candidate formats (blank = conservative defaults)");
-                                    if card.text_input(opt_precisions,"IQ4_XS,Q3_K_M,...").clicked(){
+                                    card.label("Candidate formats (blank = source-aware defaults)");
+                                    if card.text_input(opt_precisions,"Q4_K_M,Q5_K_M,IQ4_XS,...").clicked(){
                                         new_focus=Some(Focus::OptPrecisions);
                                     }
                                     card.label("Benchmark prefill tokens");
@@ -1407,7 +1545,7 @@ impl Workstation {
                                     }
                                 }
                             });
-                        }else{
+                        }else if *workspace_tab==1{
                         col.glass_card(320.0, |card| {
                             card.heading("02   CONFIGURE QUANTIZATION");
                             let formats = ["GGUF (llama.cpp)", "FP8 (TensorRT)", "AWQ (AutoAWQ)", "EXL2 (ExLlamaV2)"];
@@ -1507,6 +1645,53 @@ impl Workstation {
                                 card.label(&line.chars().take(88).collect::<String>());
                             }
                         });
+                        }else{
+                            col.glass_card(340.0, |card|{
+                                card.heading("02   UNCENSOR MODEL");
+                                card.label("Edit a new F16/BF16 GGUF or HF checkpoint from paired refusal activations.");
+                                card.label("Paired activation trace JSONL (captured by an instrumented runtime)");
+                                if card.text_input(unc_trace,"Path to good/bad activations.jsonl...").clicked(){
+                                    new_focus=Some(Focus::UncTrace);
+                                }
+                                card.label("New output GGUF or model folder (source stays untouched)");
+                                if card.text_input(unc_output,"New edited output path...").clicked(){
+                                    new_focus=Some(Focus::UncOutput);
+                                }
+                                card.label("Projection strength (0 < value <= 1)");
+                                if card.text_input(unc_strength,"0.7").clicked(){
+                                    new_focus=Some(Focus::UncStrength);
+                                }
+                                card.label("Original row norms are preserved. Advanced editing is available in the CLI.");
+                                if card.button_secondary("Build Read-Only Edit Plan").clicked(){unc_plan=true;}
+                                if let Some((_,plan))=unc_planned{
+                                    let count=plan["activation_tensors"].as_u64().unwrap_or(0);
+                                    card.status_pill("Edit plan ready",true);
+                                    card.label(&format!("{count} targeted matrices; review the new output path above."));
+                                    if !busy && card.button("Write New Edited Checkpoint").clicked(){unc_run=true;}
+                                }else{
+                                    card.status_pill("Trace and source required",false);
+                                }
+                            });
+                            col.card(245.0,|card|{
+                                card.heading("03   RESULT & EVIDENCE");
+                                if let Some(result)=unc_result{
+                                    card.status_pill("Edited checkpoint written",true);
+                                    let output=&result["model"]["output"];
+                                    let location=output.as_str().or_else(||result["model"]["model"]["output"].as_str())
+                                        .unwrap_or("See result receipt");
+                                    card.label(&format!("Output: {}",location.chars().take(90).collect::<String>()));
+                                    card.label("Loader, refusal rate and capability retention need separate tests.");
+                                }else{
+                                    card.label("No edited checkpoint result yet.");
+                                }
+                                card.label(&status.chars().take(110).collect::<String>());
+                                if let Some(elapsed)=job_elapsed{
+                                    card.label(&format!("Elapsed: {:.1}s",elapsed.as_secs_f64()));
+                                }
+                                for line in log_tail.iter().rev().take(2){
+                                    card.label(&line.chars().take(95).collect::<String>());
+                                }
+                            });
                         }
                     }
                 },
@@ -1535,6 +1720,8 @@ impl Workstation {
         else if plan { self.start_plan(); }
         else if advise { self.start_optimizer_advice(); }
         else if opt_run { self.start_optimizer_run(); }
+        else if unc_plan { self.start_uncensor_plan(); }
+        else if unc_run { self.start_uncensor_run(); }
         else if convert { self.start_quantize(); }
         else if smoke { self.start_smoke(); }
         else if bench { self.start_bench(); }
@@ -1748,11 +1935,13 @@ mod tests {
             ws.render(1500.0, 960.0);
         };
         hit(&mut ws, 70.0);
+        assert_eq!(ws.workspace_tab, 2, "Uncensor should open its model edit view");
+        hit(&mut ws, 114.0);
         assert_eq!(ws.workspace_tab, 0);
         assert_eq!(ws.optimize_settings_tab, 2, "Hardware should open actual hardware controls");
-        hit(&mut ws, 114.0);
-        assert_eq!(ws.optimize_review_tab, 1, "Results should open real receipts");
         hit(&mut ws, 158.0);
+        assert_eq!(ws.optimize_review_tab, 1, "Results should open real receipts");
+        hit(&mut ws, 202.0);
         assert_eq!(ws.workspace_tab, 1, "Manual Tools must remain accessible");
         hit(&mut ws, 26.0);
         assert_eq!(ws.workspace_tab, 0);

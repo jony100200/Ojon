@@ -127,6 +127,13 @@ fn shard_tensors(path: &Path) -> io::Result<BTreeSet<String>> {
 /// Create a safe model-folder plan. Index coverage is verified before any edit
 /// is published; the recipe must explicitly identify tensors to change.
 pub fn prepare_model_abliteration(source: &Path, recipe_path: &Path, output: &Path) -> io::Result<ModelAblationPlan> {
+    let recipe=read_json(recipe_path,MAX_JSON_BYTES)?;
+    prepare_model_abliteration_value(source,&recipe,output)
+}
+
+/// Validate an in-memory direction recipe so a trace-driven workflow can
+/// preflight a complete checkpoint without creating a temporary recipe file.
+pub fn prepare_model_abliteration_value(source: &Path, recipe: &Value, output: &Path) -> io::Result<ModelAblationPlan> {
     let source = source.canonicalize()?;
     if !source.is_dir() { return Err(invalid("source must be an existing HF model directory")); }
     if !source.join("config.json").is_file() { return Err(invalid("Hugging Face config.json missing")); }
@@ -143,8 +150,9 @@ pub fn prepare_model_abliteration(source: &Path, recipe_path: &Path, output: &Pa
     let mut files=Vec::new();
     enumerate(&source, &source, 0, &mut files)?;
     let file_names:HashSet<PathBuf>=files.iter().map(|f|f.relative.clone()).collect();
-    if file_names.contains(Path::new("ojon-edit-receipt.json")) {
-        return Err(invalid("source contains reserved ojon-edit-receipt.json; refusing ambiguous copy"));
+    if file_names.contains(Path::new("ojon-edit-receipt.json")) ||
+        file_names.contains(Path::new("ojon-activation-recipe.json")) {
+        return Err(invalid("source contains a reserved Ojon receipt or activation recipe filename"));
     }
     let cfg=read_json(&source.join("config.json"),MAX_JSON_BYTES)?;
     let vision_config_detected=cfg.get("vision_config").is_some() ||
@@ -187,7 +195,6 @@ pub fn prepare_model_abliteration(source: &Path, recipe_path: &Path, output: &Pa
         }
     }
 
-    let recipe=read_json(recipe_path,MAX_JSON_BYTES)?;
     if recipe.get("schema").and_then(Value::as_str)!=Some("ojon.abliteration.v1") {
         return Err(invalid("expected ojon.abliteration.v1 recipe"));
     }
@@ -265,6 +272,16 @@ impl ModelAblationResult {
 /// Copy every regular file and edit the selected weight shards in a staging
 /// directory. Vision/projector weights and processor metadata remain unchanged.
 pub fn run_model_abliteration(plan:&ModelAblationPlan,mut log:impl FnMut(&str))->io::Result<ModelAblationResult> {
+    run_model_abliteration_inner(plan,None,&mut log)
+}
+
+/// Publish the compiled direction recipe in the same staging transaction as
+/// the edited HF checkpoint, preserving the exact edit for later audit.
+pub fn run_model_abliteration_with_recipe(plan:&ModelAblationPlan,recipe:&Value,mut log:impl FnMut(&str))->io::Result<ModelAblationResult> {
+    run_model_abliteration_inner(plan,Some(recipe),&mut log)
+}
+
+fn run_model_abliteration_inner(plan:&ModelAblationPlan,recipe:Option<&Value>,log:&mut impl FnMut(&str))->io::Result<ModelAblationResult> {
     if plan.output.symlink_metadata().is_ok() {
         return Err(io::Error::new(ErrorKind::AlreadyExists,"output model folder already exists"));
     }
@@ -308,13 +325,19 @@ pub fn run_model_abliteration(plan:&ModelAblationPlan,mut log:impl FnMut(&str))-
     file.sync_all()?;
     // Windows cannot rename a directory while its receipt file is still open.
     drop(file);
+    if let Some(recipe)=recipe {
+        let mut artifact=File::create(staging.0.join("ojon-activation-recipe.json"))?;
+        serde_json::to_writer_pretty(&mut artifact,recipe)
+            .map_err(|e|invalid(format!("cannot serialize activation recipe: {e}")))?;
+        artifact.sync_all()?;
+    }
     if plan.output.symlink_metadata().is_ok() {
         return Err(io::Error::new(ErrorKind::AlreadyExists,"output folder appeared while editing"));
     }
     fs::rename(&staging.0,&plan.output)?;
     log(&format!("[ojon] published complete HF folder: {}",plan.output.display()));
     Ok(ModelAblationResult {
-        output:plan.output.clone(),files:plan.files.len()+1,source_bytes:plan.source_bytes,
+        output:plan.output.clone(),files:plan.files.len()+1+usize::from(recipe.is_some()),source_bytes:plan.source_bytes,
         edited_tensors:plan.total_edits,edited_shards:plan.shards.len()
     })
 }
@@ -394,6 +417,26 @@ mod tests {
             else { assert_eq!(values,[3.0,0.0,0.0,0.0]); }
         }
         assert!(run_model_abliteration(&plan,|_|{}).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn trace_workflow_writes_reproducible_recipe_with_edited_teacher(){
+        let root=scratch();let (source,_)=setup(&root);
+        let trace=root.join("paired.jsonl");
+        let mut file=File::create(&trace).unwrap();
+        for tensor in ["model.layers.0.self_attn.o_proj.weight",
+            "model.layers.1.mlp.down_proj.weight"] {
+            for (class,values) in [("good",[0.0,0.0]),("bad",[1.0,0.0])] {
+                writeln!(file,"{}",json!({"tensor":tensor,"class":class,"values":values})).unwrap();
+            }
+        }
+        drop(file);
+        let output=root.join("trace-edited");
+        let plan=crate::uncensor_trace::prepare_uncensor_from_trace(&source,&trace,&output,0.5,false).unwrap();
+        let result=crate::uncensor_trace::run_uncensor_from_trace(&plan,|_|{}).unwrap();
+        assert_eq!(result["status"],"EDITED_TEACHER_NOT_VALIDATED");
+        assert!(output.join("ojon-activation-recipe.json").is_file());
+        assert!(source.join("model-00001-of-00002.safetensors").is_file());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

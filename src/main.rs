@@ -56,15 +56,19 @@ Commands:
   ojon model-build-plan <original-HF-dir> <directions.json> <new-output-folder> --converter <convert_hf_to_gguf.py> [--python python] [--quantizer llama-quantize] [--precision Q4_K_M] [--threads N] [--json]
   ojon model-build-run <original-HF-dir> <directions.json> <new-output-folder> [options] --confirm
   ojon activation-compile <trace.jsonl> <new-directions.json> [--strength 0.7] [--no-preserve] [--json] --confirm
+  ojon uncensor-trace-plan <original-HF-folder-or-F16-GGUF> <paired-activations.jsonl> <new-model-folder-or-GGUF> [--strength 0.7] [--no-preserve] [--json]
+  ojon uncensor-trace-run <original-HF-folder-or-F16-GGUF> <paired-activations.jsonl> <new-model-folder-or-GGUF> [same options] --confirm
+  ojon abliterate-gguf-plan <original-F16-BF16-GGUF> <direction-recipe.json> <new-model.gguf> [--json]
+  ojon abliterate-gguf-run <original-F16-BF16-GGUF> <direction-recipe.json> <new-model.gguf> --confirm [--json]
   ojon abliterate-model-plan <original-HF-folder> <direction-recipe.json> <new-model-folder> [--json]
   ojon abliterate-model-run <original-HF-folder> <direction-recipe.json> <new-model-folder> --confirm [--json]
   ojon abliterate-plan <original-shard.safetensors> <direction-recipe.json> <new-shard.safetensors> [--json]
   ojon abliterate-run <original-shard.safetensors> <direction-recipe.json> <new-shard.safetensors> --confirm [--json]
   ojon sensitivity-extract <original.gguf> <calibration.imatrix> <new-tensor-sensitivity.json> --confirm
-  ojon quant-compare-plan <current-Q4_K_M.gguf> <suite.json> <new-report.json> --candidate name=lower-bit.gguf [--candidate ...] [--vision-suite vision.json --mmproj vision.gguf] [--ppl-corpus heldout.txt] [--json]
-  ojon quant-compare-run  <current-Q4_K_M.gguf> <suite.json> <new-report.json> --candidate name=lower-bit.gguf [--candidate ...] [same options] --confirm
-  ojon quant-parity-plan <original-F16.gguf> <current-Q4_K_M.gguf> <suite.json> <output-dir> [--precisions IQ4_XS,IQ3_M,Q3_K_M] [--imatrix path] [--max-buffer-mib 512] [--gpu-layers 0] [--vision-suite vision.json --mmproj vision.gguf] [--ppl-corpus heldout.txt --max-ppl-regression-pct 0] [--json]
-  ojon quant-parity-run  <original-F16.gguf> <current-Q4_K_M.gguf> <suite.json> <output-dir> [same options] --confirm
+  ojon quant-compare-plan <original-or-Q4-reference.gguf> <suite.json> <new-report.json> --candidate name=lower-bit.gguf [--candidate ...] [--vision-suite vision.json --mmproj vision.gguf] [--ppl-corpus heldout.txt] [--json]
+  ojon quant-compare-run  <original-or-Q4-reference.gguf> <suite.json> <new-report.json> --candidate name=lower-bit.gguf [--candidate ...] [same options] --confirm
+  ojon quant-parity-plan <original-F16.gguf> <original-or-Q4-reference.gguf> <suite.json> <output-dir> [--precisions Q4_K_M,Q5_K_M] [--imatrix path] [--max-buffer-mib 512] [--gpu-layers 0] [--vision-suite vision.json --mmproj vision.gguf] [--ppl-corpus heldout.txt --max-ppl-regression-pct 0] [--json]
+  ojon quant-parity-run  <original-F16.gguf> <original-or-Q4-reference.gguf> <suite.json> <output-dir> [same options] --confirm
   ojon adaptive-plan <original.gguf> <tensor-sensitivity.json> <existing-output-dir> <suite.json> [--targets 3.0,3.5,4.0] [--quantizer llama-quantize] [--eval-tool llama-cli] [--imatrix path] [--device Vulkan2] [--gpu-layers 99] [--max-loss 1.0] [--json]
   ojon adaptive-run <original.gguf> <tensor-sensitivity.json> <existing-output-dir> <suite.json> [options] --confirm
   ojon task-suite-check <suite.json> [--json]   Validate held-out suite structure without loading models or exposing prompts
@@ -527,6 +531,68 @@ fn run() -> io::Result<()> {
                 if json { println!("{}",serde_json::json!({"recipe":path,"records":result.records,"tensors":result.tensors,"status":"RECIPE_WRITTEN"})); }
                 else { println!("recipe_written: {}",path.display()); }
             }
+        }
+        Some("uncensor-trace-plan") | Some("uncensor-trace-run") => {
+            let execute=cmd=="uncensor-trace-run";
+            let source=PathBuf::from(next_argument(&mut args,"original HF folder or float GGUF")?);
+            let trace=PathBuf::from(next_argument(&mut args,"paired activation JSONL")?);
+            let output=PathBuf::from(next_argument(&mut args,"new model output")?);
+            let(mut strength,mut preserve,mut confirmed,mut json)=(0.7f64,true,false,false);
+            while let Some(option)=args.next(){
+                match option.to_str(){
+                    Some("--strength")=>strength=next_argument(&mut args,"strength")?
+                        .to_string_lossy().parse().map_err(|_|invalid("strength must be numeric"))?,
+                    Some("--no-preserve")=>preserve=false,
+                    Some("--confirm")=>confirmed=true,
+                    Some("--json")=>json=true,
+                    _=>return Err(invalid(format!("unknown uncensor-trace option: {}",option.to_string_lossy()))),
+                }
+            }
+            if confirmed&&!execute{return Err(invalid("--confirm only works with uncensor-trace-run"));}
+            if execute&&!confirmed{return Err(invalid("uncensor-trace-run requires --confirm"));}
+            let result=if source.extension().and_then(|x|x.to_str())==Some("gguf"){
+                let activations=ojon_backend::compile_activation_recipe(&trace,strength,preserve)?;
+                let plan=ojon_backend::prepare_gguf_abliteration_value(&source,&activations.recipe,&output)?;
+                if execute{
+                    let edited=ojon_backend::run_gguf_abliteration(&plan,|message|eprintln!("{message}"))?;
+                    serde_json::json!({"schema":"ojon.uncensor_trace_result.v1",
+                        "model":edited,"activation_records":activations.records,
+                        "activation_tensors":activations.tensors,"trace":trace,
+                        "activation_capture":"EXTERNAL_INSTRUMENTED_RUNTIME",
+                        "strength_optimization":"NOT_RUN","refusal_rate":"NOT_EVALUATED",
+                        "capability_retention":"NOT_EVALUATED","status":"EDITED_GGUF_NOT_VALIDATED"})
+                }else{serde_json::json!({"schema":"ojon.uncensor_trace_plan.v1",
+                    "model_edit":plan.as_json(),"activation_records":activations.records,
+                    "activation_tensors":activations.tensors,"trace":trace,
+                    "activation_capture":"EXTERNAL_INSTRUMENTED_RUNTIME",
+                    "strength_optimization":"NOT_RUN","refusal_rate":"NOT_EVALUATED",
+                    "capability_retention":"NOT_EVALUATED","status":"PLAN_ONLY"})}
+            }else{
+                let plan=ojon_backend::prepare_uncensor_from_trace(&source,&trace,&output,strength,preserve)?;
+                if execute {ojon_backend::run_uncensor_from_trace(&plan,|message|eprintln!("{message}"))?}
+                else {plan.as_json()}
+            };
+            if json{println!("{result}");}else{println!("{}",serde_json::to_string_pretty(&result)?);}
+        }
+        Some("abliterate-gguf-plan") | Some("abliterate-gguf-run") => {
+            let execute=cmd=="abliterate-gguf-run";
+            let source=PathBuf::from(next_argument(&mut args,"original float GGUF")?);
+            let recipe=PathBuf::from(next_argument(&mut args,"direction recipe JSON")?);
+            let output=PathBuf::from(next_argument(&mut args,"new edited GGUF")?);
+            let(mut confirmed,mut json)=(false,false);
+            while let Some(option)=args.next(){
+                match option.to_str(){
+                    Some("--confirm")=>confirmed=true,
+                    Some("--json")=>json=true,
+                    _=>return Err(invalid(format!("unknown abliterate-gguf option: {}",option.to_string_lossy()))),
+                }
+            }
+            if confirmed&&!execute{return Err(invalid("--confirm only works with abliterate-gguf-run"));}
+            if execute&&!confirmed{return Err(invalid("abliterate-gguf-run requires --confirm"));}
+            let plan=ojon_backend::prepare_gguf_abliteration(&source,&recipe,&output)?;
+            let result=if execute{ojon_backend::run_gguf_abliteration(&plan,|message|eprintln!("{message}"))?}
+                else{plan.as_json()};
+            if json{println!("{result}");}else{println!("{}",serde_json::to_string_pretty(&result)?);}
         }
         Some("abliterate-model-plan") | Some("abliterate-model-run") => {
             let execute = cmd == "abliterate-model-run";
@@ -1264,7 +1330,7 @@ fn run() -> io::Result<()> {
         Some("quant-parity-plan") | Some("quant-parity-run") => {
             let execute=cmd=="quant-parity-run";
             let source=PathBuf::from(next_argument(&mut args,"original high-precision GGUF")?);
-            let baseline=PathBuf::from(next_argument(&mut args,"current quantized Q4 GGUF reference")?);
+            let baseline=PathBuf::from(next_argument(&mut args,"original teacher or quantized Q4 GGUF reference")?);
             let suite=PathBuf::from(next_argument(&mut args,"held-out coding/reasoning/tool suite JSON")?);
             let output_dir=PathBuf::from(next_argument(&mut args,"existing output directory")?);
             let mut options=ojon_backend::QuantParityOptions::default();
@@ -1751,7 +1817,7 @@ fn run() -> io::Result<()> {
             while let Some(option)=args.next(){
                 match option.to_str(){
                     Some("--baseline")=>input.current_baseline=Some(
-                        PathBuf::from(next_argument(&mut args,"existing quantized quality baseline")?)),
+                        PathBuf::from(next_argument(&mut args,"optional existing GGUF quality reference")?)),
                     Some("--candidate")=>{
                         let arg=next_argument(&mut args,"candidate label=path.gguf")?;
                         let txt=arg.to_str().ok_or_else(||invalid("candidate must be UTF-8"))?;

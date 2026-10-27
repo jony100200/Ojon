@@ -111,10 +111,18 @@ fn next_compare_report(folder:&Path)->io::Result<PathBuf>{
 
 /// Resolve the one candidate list shared by planning, generation and receipts.
 fn precisions_for(input:&OptimizeWorkflowRequest)->Vec<Precision>{
-    input.precision_candidates.clone().unwrap_or_else(||match input.goal{
-        OptimizeGoal::Smallest=>vec![Precision::IQ3M,Precision::Q3KM,Precision::Q3KL,Precision::IQ4XS],
-        OptimizeGoal::Balanced=>vec![Precision::IQ4XS,Precision::Q3KL,Precision::IQ3M,Precision::Q3KM],
-        OptimizeGoal::Fastest=>vec![Precision::Q3KM,Precision::Q3KL,Precision::IQ4XS,Precision::IQ3M],
+    input.precision_candidates.clone().unwrap_or_else(||{
+        if input.current_baseline.is_none(){
+            match input.goal{
+                OptimizeGoal::Smallest=>vec![Precision::IQ3M,Precision::Q3KM,Precision::Q4KM,Precision::Q5KM],
+                OptimizeGoal::Balanced=>vec![Precision::Q4KM,Precision::Q5KM,Precision::IQ4XS,Precision::Q3KL],
+                OptimizeGoal::Fastest=>vec![Precision::Q4KM,Precision::Q5KM,Precision::Q3KM],
+            }
+        }else{match input.goal{
+            OptimizeGoal::Smallest=>vec![Precision::IQ3M,Precision::Q3KM,Precision::Q3KL,Precision::IQ4XS],
+            OptimizeGoal::Balanced=>vec![Precision::IQ4XS,Precision::Q3KL,Precision::IQ3M,Precision::Q3KM],
+            OptimizeGoal::Fastest=>vec![Precision::Q3KM,Precision::Q3KL,Precision::IQ4XS,Precision::IQ3M],
+        }}
     })
 }
 fn precision_csv(input:&OptimizeWorkflowRequest)->String{
@@ -186,9 +194,10 @@ pub fn plan_optimize_workflow(
     }
     let mut unique=HashSet::new();
     for precision in &formats{
-        if !crate::quant_parity::allowed_parity_precision(*precision)
+        if !(if input.current_baseline.is_none(){crate::quant_parity::allowed_teacher_precision(*precision)}
+            else{crate::quant_parity::allowed_parity_precision(*precision)})
             ||!unique.insert(precision.as_str()){
-            return Err(invalid("guided precisions must be distinct smaller-than-Q4 parity formats"));
+            return Err(invalid("guided precisions must be distinct and valid for the selected reference"));
         }
     }
     if !(16..=8192).contains(&input.bench_prompt_tokens)
@@ -215,14 +224,14 @@ pub fn plan_optimize_workflow(
     let compressed_gguf=if probe.format=="gguf"{!original_gguf}else{false};
     let baseline=match &input.current_baseline{
         Some(p)=>Some(p.canonicalize()?),
-        None if compressed_gguf=>Some(source.clone()),
+        None if compressed_gguf||original_gguf=>Some(source.clone()),
         None=>None,
     };
     let baseline=if let Some(p)=baseline{
         let b=inspect_gguf(&p)?;
-        if b.tensor_count==0||b.split_count.unwrap_or(1)>1||
-            b.file_type.is_none()||matches!(b.file_type,Some(0|1|32)){
-            return Err(invalid("current quality baseline must be a compressed single-file GGUF"));
+        if b.tensor_count==0||b.split_count.unwrap_or(1)>1||b.file_type.is_none()
+            ||(matches!(b.file_type,Some(0|1|32))&&p!=source){
+            return Err(invalid("quality reference must be the original teacher or a compressed single-file GGUF"));
         }
         Some(p)
     }else{None};
@@ -363,8 +372,12 @@ pub fn plan_optimize_workflow(
                 Err(e)=>checks.push(format!("Existing candidate comparison cannot run: {e}"))
             }
         }else{
-            checks.push("To compare existing quants, provide current Q4 baseline, held-out suite and output directory.".into());
+            checks.push("To compare existing quants, provide a quality reference, held-out suite and output directory.".into());
         }
+    }else if original_gguf && input.tensor_sensitivity.is_some() && input.current_baseline.is_none(){
+        route="adaptive_reference_required";
+        checks.push("Adaptive search still requires an explicit Q4 reference; it will not silently ignore tensor sensitivity scores.".into());
+        next=Some("Add a matching Q4 reference or remove sensitivity input to use teacher-referenced quantization".into());
     }else if original_gguf && input.tensor_sensitivity.is_some() {
         route="adaptive_quantize_and_compare";
         if let (Some(base),Some(suite),Some(out),Some(scores))=
@@ -434,9 +447,9 @@ pub fn plan_optimize_workflow(
             }
         }else{
             route="build_baseline_first";
-            checks.push("Provide an existing Q4_K_M baseline and a held-out task suite to establish whether smaller results preserve quality.".into());
+            checks.push("Provide a held-out task suite to compare candidates against the original teacher.".into());
             if out.is_none(){checks.push("Select a writable output directory for any future conversion.".into());}
-            next=Some("Select a current Q4 baseline, held-out suite and output folder".into());
+            next=Some("Select a held-out suite and output folder".into());
         }
     }else if compressed_gguf{
         route="download_or_select_candidate";
@@ -606,8 +619,7 @@ pub fn run_optimize_workflow(
             ("adaptive_quant_comparison",run_adaptive(&plan,|line|log(line))?)
         },
         Some("quantize_and_compare")=>{
-            let baseline=request.current_baseline.as_ref()
-                .ok_or_else(||invalid("quantization parity requires an existing Q4 reference"))?;
+            let baseline=request.current_baseline.as_ref().unwrap_or(&request.model);
             let plan=prepare_quant_parity(
                 &request.model,baseline,suite,out,options.clone())?;
             log("[ojon] Generating candidates from original high-precision weights, not from the Q4 reference");
@@ -793,8 +805,10 @@ mod tests{
         assert_eq!(plan["result"],"NOT_TESTED");
         let orig=dir.join("original-f16.gguf");
         tiny_model(&orig,1);
-        let plan=plan_optimize_workflow(&OptimizeWorkflowRequest::new(orig),&[]).unwrap();
+        let plan=plan_optimize_workflow(&OptimizeWorkflowRequest::new(orig.clone()),&[]).unwrap();
         assert_eq!(plan["route"],"build_baseline_first");
+        assert_eq!(plan["current_baseline"],orig.canonicalize().unwrap().to_string_lossy().as_ref());
+        assert_eq!(plan["recommended_precision_order"][0],"Q4_K_M");
         fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
@@ -831,6 +845,16 @@ mod tests{
         assert_eq!(result["recommended_command_argv"][1],"quant-compare-run");
         assert_eq!(result["result"],"NOT_TESTED");
         assert!(!dir.join("ojon-quant-comparison.json").exists());
+        let teacher=dir.join("original-f16.gguf");tiny_model(&teacher,1);
+        let mut from_teacher=req.clone();
+        from_teacher.model=teacher;
+        from_teacher.current_baseline=None;
+        let teacher_plan=plan_optimize_workflow(&from_teacher,&[FoundBackend{
+            spec:cli_spec,executable:Some(PathBuf::from("llama-cli")),
+            found_via:Some("test fixture")
+        }]).unwrap();
+        assert_eq!(teacher_plan["route"],"existing_candidate_comparison");
+        assert_eq!(teacher_plan["ready_for_user_approved_execution"],true);
         fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
@@ -872,6 +896,8 @@ mod tests{
         assert!(OptimizeGoal::parse("magical").is_err());
         let mut request=OptimizeWorkflowRequest::new(PathBuf::new());
         request.goal=OptimizeGoal::Smallest;
+        assert_eq!(precision_csv(&request),"IQ3_M,Q3_K_M,Q4_K_M,Q5_K_M");
+        request.current_baseline=Some(PathBuf::from("q4.gguf"));
         assert_eq!(precision_csv(&request),"IQ3_M,Q3_K_M,Q3_K_L,IQ4_XS");
     }
     #[test]
@@ -892,8 +918,12 @@ mod tests{
     #[test]
     fn rejects_unsupported_guided_precisions_and_benchmark_knobs_before_model_access(){
         let mut request=OptimizeWorkflowRequest::new(PathBuf::from("missing.gguf"));
-        request.precision_candidates=Some(vec![Precision::Q5KM]);
+        request.precision_candidates=Some(vec![Precision::Q6K]);
         assert!(plan_optimize_workflow(&request,&[]).is_err());
+        request.precision_candidates=Some(vec![Precision::Q5KM]);
+        request.current_baseline=Some(PathBuf::from("q4.gguf"));
+        assert!(plan_optimize_workflow(&request,&[]).is_err());
+        request.current_baseline=None;
         request.precision_candidates=Some(vec![Precision::IQ3M,Precision::IQ3M]);
         assert!(plan_optimize_workflow(&request,&[]).is_err());
         request.precision_candidates=Some(vec![Precision::IQ3M]);

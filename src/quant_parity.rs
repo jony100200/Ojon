@@ -1,5 +1,5 @@
-//! Compare smaller GGUF candidates against a *user's existing quantized*
-//! reference model. Never uses lossy Q4 -> Q3 requantization as the source.
+//! Compare GGUF candidates against the original teacher or an existing quant.
+//! Never uses lossy Q4 -> Q3 requantization as the source.
 //!
 //! Quantization uses a separately installed recent llama-quantize with optional
 //! bounded slab buffers. Tasks run only when the user explicitly confirms.
@@ -78,14 +78,13 @@ pub(crate) fn vision_suite(path:&Path)->io::Result<VisionSuite>{
 pub(crate) fn inspect_compatible_models(source:&Path,baseline:&Path)->io::Result<(PathBuf,PathBuf,u64)>{
     let source=source.canonicalize()?;
     let baseline=baseline.canonicalize()?;
-    if source==baseline{return Err(invalid("original and Q4 reference paths must differ"));}
     let s=inspect_gguf(&source)?;
     let b=inspect_gguf(&baseline)?;
     if !matches!(s.file_type,Some(0|1|32)){
         return Err(invalid("original source must be full-precision F32/F16/BF16 GGUF; do NOT requantize existing Q4"));
     }
-    if b.file_type.is_none()||matches!(b.file_type,Some(0|1|32)){
-        return Err(invalid("quality reference must be an already quantized GGUF (such as Q4_K_M)"));
+    if b.file_type.is_none() || (matches!(b.file_type,Some(0|1|32)) && source!=baseline){
+        return Err(invalid("quality reference must be the original teacher or an already quantized GGUF"));
     }
     if s.tensor_count==0||s.split_count.unwrap_or(1)>1||b.split_count.unwrap_or(1)>1{
         return Err(invalid("need single-file GGUF original and baseline with tensors"));
@@ -93,8 +92,7 @@ pub(crate) fn inspect_compatible_models(source:&Path,baseline:&Path)->io::Result
     if s.architecture.is_none()||s.architecture!=b.architecture{
         return Err(invalid("original and baseline GGUF architecture mismatch"));
     }
-    // Reject comparisons between different model checkpoints, even if they
-    // share an architecture: all tensor names and dimensions must match.
+    // Reject comparisons between different model architectures/shapes.
     let original:BTreeMap<_,_>=inspect_gguf_tensors(&source)?.into_iter()
         .map(|t|(t.name,t.shape)).collect();
     let reference:BTreeMap<_,_>=inspect_gguf_tensors(&baseline)?.into_iter()
@@ -163,6 +161,8 @@ impl QuantParityPlan{
             "schema":"ojon.quant_parity_plan.v1",
             "high_precision_source":self.source.to_string_lossy(),
             "current_quantized_baseline":self.baseline.to_string_lossy(),
+            "quality_reference":self.baseline.to_string_lossy(),
+            "quality_reference_kind":if self.source==self.baseline{"original_teacher"}else{"existing_quant"},
             "baseline_bytes":self.baseline_bytes,
             "suite":self.suite.to_string_lossy(),
             "output_directory":self.output_dir.to_string_lossy(),
@@ -195,12 +195,17 @@ pub fn allowed_parity_precision(precision:Precision)->bool{
         Precision::IQ4XS|Precision::IQ3M|Precision::Q3KM|Precision::Q3KL|
         Precision::IQ3S|Precision::IQ3XS)
 }
+pub fn allowed_teacher_precision(precision:Precision)->bool{
+    allowed_parity_precision(precision) || matches!(precision,
+        Precision::Q4KM|Precision::Q4KS|Precision::Q5KM|Precision::Q5KS)
+}
 
 pub fn prepare_quant_parity(
     original:&Path,baseline:&Path,suite:&Path,output_dir:&Path,
     mut options:QuantParityOptions,
 )->io::Result<QuantParityPlan>{
     let(source,baseline,baseline_bytes)=inspect_compatible_models(original,baseline)?;
+    let teacher_reference=source==baseline;
     let suite=suite.canonicalize()?;
     parse_eval_suite(&suite)?;
     let output_dir=output_dir.canonicalize()?;
@@ -212,8 +217,8 @@ pub fn prepare_quant_parity(
     let mut seen=HashSet::new();
     for precision in &options.precisions{
         if !seen.insert(precision.as_str()){return Err(invalid("duplicate candidate quantization")); }
-        if !allowed_parity_precision(*precision) {
-            return Err(invalid("quant-parity only accepts candidate formats normally smaller than Q4_K_M"));
+        if !(if teacher_reference{allowed_teacher_precision(*precision)}else{allowed_parity_precision(*precision)}) {
+            return Err(invalid("candidate precision is incompatible with the selected quality reference"));
         }
     }
     if !options.max_loss_points.is_finite() || !(0.0..=100.0).contains(&options.max_loss_points){
@@ -330,6 +335,11 @@ pub(crate) fn task_parity(report:&Value,max_loss:f64)->(bool,Value){
     }
     (pass,Value::Array(out))
 }
+
+fn task_reference_informative(metrics:&Value)->bool {
+    metrics.as_array().is_some_and(|rows|rows.len()==3 && rows.iter().all(|row|
+        row["reference_pct"].as_f64().is_some_and(|score|score>0.0)))
+}
 pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Result<Value>{
     let timestamp=SystemTime::now().duration_since(UNIX_EPOCH)
         .map_err(|_|invalid("system clock invalid"))?.as_nanos();
@@ -385,6 +395,7 @@ pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Res
         };
         if baseline_tasks.is_none(){baseline_tasks=Some(task_report.clone());}
         let(task_pass,task_metrics)=task_parity(&task_report,plan.options.max_loss_points);
+        let baseline_informative=task_reference_informative(&task_metrics);
         let mut vision_pass=true;
         let mut vision_evidence=Value::Null;
         if task_pass && plan.vision.is_some(){
@@ -450,7 +461,9 @@ pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Res
             best=Some((output.clone(),size));
         }
         rows.push(json!({"type":precision.as_str(),
-            "status":if measured_pass {"NO_DETECTED_TASK_REGRESSION"}else{"CAPABILITY_REGRESSION"},
+            "status":if measured_pass {"NO_DETECTED_TASK_REGRESSION"}
+                else if !baseline_informative {"BASELINE_UNINFORMATIVE"}
+                else {"CAPABILITY_REGRESSION"},
             "output":output.to_string_lossy(),"bytes":size,
             "savings_pct":savings,"reference_bytes":plan.baseline_bytes,
             "text_tasks":task_metrics,"vision":vision_evidence,
@@ -498,6 +511,13 @@ mod tests{
             "candidates":[{"metrics":{"coding_accuracy":89.0,
                 "reasoning_accuracy":85.0,"tool_call_accuracy":80.0}}]});
         assert!(!task_parity(&losing,0.0).0);
+        let uninformative=json!({"baseline":{"metrics":{"coding_accuracy":0.0,
+            "reasoning_accuracy":0.0,"tool_call_accuracy":0.0}},
+            "candidates":[{"metrics":{"coding_accuracy":0.0,
+                "reasoning_accuracy":0.0,"tool_call_accuracy":0.0}}]});
+        let(pass,metrics)=task_parity(&uninformative,0.0);
+        assert!(!pass);
+        assert!(!task_reference_informative(&metrics));
         assert!(task_parity(&losing,1.0).0);
     }
     #[test]

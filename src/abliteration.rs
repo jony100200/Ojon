@@ -139,6 +139,24 @@ fn unit_direction(v: &Value, rows: usize) -> io::Result<Vec<f64>> {
     Ok(direction.iter().map(|x| x / norm).collect())
 }
 
+pub(crate) fn normalized_direction(value:&Value,rows:usize)->io::Result<Vec<f64>> {
+    unit_direction(value,rows)
+}
+
+pub(crate) fn apply_directional_matrix(file:&mut File,offset:u64,rows:usize,cols:usize,
+    dtype:&str,direction:&[f64],strength:f64,preserve_row_norms:bool)->io::Result<()> {
+    if direction.len()!=rows || !strength.is_finite() || !(0.0..=1.0).contains(&strength)
+        || strength==0.0 { return Err(invalid("invalid directional matrix edit")); }
+    let width=weight_width(dtype)?;
+    let row_bytes=cols.checked_mul(width).ok_or_else(||invalid("matrix row overflow"))?;
+    if rows==0 || cols==0 || rows>131072 || row_bytes>MAX_ROW_BYTES {
+        return Err(invalid("directional matrix exceeds supported dimensions"));
+    }
+    let edit=Edit{tensor:String::new(),offset,dtype:dtype.to_owned(),rows,cols,width,
+        direction:direction.to_vec(),strength,lora:None};
+    apply_edit(file,&edit,preserve_row_norms)
+}
+
 /// A = rank x input columns, B = output rows x rank.
 fn parse_lora(value:&Value,rows:usize,cols:usize)->io::Result<LowRank>{
     let a=value.get("a").and_then(Value::as_array)
@@ -433,10 +451,17 @@ pub fn run_abliteration(plan: &AblationPlan, mut log: impl FnMut(&str)) -> io::R
 mod tests {
     use super::*;
     fn scratch() -> PathBuf {
-        let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let path = std::env::temp_dir().join(format!("ojon-ablation-test-{}-{n}", std::process::id()));
-        fs::create_dir(&path).unwrap();
-        path
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        loop {
+            let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("ojon-ablation-test-{}-{n}-{serial}", std::process::id()));
+            match fs::create_dir(&path) {
+                Ok(()) => return path,
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("cannot create ablation test directory: {error}"),
+            }
+        }
     }
     fn fixture(dir: &Path, dtype: &str, matrix: &[f32], other: &[u8]) -> PathBuf {
         let w = weight_width(dtype).unwrap();

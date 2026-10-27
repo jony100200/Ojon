@@ -78,6 +78,8 @@ pub use quant_parity::{prepare_quant_parity, run_quant_parity, QuantParityOption
 pub mod abliteration;
 pub mod model_edit;
 pub mod activation_trace;
+pub mod uncensor_trace;
+pub mod gguf_edit;
 pub mod model_build;
 pub mod compressed_edit;
 pub mod adapter_smoke;
@@ -89,6 +91,8 @@ pub mod method_select;
 pub use method_select::{choose_edit_method,choose_edit_method_file,MethodChoice};
 pub use model_build::{prepare_model_build, run_model_build, ModelBuildPlan, ModelBuildResult};
 pub use activation_trace::{compile_activation_recipe, save_activation_recipe, ActivationRecipe};
+pub use uncensor_trace::{prepare_uncensor_from_trace, run_uncensor_from_trace, UncensorTracePlan};
+pub use gguf_edit::{prepare_gguf_abliteration,prepare_gguf_abliteration_value,run_gguf_abliteration,GgufAblationPlan};
 pub use model_edit::{prepare_model_abliteration, run_model_abliteration, ModelAblationPlan, ModelAblationResult};
 pub use abliteration::{direction_from_activations, prepare_abliteration, run_abliteration, AblationPlan, AblationResult};
 pub use adaptive::{allocate_bits, parse_tensor_sensitivity, extract_sensitivity_from_imatrix, prepare_adaptive, run_adaptive, AdaptivePlan, TensorScore};

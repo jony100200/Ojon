@@ -1,4 +1,4 @@
-//! Benchmark predownloaded lower-bit GGUFs against an existing Q4 reference.
+//! Benchmark predownloaded lower-bit GGUFs against an original or Q4 reference.
 //! Requires NO high-precision source, NO weights loaded during plan, and NO
 //! quantization process. Runtime tests run only with explicit confirmation.
 
@@ -8,7 +8,7 @@ use crate::quant_parity::{task_parity,vision_suite,vision_score,QuantParityOptio
 use crate::ppl::{measure as measure_perplexity,PplSettings};
 use serde_json::{json,Value};
 use std::collections::{BTreeMap,HashSet};
-use std::fs::{self,OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{self,ErrorKind,Write};
 use std::path::{Path,PathBuf};
 
@@ -49,9 +49,8 @@ pub fn prepare_existing_quant_comparison(
 )->io::Result<ExistingQuantPlan>{
     let baseline=baseline.canonicalize()?;
     let b=inspect_gguf(&baseline)?;
-    if b.tensor_count==0||b.split_count.unwrap_or(1)>1||
-        b.file_type.is_none()||matches!(b.file_type,Some(0|1|32)){
-        return Err(invalid("reference must be a quantized single-file GGUF (e.g. current Q4_K_M)"));
+    if b.tensor_count==0||b.split_count.unwrap_or(1)>1||b.file_type.is_none(){
+        return Err(invalid("reference must be a nonempty single-file GGUF"));
     }
     let b_arch=b.architecture.ok_or_else(||invalid("reference architecture missing"))?;
     let b_tensors:BTreeMap<_,_>=inspect_gguf_tensors(&baseline)?.into_iter()
@@ -257,6 +256,7 @@ pub fn run_existing_quant_comparison(
 #[cfg(test)]
 mod tests{
     use super::*;
+    use std::fs;
     fn tiny_gguf(path:&Path,file_type:u32){
         use std::io::{Seek,Write};
         fn val_string(f:&mut fs::File,s:&str){
