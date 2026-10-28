@@ -464,21 +464,24 @@ impl LearnCollector {
         port: u16,
     ) -> io::Result<thread::JoinHandle<()>> {
         let listener = TcpListener::bind(("127.0.0.1", port))?;
+        let _ = listener.set_nonblocking(true);
         collector.is_running.store(true, Ordering::SeqCst);
 
         let is_running_clone = collector.is_running.clone();
         let handle = thread::spawn(move || {
-            // Set 1-second timeout so thread can poll `is_running`
-            let _ = listener.set_nonblocking(false);
-            for stream in listener.incoming() {
-                if !is_running_clone.load(Ordering::SeqCst) {
-                    break;
-                }
-                if let Ok(stream) = stream {
-                    let coll = collector.clone();
-                    thread::spawn(move || {
-                        let _ = handle_http_connection(stream, coll, port);
-                    });
+            while is_running_clone.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        let coll = collector.clone();
+                        thread::spawn(move || {
+                            let _ = handle_http_connection(stream, coll, port);
+                        });
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(_) => break,
                 }
             }
         });
