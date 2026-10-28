@@ -189,8 +189,15 @@ fn binary_at(path: &Path) -> bool {
 /// Collect common executable folders without scanning entire disks.
 /// OJON_BACKENDS_DIR can point to a parent with one directory of packaged tools.
 /// The user can always enter a full executable path when the scan misses a tool.
-fn search_dirs() -> Vec<(PathBuf, &'static str)> {
+fn search_dirs(prefs: Option<&LocalSettings>) -> Vec<(PathBuf, &'static str)> {
     let mut dirs: Vec<(PathBuf, &'static str)> = Vec::new();
+    if let Some(settings) = prefs {
+        for path in settings.backend_paths.values() {
+            if let Some(parent) = Path::new(path).parent() {
+                dirs.push((parent.to_path_buf(), "settings backend folder"));
+            }
+        }
+    }
     if let Some(path) = env::var_os("PATH") {
         dirs.extend(env::split_paths(&path).filter(|p| !p.as_os_str().is_empty())
             .map(|p| (p, "PATH")));
@@ -211,7 +218,9 @@ fn search_dirs() -> Vec<(PathBuf, &'static str)> {
     if let Some(root) = env::var_os("OJON_LLAMA_CPP_DIR") {
         let root = PathBuf::from(root);
         dirs.push((root.clone(), "OJON_LLAMA_CPP_DIR"));
+        dirs.push((root.join("bin"), "OJON_LLAMA_CPP_DIR"));
         dirs.push((root.join("build").join("bin"), "OJON_LLAMA_CPP_DIR"));
+        dirs.push((root.join("build").join("bin").join("Release"), "OJON_LLAMA_CPP_DIR"));
     }
     if let Some(root) = env::var_os("OJON_BACKENDS_DIR") {
         let root = PathBuf::from(root);
@@ -223,6 +232,7 @@ fn search_dirs() -> Vec<(PathBuf, &'static str)> {
                 dirs.push((folder.clone(), "OJON_BACKENDS_DIR"));
                 dirs.push((folder.join("bin"), "OJON_BACKENDS_DIR"));
                 dirs.push((folder.join("build").join("bin"), "OJON_BACKENDS_DIR"));
+                dirs.push((folder.join("build").join("bin").join("Release"), "OJON_BACKENDS_DIR"));
             }
         }
     }
@@ -248,46 +258,12 @@ fn search_dirs() -> Vec<(PathBuf, &'static str)> {
     for root in base_roots {
         for sub in [
             "bin",
-            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/build-vulkan/bin",
-            "KS-RupayanFlow/UpStream/KS_llama.cpp/build-vulkan/bin/Release",
-            "KS-RupayanFlow/UpStream/KS_llama.cpp/build-cuda/bin/Release",
-            "KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl/bin/Release",
-            "KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl",
-            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/build-cpu/bin",
-            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/vulkan",
-            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/cuda",
-            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/sycl",
-            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/cpu",
-            "KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/vulkan",
-            "KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/cuda",
-            "KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/sycl",
-            "KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/cpu",
             "llama.cpp",
             "llama.cpp/bin",
             "llama.cpp/build/bin",
-         ] {
-            dirs.push((root.join(sub), "adjacent workspace folder"));
-        }
-    }
-    if let Ok(root_env) = env::var("KS_WORKSPACE_ROOT") {
-        let root = PathBuf::from(root_env);
-        for sub in [
-            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/build-vulkan/bin",
-            "KS-RupayanFlow/UpStream/KS_llama.cpp/build-vulkan/bin/Release",
-            "KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl/bin/Release",
-            "KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl",
-            "KS-RupayanFlow/UpStream/KS_llama.cpp/build-cuda/bin/Release",
-            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/cpu",
-            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/vulkan",
-            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/cuda",
-            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/sycl",
-            "KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/cpu",
-            "KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/vulkan",
-            "KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/cuda",
-            "KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/sycl",
-            "llama.cpp/bin",
+            "llama.cpp/build/bin/Release",
         ] {
-            dirs.push((root.join(sub), "KS_WORKSPACE_ROOT"));
+            dirs.push((root.join(sub), "adjacent workspace folder"));
         }
     }
     dirs
@@ -334,7 +310,7 @@ fn discover_one(spec: BackendSpec, dirs: &[(PathBuf, &'static str)],prefs:&Local
 /// Discover using an already loaded file, so GUI and CLI share the same
 /// preference source and command-line flags remain independent overrides.
 pub fn discover_backends_with_settings(prefs:&LocalSettings)->Vec<FoundBackend>{
-    let dirs=search_dirs();
+    let dirs=search_dirs(Some(prefs));
     SPECS.iter().copied().map(|s|discover_one(s,&dirs,prefs)).collect()
 }
 pub fn discover_backends() -> Vec<FoundBackend> {

@@ -2577,7 +2577,6 @@ fn run() -> io::Result<()> {
                 println!("  vocab_size: {}", cmp.vocab_size);
                 println!("  top1_token_agreement: {:.2}%", cmp.top1_token_agreement_pct);
                 println!("  top5_overlap: {:.2}%", cmp.top5_overlap_pct);
-                println!("  average_cosine_similarity: {:.6}", cmp.average_cosine_similarity);
                 println!("  mean_kl_divergence: {:.6}", cmp.mean_kl_divergence);
                 println!("  max_kl_divergence: {:.6}", cmp.max_kl_divergence);
             }

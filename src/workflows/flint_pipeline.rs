@@ -425,8 +425,6 @@ pub struct FlintDirectLogitsComparison {
     pub top1_token_agreement_pct: f64,
     /// Mean |top5(ref) ∩ top5(cand)| / 5 over scored positions.
     pub top5_overlap_pct: f64,
-    /// Mean cosine similarity between probability vectors exp(lp_ref) and exp(lp_cand).
-    pub average_cosine_similarity: f64,
     pub mean_kl_divergence: f64,
     pub max_kl_divergence: f64,
 }
@@ -438,7 +436,6 @@ impl FlintDirectLogitsComparison {
             "vocab_size": self.vocab_size,
             "top1_token_agreement_pct": self.top1_token_agreement_pct,
             "top5_overlap_pct": self.top5_overlap_pct,
-            "average_cosine_similarity": self.average_cosine_similarity,
             "mean_kl_divergence": self.mean_kl_divergence,
             "max_kl_divergence": self.max_kl_divergence,
         })
@@ -505,7 +502,7 @@ pub fn compare_flint_logits_files(
     let mut buf_cand = vec![0u8; record_bytes];
     let mut lp_ref = vec![0f64; ref_vocab];
     let mut lp_cand = vec![0f64; ref_vocab];
-    let (mut top1, mut overlap, mut sum_cos, mut sum_kld, mut max_kld) = (0usize, 0usize, 0f64, 0f64, 0f64);
+    let (mut top1, mut overlap, mut sum_kld, mut max_kld) = (0usize, 0usize, 0f64, 0f64);
 
     for _ in 0..ref_scored {
         ref_file.read_exact(&mut buf_ref)?;
@@ -517,23 +514,10 @@ pub fn compare_flint_logits_files(
             top1 += 1;
         }
         overlap += r5.iter().filter(|v| c5.contains(v)).count();
-        let mut kld = 0.0f64;
-        let mut dot = 0.0f64;
-        let mut norm_r = 0.0f64;
-        let mut norm_c = 0.0f64;
-        for (&r, &c) in lp_ref.iter().zip(&lp_cand) {
-            let pr = r.exp();
-            let pc = c.exp();
-            kld += pr * (r - c);
-            dot += pr * pc;
-            norm_r += pr * pr;
-            norm_c += pc * pc;
-        }
-        let kld = kld.max(0.0);
-        let denom = (norm_r * norm_c).sqrt();
-        if denom > 0.0 {
-            sum_cos += (dot / denom).clamp(0.0, 1.0);
-        }
+        let kld: f64 = lp_ref.iter().zip(&lp_cand)
+            .map(|(&r, &c)| r.exp() * (r - c))
+            .sum::<f64>()
+            .max(0.0);
         sum_kld += kld;
         max_kld = max_kld.max(kld);
     }
@@ -544,7 +528,6 @@ pub fn compare_flint_logits_files(
         vocab_size: ref_vocab,
         top1_token_agreement_pct: top1 as f64 / n * 100.0,
         top5_overlap_pct: overlap as f64 / (n * 5.0) * 100.0,
-        average_cosine_similarity: sum_cos / n,
         mean_kl_divergence: sum_kld / n,
         max_kl_divergence: max_kld,
     })
