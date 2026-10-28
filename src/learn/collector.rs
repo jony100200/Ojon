@@ -1564,6 +1564,10 @@ fn parse_jsonl_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpis
         .and_then(|s| s.to_str())
         .unwrap_or("trace");
 
+    let mut pending_agy_user: Option<String> = None;
+    let mut pending_agy_step_idx: usize = 0;
+    let mut last_agy_test_passed: Option<bool> = None;
+
     for (idx, line) in reader.lines().enumerate() {
         let line = line?;
         if line.trim().is_empty() {
@@ -1572,6 +1576,90 @@ fn parse_jsonl_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpis
         let Ok(val) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+
+        // Support AGY transcript.jsonl step streams (USER_INPUT -> PLANNER_RESPONSE / TOOL_RESPONSE)
+        if let Some(step_type) = val["type"].as_str() {
+            match step_type {
+                "USER_INPUT" => {
+                    if let Some(c) = val["content"].as_str() {
+                        if !c.trim().is_empty() {
+                            pending_agy_user = Some(c.to_string());
+                            pending_agy_step_idx = val["step_index"].as_u64().unwrap_or(idx as u64) as usize;
+                        }
+                    }
+                    continue;
+                }
+                "GENERIC" | "TOOL_RESPONSE" | "CORTEX_STEP_TYPE_M14_TOOL_RESPONSE" => {
+                    let s = val["content"].as_str().unwrap_or(line.as_str());
+                    if s.contains("test result: ok")
+                        || s.contains("Command exited with code 0")
+                        || s.contains("OVERALL VERDICT: PASS")
+                        || s.contains("Made 1 replacement in ")
+                    {
+                        last_agy_test_passed = Some(true);
+                    } else if s.contains("test result: FAILED")
+                        || s.contains("Command exited with code 1")
+                    {
+                        last_agy_test_passed = Some(false);
+                    }
+                    continue;
+                }
+                "PLANNER_RESPONSE" => {
+                    let content = val["content"].as_str().unwrap_or("").trim().to_string();
+                    let tool_calls_arr = val["tool_calls"].as_array();
+                    let has_tools = tool_calls_arr.map(|a| !a.is_empty()).unwrap_or(false);
+                    if let Some(ref user_prompt) = pending_agy_user {
+                        if !content.is_empty() || has_tools {
+                            let step_no = val["step_index"].as_u64().unwrap_or(idx as u64);
+                            let ep_id = format!("harvest-agy-{stem}-{pending_agy_step_idx}-{step_no}");
+                            let resp_text = if !content.is_empty() {
+                                content
+                            } else {
+                                format!("Executed {} tool call(s)", tool_calls_arr.map(|a| a.len()).unwrap_or(0))
+                            };
+                            let mut ep = CollectedEpisode::new(
+                                ep_id,
+                                format!("{stem}-task-{pending_agy_step_idx}"),
+                                "agy",
+                                "agy-coding-agent",
+                                user_prompt.clone(),
+                                resp_text,
+                            );
+                            if let Some(tc_list) = tool_calls_arr {
+                                for (t_i, tc) in tc_list.iter().enumerate() {
+                                    let name = tc["name"]
+                                        .as_str()
+                                        .or_else(|| tc["tool_name"].as_str())
+                                        .unwrap_or("tool")
+                                        .to_string();
+                                    let args = if !tc["arguments"].is_null() {
+                                        tc["arguments"].clone()
+                                    } else {
+                                        tc["args"].clone()
+                                    };
+                                    ep.tool_calls.push(ToolCallRecord {
+                                        id: format!("call_{step_no}_{t_i}"),
+                                        name,
+                                        arguments: args,
+                                    });
+                                }
+                            }
+                            ep.unit_tests_passed = last_agy_test_passed;
+                            if last_agy_test_passed == Some(true) {
+                                ep.outcome = EpisodeOutcome::VerifiedSuccess;
+                                ep.scalar_reward = 1.0;
+                            } else if last_agy_test_passed == Some(false) {
+                                ep.outcome = EpisodeOutcome::FailedRetry;
+                                ep.scalar_reward = -1.0;
+                            }
+                            episodes.push(ep);
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
         if let Ok(mut ep) = serde_json::from_value::<CollectedEpisode>(val.clone()) {
             // Enforce deterministic verification gate on harvested episodes
             if ep.outcome == EpisodeOutcome::VerifiedSuccess {

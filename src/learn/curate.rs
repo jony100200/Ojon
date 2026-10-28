@@ -463,26 +463,44 @@ pub fn export_to_llamafactory(
     })
 }
 
-/// Read all collected episodes from a JSONL file.
+/// Read all collected episodes from a JSONL file (or collector directory containing `episodes_*.jsonl`).
 pub fn load_episodes_from_jsonl(path: &Path) -> io::Result<Vec<CollectedEpisode>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
+    let mut files_to_read = Vec::new();
+    if path.is_dir() {
+        let mut entries: Vec<PathBuf> = fs::read_dir(path)?
+            .filter_map(|e| e.ok().map(|de| de.path()))
+            .filter(|p| {
+                p.is_file()
+                    && p.extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| ext.eq_ignore_ascii_case("jsonl"))
+                        .unwrap_or(false)
+            })
+            .collect();
+        entries.sort();
+        files_to_read.extend(entries);
+    } else {
+        files_to_read.push(path.to_path_buf());
+    }
 
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
     let mut out = Vec::new();
-
-    for (line_idx, line_res) in reader.lines().enumerate() {
-        let line = line_res?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<CollectedEpisode>(trimmed) {
-            Ok(ep) => out.push(ep),
-            Err(e) => {
-                eprintln!("[warn] load_episodes_from_jsonl: skipping line {}: {}", line_idx + 1, e);
+    for file_path in files_to_read {
+        let file = File::open(&file_path)?;
+        let reader = BufReader::new(file);
+        for (line_idx, line_res) in reader.lines().enumerate() {
+            let line = line_res?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<CollectedEpisode>(trimmed) {
+                Ok(ep) => out.push(ep),
+                Err(e) => {
+                    eprintln!("[warn] load_episodes_from_jsonl: skipping line {}: {}", line_idx + 1, e);
+                }
             }
         }
     }
