@@ -94,6 +94,59 @@ impl LearnDaemon {
         total
     }
 
+    /// Prune oldest Unverified (and then oldest FailedRetry) episodes from collected_episodes.jsonl
+    /// while preserving VerifiedSuccess and static anchor episodes when storage exceeds budget.
+    pub fn prune_unverified_episodes_to_budget(storage_dir: &Path, max_bytes: u64) -> io::Result<usize> {
+        let episodes_path = storage_dir.join("collected_episodes.jsonl");
+        if !episodes_path.is_file() {
+            return Ok(0);
+        }
+        let mut episodes = crate::learn::curate::load_episodes_from_jsonl(&episodes_path)?;
+        if episodes.is_empty() {
+            return Ok(0);
+        }
+        let initial_len = episodes.len();
+        let mut current_bytes = Self::calculate_disk_usage(storage_dir);
+
+        while current_bytes > max_bytes {
+            // First try to drop the oldest Unverified episode
+            let unverified_idx = episodes.iter().position(|e| {
+                e.outcome == crate::learn::collector::EpisodeOutcome::Unverified
+                    && e.app_id != "anchor"
+                    && e.session_id != "static-anchor-session"
+            });
+            let remove_idx = unverified_idx.or_else(|| {
+                episodes.iter().position(|e| {
+                    e.outcome == crate::learn::collector::EpisodeOutcome::FailedRetry
+                        && e.app_id != "anchor"
+                        && e.session_id != "static-anchor-session"
+                })
+            });
+            let Some(idx) = remove_idx else {
+                break; // Only VerifiedSuccess or anchor episodes remain; never delete verified gold data
+            };
+            let removed = episodes.remove(idx);
+            let approx_line_bytes = serde_json::to_string(&removed).map(|s| s.len() as u64 + 1).unwrap_or(256);
+            current_bytes = current_bytes.saturating_sub(approx_line_bytes);
+        }
+
+        let pruned_count = initial_len.saturating_sub(episodes.len());
+        if pruned_count > 0 {
+            let tmp_path = episodes_path.with_extension("jsonl.prune.tmp");
+            {
+                let mut f = File::create(&tmp_path)?;
+                for ep in &episodes {
+                    if let Ok(line) = serde_json::to_string(ep) {
+                        writeln!(f, "{line}")?;
+                    }
+                }
+                f.flush()?;
+            }
+            fs::rename(&tmp_path, &episodes_path)?;
+        }
+        Ok(pruned_count)
+    }
+
     /// Write heartbeat status file.
     pub fn write_heartbeat(
         status_path: &Path,
@@ -162,10 +215,15 @@ impl LearnDaemon {
                 );
 
                 // Enforce bounded disk storage: if size exceeds limit, purge transient tmp files
+                // and prune oldest Unverified episodes while preserving VerifiedSuccess episodes.
                 if disk_bytes > max_bytes {
                     let tmp_dir = config.storage_dir.join("tmp");
                     if tmp_dir.exists() {
                         let _ = fs::remove_dir_all(&tmp_dir);
+                    }
+                    let after_tmp = Self::calculate_disk_usage(&config.storage_dir);
+                    if after_tmp > max_bytes {
+                        let _ = Self::prune_unverified_episodes_to_budget(&config.storage_dir, max_bytes);
                     }
                 }
 
@@ -190,6 +248,14 @@ impl LearnDaemon {
         self.is_running.store(false, Ordering::SeqCst);
         self.collector.stop();
     }
+}
+
+/// Prune unverified episodes when disk usage exceeds `target_max_bytes`.
+pub fn prune_unverified_episodes_to_budget(
+    storage_dir: &Path,
+    target_max_bytes: u64,
+) -> io::Result<usize> {
+    LearnDaemon::prune_unverified_episodes_to_budget(storage_dir, target_max_bytes)
 }
 
 #[cfg(test)]
@@ -219,6 +285,53 @@ mod tests {
         assert!(status.running);
         assert_eq!(status.port, 8089);
         assert_eq!(status.episodes_recorded, 5);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_prune_unverified_episodes_preserves_verified_anchors() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ojon_daemon_prune_{}",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let coll = LearnCollector::new(temp_dir.clone()).unwrap();
+
+        let mut verified = crate::learn::collector::CollectedEpisode::new(
+            "ep-verified-1",
+            "s-1",
+            "pothik",
+            "qwen3",
+            "Write tests",
+            "assert_eq!(2+2, 4);",
+        );
+        verified.outcome = crate::learn::collector::EpisodeOutcome::VerifiedSuccess;
+        verified.unit_tests_passed = Some(true);
+        coll.record_episode(verified).unwrap();
+
+        for i in 0..5 {
+            let unv = crate::learn::collector::CollectedEpisode::new(
+                format!("ep-unv-{i}"),
+                format!("s-unv-{i}"),
+                "pothik",
+                "qwen3",
+                "Long unverified chat ".repeat(20),
+                "Unverified reply ".repeat(20),
+            );
+            coll.record_episode(unv).unwrap();
+        }
+
+        let before = LearnDaemon::calculate_disk_usage(&temp_dir);
+        // Set target budget to half of current disk usage
+        let pruned = prune_unverified_episodes_to_budget(&temp_dir, before / 2).unwrap();
+        assert!(pruned >= 1);
+
+        let mut coll2 = LearnCollector::new(temp_dir.clone()).unwrap();
+        coll2.refresh_counts_from_disk().unwrap();
+        let st = coll2.get_stats(8089);
+        assert_eq!(st.verified_success_count, 1);
+        assert!(st.unverified_count < 5);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

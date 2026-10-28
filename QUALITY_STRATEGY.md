@@ -44,3 +44,10 @@ Through `uncensor-auto-plan` / `uncensor-auto-run` (and the Kathamo GUI **Uncens
 3. Measures both harmful-probe refusal reduction (`refusal_rate`) and benign-prompt false-refusal rate (`benign_overrefusal_rate`), alongside held-out coding/reasoning/tool-use capability retention.
 4. Exports a detachable `<stem>-control-vector.gguf` alongside the winning edited high-precision checkpoint and reloads the published checkpoint to verify container integrity and real runtime inference.
 5. When post-edit quantisation is enabled (`--quantize Q4_K_M|Q5_K_M|Q6_K`), runs the combined workflow (`Original -> Edited Teacher -> Quantised Candidate`) and verifies the final quantised artifact against **both** the original model (`vs_original`) and the accepted edited teacher (`vs_edited_teacher`).
+
+The automatic selector requires nonzero baseline coding, reasoning and tool
+scores and a measured reduction in harmful refusals or benign over-refusals.
+It publishes no edit when the baseline cannot support those comparisons. A
+quantised file is reported as the final output only when its dual-reference
+gate passes; a rejected file remains available for inspection with a failed
+status in the receipt.

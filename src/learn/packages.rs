@@ -90,13 +90,100 @@ pub struct RollbackReceipt {
     pub restored_at_epoch_s: u64,
 }
 
-/// Calculate a hex hash of file contents.
+/// Calculate a deterministic SHA-256 hex hash of file contents.
 pub fn hash_file_contents(path: &Path) -> io::Result<String> {
     let bytes = fs::read(path)?;
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    let h = hasher.finish();
-    Ok(format!("{:016x}", h))
+    Ok(format!("sha256:{}", crate::learn::knowledge::sha256_hex(&bytes)))
+}
+
+/// Verify package manifest, payload existence, SHA-256 content hash, and optional base-model compatibility.
+pub fn verify_package_integrity(
+    package_dir: &Path,
+    expected_base_model: Option<&str>,
+) -> io::Result<PackageManifest> {
+    let manifest_path = package_dir.join("ojon_package_manifest.json");
+    if !manifest_path.is_file() {
+        return Err(bad_input(format!(
+            "Missing ojon_package_manifest.json in {}",
+            package_dir.display()
+        )));
+    }
+
+    let manifest_text = fs::read_to_string(&manifest_path)?;
+    let manifest: PackageManifest = serde_json::from_str(&manifest_text)
+        .map_err(|e| bad_input(format!("Invalid package manifest: {e}")))?;
+
+    if manifest.schema != "ojon.package_manifest.v1" {
+        return Err(bad_input(format!(
+            "Unsupported package manifest schema '{}'",
+            manifest.schema
+        )));
+    }
+
+    if let (Some(expected), Some(required)) = (
+        expected_base_model.map(str::trim).filter(|s| !s.is_empty()),
+        manifest.base_model_compatibility.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+    ) {
+        let exp_low = expected.to_ascii_lowercase();
+        let req_low = required.to_ascii_lowercase();
+        if req_low != "universal" && exp_low != req_low && !exp_low.contains(&req_low) {
+            return Err(bad_input(format!(
+                "Base model compatibility mismatch: package requires '{}', target is '{}'",
+                required, expected
+            )));
+        }
+    }
+
+    let mut payload_files = Vec::new();
+    for entry_res in fs::read_dir(package_dir)? {
+        let entry = entry_res?;
+        if entry.file_type()?.is_file() && entry.file_name() != "ojon_package_manifest.json" {
+            payload_files.push(entry.path());
+        }
+    }
+
+    if payload_files.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Package directory contains no payload artifact files",
+        ));
+    }
+
+    payload_files.sort();
+    let primary_payload = &payload_files[0];
+    let actual_size = fs::metadata(primary_payload)?.len();
+    if actual_size != manifest.size_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Package size mismatch for '{}': manifest expects {} bytes, found {} bytes",
+                primary_payload.display(),
+                manifest.size_bytes,
+                actual_size
+            ),
+        ));
+    }
+
+    let actual_hash = hash_file_contents(primary_payload)?;
+    let legacy_siphash = {
+        let bytes = fs::read(primary_payload)?;
+        let mut hasher = DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    };
+    if actual_hash != manifest.content_hash && legacy_siphash != manifest.content_hash {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Package integrity check failed for '{}': expected hash '{}', computed '{}'",
+                primary_payload.display(),
+                manifest.content_hash,
+                actual_hash
+            ),
+        ));
+    }
+
+    Ok(manifest)
 }
 
 /// Create a new KnowledgePack containing verified JSONL facts.
@@ -255,23 +342,49 @@ pub fn create_model_release(
 /// Install an update package atomically into the local workstation environment.
 /// Automatically snapshots any previously active package of the same kind for rollback.
 pub fn install_package(package_dir: &Path, base_install_root: &Path) -> io::Result<InstallReceipt> {
-    let manifest_path = package_dir.join("ojon_package_manifest.json");
-    if !manifest_path.is_file() {
-        return Err(bad_input(format!(
-            "Missing ojon_package_manifest.json in {}",
-            package_dir.display()
-        )));
-    }
+    install_package_for_model(package_dir, base_install_root, None)
+}
 
-    let manifest_text = fs::read_to_string(&manifest_path)?;
-    let manifest: PackageManifest = serde_json::from_str(&manifest_text)
-        .map_err(|e| bad_input(format!("Invalid package manifest: {e}")))?;
+/// Install an update package with optional base-model compatibility enforcement and atomic staging.
+pub fn install_package_for_model(
+    package_dir: &Path,
+    base_install_root: &Path,
+    expected_base_model: Option<&str>,
+) -> io::Result<InstallReceipt> {
+    // 0. Strictly verify package manifest, payload size, SHA-256 hash, and base-model compatibility
+    // BEFORE touching active/ or rollback/.
+    let manifest = verify_package_integrity(package_dir, expected_base_model)?;
 
     let kind_str = manifest.kind.as_str();
     let active_dir = base_install_root.join("active").join(kind_str);
     let rollback_dir = base_install_root.join("rollback").join(kind_str);
+    let now_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let staging_dir = base_install_root
+        .join("staging")
+        .join(format!("{}_{}_{}", kind_str, std::process::id(), now_nanos));
 
-    // 1. If an active package exists, archive it into rollback directory
+    if staging_dir.exists() {
+        fs::remove_dir_all(&staging_dir)?;
+    }
+    fs::create_dir_all(&staging_dir)?;
+
+    // 1. Copy into isolated staging directory and verify staged integrity first
+    for entry_res in fs::read_dir(package_dir)? {
+        let entry = entry_res?;
+        let target = staging_dir.join(entry.file_name());
+        if entry.file_type()?.is_file() {
+            fs::copy(entry.path(), &target)?;
+        }
+    }
+    if let Err(e) = verify_package_integrity(&staging_dir, expected_base_model) {
+        let _ = fs::remove_dir_all(&staging_dir);
+        return Err(e);
+    }
+
+    // 2. If an active package exists, archive it into rollback directory
     let had_previous = active_dir.is_dir() && active_dir.join("ojon_package_manifest.json").is_file();
     if had_previous {
         if rollback_dir.exists() {
@@ -280,25 +393,17 @@ pub fn install_package(package_dir: &Path, base_install_root: &Path) -> io::Resu
         if let Some(parent) = rollback_dir.parent() {
             fs::create_dir_all(parent)?;
         }
-        // Rename active to rollback
         fs::rename(&active_dir, &rollback_dir)?;
     }
 
-    // 2. Install new package into active directory
+    // 3. Atomically promote staged directory into active directory
     if active_dir.exists() {
         fs::remove_dir_all(&active_dir)?;
     }
-    fs::create_dir_all(&active_dir)?;
-
-    for entry_res in fs::read_dir(package_dir)? {
-        let entry = entry_res?;
-        let target = active_dir.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            // copy recursive or ignore subdirs
-        } else {
-            fs::copy(entry.path(), &target)?;
-        }
+    if let Some(parent) = active_dir.parent() {
+        fs::create_dir_all(parent)?;
     }
+    fs::rename(&staging_dir, &active_dir)?;
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -322,6 +427,29 @@ pub fn install_package(package_dir: &Path, base_install_root: &Path) -> io::Resu
     serde_json::to_writer_pretty(file, &receipt)?;
 
     Ok(receipt)
+}
+
+/// List all currently installed active packages across all 3 tiers.
+pub fn list_active_packages(base_install_root: &Path) -> io::Result<Vec<PackageManifest>> {
+    let mut out = Vec::new();
+    for kind in [
+        PackageKind::KnowledgePack,
+        PackageKind::SkillPack,
+        PackageKind::ModelRelease,
+    ] {
+        let manifest_path = base_install_root
+            .join("active")
+            .join(kind.as_str())
+            .join("ojon_package_manifest.json");
+        if manifest_path.is_file() {
+            if let Ok(txt) = fs::read_to_string(&manifest_path) {
+                if let Ok(m) = serde_json::from_str::<PackageManifest>(&txt) {
+                    out.push(m);
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Roll back to the previous working package of the specified kind.
@@ -438,6 +566,69 @@ mod tests {
         // Verify active directory was restored back to v1.0.0
         let restored_manifest = fs::read_to_string(install_root.join("active/knowledge_pack/ojon_package_manifest.json")).unwrap();
         assert!(restored_manifest.contains("\"version\": \"1.0.0\""));
+
+        let _ = fs::remove_dir_all(&temp_root);
+    }
+
+    #[test]
+    fn test_corrupted_package_and_incompatible_base_model_rejected_before_touching_active() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "ojon_pkg_tamper_{}",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(&temp_root).unwrap();
+        let install_root = temp_root.join("install");
+        let adapter_file = temp_root.join("adapter.bin");
+        fs::write(&adapter_file, b"valid-lora-weights-v1").unwrap();
+
+        let pkg_v1 = temp_root.join("skill_v1");
+        create_skill_pack(
+            "sp-coder",
+            "Rust Coder Skill",
+            "1.0.0",
+            &adapter_file,
+            "Qwen3-4B",
+            &pkg_v1,
+            HashMap::new(),
+            "Skill v1",
+            "KS",
+            "Apache-2.0",
+            vec!["v1".into()],
+        )
+        .unwrap();
+
+        // Install v1 for Qwen3-4B succeeds
+        install_package_for_model(&pkg_v1, &install_root, Some("Qwen3-4B-Instruct")).unwrap();
+        assert_eq!(list_active_packages(&install_root).unwrap().len(), 1);
+
+        // Incompatible base model is rejected before touching active/
+        let bad_model_res = install_package_for_model(&pkg_v1, &install_root, Some("Llama-3-8B"));
+        assert!(bad_model_res.is_err());
+
+        // Tamper with payload bytes in pkg_v2
+        let pkg_v2 = temp_root.join("skill_v2_tampered");
+        create_skill_pack(
+            "sp-coder",
+            "Rust Coder Skill",
+            "2.0.0",
+            &adapter_file,
+            "Qwen3-4B",
+            &pkg_v2,
+            HashMap::new(),
+            "Skill v2",
+            "KS",
+            "Apache-2.0",
+            vec!["v2".into()],
+        )
+        .unwrap();
+        // Corrupt payload bytes while keeping same length
+        fs::write(pkg_v2.join("adapter.bin"), b"corrupted-weights-v2!").unwrap();
+        let corrupt_res = install_package_for_model(&pkg_v2, &install_root, Some("Qwen3-4B"));
+        assert!(corrupt_res.is_err());
+
+        // Verify v1.0.0 is still intact in active/
+        let active = list_active_packages(&install_root).unwrap();
+        assert_eq!(active[0].version, "1.0.0");
 
         let _ = fs::remove_dir_all(&temp_root);
     }

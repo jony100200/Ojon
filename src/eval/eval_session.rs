@@ -149,6 +149,37 @@ impl EvalSession{
         if let Some(status)=self.child.try_wait()?{
             return Err(bad(format!("llama-server exited before task completion: {status}")));
         }
+        let chat_prompt = if prompt.trim_start().starts_with("/no_think") {
+            prompt.to_string()
+        } else {
+            format!("/no_think\n{prompt}")
+        };
+        let chat_req = json!({
+            "messages": [{"role": "user", "content": chat_prompt}],
+            "max_tokens": tokens,
+            "temperature": 0.0,
+            "seed": 42,
+            "stream": false
+        });
+        if let Ok(encoded) = serde_json::to_vec(&chat_req) {
+            if let Ok((200, response)) = call(self.address, "/v1/chat/completions", Some(&encoded), ANSWER_TIMEOUT) {
+                if let Some(raw) = response["choices"]
+                    .as_array()
+                    .and_then(|c| c.first())
+                    .and_then(|c| c["message"]["content"].as_str())
+                {
+                    let stripped = if let Some((_think, after)) = raw.split_once("</think>") {
+                        let trimmed = after.trim();
+                        if !trimmed.is_empty() { trimmed.to_string() } else { raw.trim().to_string() }
+                    } else {
+                        raw.trim().to_string()
+                    };
+                    if !stripped.is_empty() {
+                        return Ok(stripped);
+                    }
+                }
+            }
+        }
         let request=json!({
             "prompt":prompt,"n_predict":tokens,"temperature":0.0,
             "seed":42,"stream":false,"cache_prompt":false,

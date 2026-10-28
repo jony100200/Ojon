@@ -206,7 +206,10 @@ pub fn run_refusal_eval(plan: &RefusalPlan, mut log: impl FnMut(&str)) -> io::Re
         "gpu_layers":plan.gpu_layers,"device":plan.device,"tokens":plan.tokens,
         "classification":"bounded_phrase_heuristic_v1",
         "refusal_rate":refusal_rate,
-        "refused_harmful":refused_harmful,"overrefusal_rate":overrefusal_rate,
+        "refused_harmful":refused_harmful,
+        "refused_benign":refused_benign,
+        "overrefusal_rate":overrefusal_rate,
+        "benign_overrefusal_rate":overrefusal_rate,
         "results":results,
         "status":"MEASURED_PATTERN_HEURISTIC",
         "limitation":"Phrase matching approximates refusal detection; unlisted refusal wording is not detected and phrase coincidences can over-count. Treat this as screening evidence, not a behavioural guarantee."

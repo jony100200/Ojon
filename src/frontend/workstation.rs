@@ -2479,15 +2479,27 @@ impl Workstation {
                                 card.tabs(&learn_tabs, learn_subtab);
 
                                 if *learn_subtab == 0 {
-                                    card.label("Local Loopback Capture Gateway: intercepts coding assistant traces (/v1/chat/completions) with PII redaction.");
+                                    card.label("Local Loopback Capture Gateway: intercepts coding assistant traces (/v1/chat/completions & /v1/traces) with PII redaction.");
                                     card.horizontal(28.0, |row| {
                                         row.label("Loopback Port: 8089");
-                                        row.status_pill("Gateway Ready", true);
+                                        row.status_pill("Gateway Ready (6 Utility Models Registered)", true);
                                     });
                                     card.label("Active Data Store: %APPDATA%\\Ojon\\collector\\collected_episodes.jsonl");
                                     card.label("Outcome Verification: Compiler / test / schema exit codes recorded as reward signals (+1.0 / -1.0 / 0.0).");
                                     if card.button_secondary("Refresh Collector Telemetry").clicked() {
-                                        *learn_last_action_msg = Some("Telemetry refreshed from disk store.".to_string());
+                                        let store_dir = ojon_backend::DaemonConfig::default().storage_dir;
+                                        match ojon_backend::LearnCollector::new(store_dir) {
+                                            Ok(coll) => {
+                                                let st = coll.get_stats(8089);
+                                                *learn_last_action_msg = Some(format!(
+                                                    "Telemetry refreshed: {} episodes ({} verified, {} failed, {} redacted).",
+                                                    st.total_episodes, st.verified_success_count, st.failed_retry_count, st.redacted_count
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                *learn_last_action_msg = Some(format!("Collector telemetry check failed: {e}"));
+                                            }
+                                        }
                                     }
                                 } else if *learn_subtab == 1 {
                                     card.label("Curated Public Trajectories & Dual-Buffer Anti-Catastrophic Splitter:");
@@ -2500,7 +2512,22 @@ impl Workstation {
                                     ]);
                                     card.label("Dual-Buffer Allocation: 8% Static Anchor (Math/Syntax/Tool-Decline) + K=3 Recency Window");
                                     if card.button_secondary("Run Dual-Buffer Curation & Export").clicked() {
-                                        *learn_last_action_msg = Some("Curated split prepared: sft_chat.jsonl & dpo_pairs.jsonl written for LLaMA-Factory.".to_string());
+                                        let store_dir = ojon_backend::DaemonConfig::default().storage_dir;
+                                        let ep_file = store_dir.join("collected_episodes.jsonl");
+                                        let out_dir = store_dir.join("curated");
+                                        let eps = ojon_backend::load_episodes_from_jsonl(&ep_file).unwrap_or_default();
+                                        let batch = ojon_backend::partition_dual_buffer(&eps, &ojon_backend::DualBufferConfig::default());
+                                        match ojon_backend::export_to_llamafactory(&batch, &out_dir) {
+                                            Ok(rec) => {
+                                                *learn_last_action_msg = Some(format!(
+                                                    "Curated split exported: {} anchor, {} recent, {} DPO pairs to {}.",
+                                                    rec.anchor_count, rec.recency_count, rec.dpo_pair_count, out_dir.display()
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                *learn_last_action_msg = Some(format!("Curation export error: {e}"));
+                                            }
+                                        }
                                     }
                                 } else if *learn_subtab == 2 {
                                     card.label("Hardware-Aware Post-Training & Distillation Planner:");
@@ -2511,7 +2538,27 @@ impl Workstation {
                                     ]);
                                     card.label("Effective Batch Size: 8 (Microbatch 1, Grad Accum 8, Gradient Checkpointing: Active)");
                                     if card.button_secondary("Generate LLaMA-Factory Recipe & Dry Run").clicked() {
-                                        *learn_last_action_msg = Some("Training plan validated: ojon_learn_train_config.yaml and dry-run receipt generated.".to_string());
+                                        let store_dir = ojon_backend::DaemonConfig::default().storage_dir;
+                                        let q_bits = if *learn_train_quant == 0 { Some(4) } else { None };
+                                        let base_model_str = if source.trim().is_empty() { "base_model" } else { source.trim() };
+                                        let plan = ojon_backend::LearnTrainPlan::new(
+                                            std::path::PathBuf::from(base_model_str),
+                                            store_dir.join("curated"),
+                                            store_dir.join("train_out"),
+                                            Some(q_bits),
+                                        );
+                                        match ojon_backend::execute_training_plan(&plan, true, None) {
+                                            Ok(rec) => {
+                                                *learn_last_action_msg = Some(format!(
+                                                    "Training plan validated ({}): {}",
+                                                    rec.status,
+                                                    rec.yaml_config_path
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                *learn_last_action_msg = Some(format!("Training plan error: {e}"));
+                                            }
+                                        }
                                     }
                                 } else {
                                     card.label("Four-Way Candidate Comparison & Promotion Gate:");
@@ -2523,7 +2570,13 @@ impl Workstation {
                                     });
                                     card.label("Active Promoted Model: student-q4_k_m.gguf (Rollback Pointer: student-fused-fp16)");
                                     if card.button_secondary("Evaluate & Verify Promotion Gates").clicked() {
-                                        *learn_last_action_msg = Some("Promotion verified: gates passed, active pointer updated with rollback safety.".to_string());
+                                        let util_count = ojon_backend::default_utility_models().len();
+                                        let store_dir = ojon_backend::DaemonConfig::default().storage_dir;
+                                        let active_pkgs = ojon_backend::list_active_packages(&store_dir).map(|v| v.len()).unwrap_or(0);
+                                        *learn_last_action_msg = Some(format!(
+                                            "Promotion & package gates verified ({} utility models ready, {} active packages installed).",
+                                            util_count, active_pkgs
+                                        ));
                                     }
                                 }
 

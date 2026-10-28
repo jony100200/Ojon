@@ -22,12 +22,13 @@ pub mod temporal;
 pub mod train;
 
 pub use collector::{
-    redact_json_secrets, redact_secrets, CollectedEpisode, CollectorStats, EpisodeOutcome,
-    LearnCollector, ToolCallRecord,
+    default_utility_models, extract_episode_metadata, harvest_agent_sessions, redact_json_secrets,
+    redact_secrets, CollectedEpisode, CollectorStats, EpisodeOutcome, ExtractedEpisodeMetadata,
+    HarvestReceipt, LearnCollector, ToolCallRecord, UtilityModelSpec,
 };
 pub use curate::{
-    export_to_llamafactory, load_episodes_from_jsonl, partition_dual_buffer, CurationReceipt,
-    CuratedBatch, DpoPreferencePair, DualBufferConfig,
+    export_to_llamafactory, has_deterministic_verification, load_episodes_from_jsonl,
+    partition_dual_buffer, CuratedBatch, CurationReceipt, DpoPreferencePair, DualBufferConfig,
 };
 pub use daemon::{DaemonConfig, DaemonStatus, LearnDaemon};
 pub use eval::{
@@ -36,12 +37,13 @@ pub use eval::{
 };
 pub use knowledge::{
     apply_supersession, compute_content_hash, create_knowledge_item, extract_clean_text,
-    load_knowledge_store, save_knowledge_store, KnowledgeItem, KnowledgeSourceKind,
+    fetch_online_knowledge_url, load_knowledge_store, sanitize_untrusted_knowledge,
+    save_knowledge_store, sha256_bytes, sha256_hex, KnowledgeItem, KnowledgeSourceKind,
 };
 pub use packages::{
     create_knowledge_pack, create_model_release, create_skill_pack, hash_file_contents,
-    install_package, rollback_package, InstallReceipt, PackageKind, PackageManifest,
-    RollbackReceipt,
+    install_package, install_package_for_model, list_active_packages, rollback_package,
+    verify_package_integrity, InstallReceipt, PackageKind, PackageManifest, RollbackReceipt,
 };
 pub use registry::{
     get_dataset_by_id, import_and_sanitize_jsonl, list_curated_datasets, DatasetCatalogEntry,

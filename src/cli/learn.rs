@@ -43,6 +43,8 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let mut data_dir = PathBuf::from("collector");
             let mut port = 8089u16;
             let mut non_blocking = false;
+            let mut upstream: Option<String> = None;
+            let mut auth_token: Option<String> = None;
             while let Some(opt) = args.next() {
                 match opt.to_str() {
                     Some("--data-dir") => {
@@ -51,16 +53,83 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     Some("--port") => {
                         port = next_argument(&mut args, "collector listen port")?.to_string_lossy().parse().unwrap_or(8089);
                     }
+                    Some("--upstream") => {
+                        upstream = Some(next_argument(&mut args, "upstream OpenAI endpoint URL")?.to_string_lossy().to_string());
+                    }
+                    Some("--auth-token") => {
+                        auth_token = Some(next_argument(&mut args, "collector management auth token")?.to_string_lossy().to_string());
+                    }
                     Some("--non-blocking") => non_blocking = true,
                     _ => return Err(invalid(format!("unknown option: {}", opt.to_string_lossy()))),
                 }
             }
-            let collector = std::sync::Arc::new(ojon_backend::LearnCollector::new(data_dir.clone())?);
+            let collector = ojon_backend::LearnCollector::new(data_dir.clone())?;
+            if let Some(up) = upstream {
+                collector.set_upstream_endpoint(Some(up));
+            }
+            if let Some(tok) = auth_token {
+                collector.set_auth_token(Some(tok));
+            }
+            let collector = std::sync::Arc::new(collector);
             let handle = ojon_backend::LearnCollector::start_server(collector, port)?;
             println!("Ojon Learn Collector running on http://127.0.0.1:{}", port);
             println!("  Recording episodes to {}", data_dir.display());
             if !non_blocking {
                 let _ = handle.join();
+            }
+            Ok(true)
+        }
+        "learn-harvest" => {
+            let source_dir = PathBuf::from(next_argument(&mut args, "source directory containing agent runs")?);
+            let mut data_dir = PathBuf::from("collector");
+            let mut json = false;
+            while let Some(opt) = args.next() {
+                match opt.to_str() {
+                    Some("--data-dir") => {
+                        data_dir = PathBuf::from(next_argument(&mut args, "collector data directory")?);
+                    }
+                    Some("--json") => json = true,
+                    _ => return Err(invalid(format!("unknown option: {}", opt.to_string_lossy()))),
+                }
+            }
+            let collector = ojon_backend::LearnCollector::new(data_dir)?;
+            let receipt = ojon_backend::harvest_agent_sessions(&source_dir, &collector)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&receipt).unwrap());
+            } else {
+                println!("Ojon Learn Agent Session Harvest Complete:");
+                println!("  Source: {}", receipt.source_dir);
+                println!("  Files Scanned: {}", receipt.files_scanned);
+                println!("  Episodes Harvested: {}", receipt.episodes_harvested);
+                println!("  Verified Successes: {}", receipt.verified_success_count);
+                println!("  Failed Retries: {}", receipt.failed_retry_count);
+                println!("  Unverified: {}", receipt.unverified_count);
+                println!("  Duplicates Skipped: {}", receipt.duplicates_skipped);
+                println!("  Secrets Redacted: {}", receipt.redacted_count);
+            }
+            Ok(true)
+        }
+        "learn-utility-models" => {
+            let mut json = false;
+            while let Some(opt) = args.next() {
+                match opt.to_str() {
+                    Some("--json") => json = true,
+                    _ => return Err(invalid(format!("unknown option: {}", opt.to_string_lossy()))),
+                }
+            }
+            let models = ojon_backend::default_utility_models();
+            if json {
+                println!("{}", serde_json::to_string_pretty(&models).unwrap());
+            } else {
+                println!("Ojon Learn Utility Model Registry ({} models):", models.len());
+                for m in models {
+                    println!(
+                        "\n[{}] {} ({}) - {}",
+                        m.id, m.name, m.parameter_scale, m.repo_or_engine
+                    );
+                    println!("    Job: {}", m.role);
+                    println!("    Recommendation: {} (CPU-friendly: {})", m.recommendation, m.cpu_friendly);
+                }
             }
             Ok(true)
         }
@@ -251,7 +320,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let source_url = next_argument(&mut args, "source URL")?.to_string_lossy().to_string();
             let title = next_argument(&mut args, "document title")?.to_string_lossy().to_string();
             let domain = next_argument(&mut args, "knowledge domain")?.to_string_lossy().to_string();
-            let content_arg = next_argument(&mut args, "content file path or raw text")?.to_string_lossy().to_string();
+            let content_arg = next_argument(&mut args, "content file path, raw text, or --fetch")?.to_string_lossy().to_string();
 
             let mut kind = ojon_backend::KnowledgeSourceKind::SoftwareDocumentation;
             let mut version: Option<String> = None;
@@ -261,6 +330,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 .as_secs();
             let mut tier = "Authoritative".to_string();
             let mut license = "Public Reference".to_string();
+            let mut fetch_online = content_arg == "--fetch";
             let mut json = false;
 
             while let Some(opt) = args.next() {
@@ -289,12 +359,15 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     Some("--license") => {
                         license = next_argument(&mut args, "license")?.to_string_lossy().to_string();
                     }
+                    Some("--fetch") => fetch_online = true,
                     Some("--json") => json = true,
                     _ => return Err(invalid(format!("unknown option: {}", opt.to_string_lossy()))),
                 }
             }
 
-            let content = if Path::new(&content_arg).is_file() {
+            let content = if fetch_online {
+                ojon_backend::fetch_online_knowledge_url(&source_url, 15, 2 * 1024 * 1024)?
+            } else if Path::new(&content_arg).is_file() {
                 std::fs::read_to_string(&content_arg)?
             } else {
                 content_arg
@@ -501,14 +574,18 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
         "learn-package-install" => {
             let pkg_dir = PathBuf::from(next_argument(&mut args, "package directory")?);
             let install_root = PathBuf::from(next_argument(&mut args, "installation root directory")?);
+            let mut base_model: Option<String> = None;
             let mut json = false;
             while let Some(opt) = args.next() {
                 match opt.to_str() {
+                    Some("--base-model") => {
+                        base_model = Some(next_argument(&mut args, "expected base model")?.to_string_lossy().to_string());
+                    }
                     Some("--json") => json = true,
                     _ => return Err(invalid(format!("unknown option: {}", opt.to_string_lossy()))),
                 }
             }
-            let receipt = ojon_backend::install_package(&pkg_dir, &install_root)?;
+            let receipt = ojon_backend::install_package_for_model(&pkg_dir, &install_root, base_model.as_deref())?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&receipt).unwrap());
             } else {
@@ -518,6 +595,26 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 println!("  Active Path: {}", receipt.active_path.display());
                 if receipt.rollback_available {
                     println!("  Rollback snapshot saved to: {:?}", receipt.rollback_path);
+                }
+            }
+            Ok(true)
+        }
+        "learn-package-list" => {
+            let install_root = PathBuf::from(next_argument(&mut args, "installation root directory")?);
+            let mut json = false;
+            while let Some(opt) = args.next() {
+                match opt.to_str() {
+                    Some("--json") => json = true,
+                    _ => return Err(invalid(format!("unknown option: {}", opt.to_string_lossy()))),
+                }
+            }
+            let manifests = ojon_backend::list_active_packages(&install_root)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&manifests).unwrap());
+            } else {
+                println!("Active Installed Ojon Packages ({}):", manifests.len());
+                for m in manifests {
+                    println!("  [{}] {} v{} ({:?}) - {}", m.package_id, m.name, m.version, m.kind, m.content_hash);
                 }
             }
             Ok(true)

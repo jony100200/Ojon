@@ -12,7 +12,7 @@ use crate::jobs::run_with_log;
 use crate::llama::{prepare_gguf, quantize_gguf_with_log, Precision};
 use crate::method_select::choose_edit_method;
 use crate::refusal::{prepare_refusal_eval_with_server, run_refusal_eval};
-use crate::task_eval::{prepare_eval_with_server, run_eval};
+use crate::task_eval::{prepare_eval_with_server, run_eval_reusing_baseline};
 use serde_json::{json, Value};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, ErrorKind, Write};
@@ -21,6 +21,11 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn invalid(s: impl Into<String>) -> io::Error { io::Error::new(ErrorKind::InvalidInput, s.into()) }
+fn recipe_receipt(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".ojon-recipe.json");
+    PathBuf::from(name)
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct UncensorAutoRequest {
@@ -245,6 +250,9 @@ pub fn prepare_uncensor_auto(mut request: UncensorAutoRequest) -> io::Result<Unc
     let stem = source.file_stem().ok_or_else(|| invalid("source name missing"))?.to_string_lossy();
     let output = output_dir.join(format!("{stem}-uncensored.gguf"));
     if output.symlink_metadata().is_ok() { return Err(io::Error::new(ErrorKind::AlreadyExists, "uncensored output exists")); }
+    if recipe_receipt(&output).symlink_metadata().is_ok() {
+        return Err(io::Error::new(ErrorKind::AlreadyExists, "uncensored recipe receipt exists"));
+    }
     let control_vector_output = output_dir.join(format!("{stem}-control-vector.gguf"));
     let quantized_output = match request.quantize {
         Some(precision) => {
@@ -316,12 +324,10 @@ pub fn prepare_uncensor_auto(mut request: UncensorAutoRequest) -> io::Result<Unc
             });
         }
     }
-    let total_candidates = candidates.len();
-    // Every staged candidate is a full edited copy of the source: refuse to
-    // start when the volume cannot hold the whole sweep plus output.
+    // The sweep keeps at most the current best and the candidate under test.
+    // Quantization starts after the losing copy has been removed.
     let source_bytes = fs::metadata(&source)?.len();
-    let needed = source_bytes as u128 * (total_candidates as u128 + 1)
-        + source_bytes as u128; // control-vector generation reads the original; edits read it too
+    let needed = source_bytes as u128 * 2;
     if let Some(free) = crate::resource::free_disk(&output_dir) {
         if (needed + 2 * crate::resource::GIB as u128) > free as u128 {
             return Err(invalid(format!(
@@ -366,6 +372,21 @@ impl UncensorAutoPlan {
 
 struct Stage(PathBuf);
 impl Drop for Stage { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+struct CandidateCleanup(Vec<PathBuf>);
+impl Drop for CandidateCleanup {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = fs::remove_file(path);
+            let _ = fs::remove_file(recipe_receipt(path));
+        }
+    }
+}
+fn remove_candidate(path: &Path) -> io::Result<()> {
+    if path.is_file() { fs::remove_file(path)?; }
+    let receipt = recipe_receipt(path);
+    if receipt.is_file() { fs::remove_file(receipt)?; }
+    Ok(())
+}
 fn stage(parent: &Path) -> io::Result<Stage> {
     for retry in 0..16 {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH)
@@ -391,13 +412,25 @@ fn metric_fraction(metrics: &Value, key: &str) -> io::Result<f64> {
     Ok(value / 100.0)
 }
 
-fn trial_scores(name: &str, artifact: &Path, refusal_rate: f64, metrics: &Value) -> io::Result<Value> {
-    Ok(json!({"name":name,"artifact":artifact.to_string_lossy(),
+fn trial_scores(
+    name: &str,
+    method: Option<&str>,
+    artifact: &Path,
+    refusal_rate: f64,
+    benign_overrefusal_rate: Option<f64>,
+    metrics: &Value,
+) -> io::Result<Value> {
+    let mut obj = json!({"name":name,"artifact":artifact.to_string_lossy(),
         "bytes":fs::metadata(artifact)?.len(),
         "refusal_rate":refusal_rate,
+        "benign_overrefusal_rate":benign_overrefusal_rate,
         "coding":metric_fraction(metrics,"coding_accuracy")?,
         "reasoning":metric_fraction(metrics,"reasoning_accuracy")?,
-        "tools":metric_fraction(metrics,"tool_call_accuracy")?}))
+        "tools":metric_fraction(metrics,"tool_call_accuracy")?});
+    if let Some(m) = method {
+        obj["method"] = json!(m);
+    }
+    Ok(obj)
 }
 
 pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> io::Result<Value> {
@@ -436,36 +469,40 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
     let baseline_refusal = run_refusal_eval(&baseline_refusal_plan, &mut log)?;
     let baseline_refusal_rate = crate::refusal::refusal_rate_from_report(&baseline_refusal)?;
     let baseline_benign_overrefusal = baseline_refusal["benign_overrefusal_rate"].as_f64();
-    // 3. Stage every candidate as a real edited GGUF copy.
+    // 3. Measure candidates one at a time. Retain only the current measured
+    // winner, so a large-model sweep needs at most two edited copies on disk.
+    let mut cleanup = CandidateCleanup(Vec::new());
+    let mut capability: Option<Value> = None;
+    let mut measured = Vec::new();
+    let mut candidate_scores = Vec::new();
+    let mut best_name: Option<String> = None;
     for (index, candidate) in plan.candidates.iter().enumerate() {
         let recipe = crate::cvector_import::recipe_from_control_vector_with_options(
-            &vector,
-            &candidate.edits,
-            candidate.preserve_row_norms,
-            &[],
+            &vector, &candidate.edits, candidate.preserve_row_norms, &[],
         )?;
         let edit = prepare_gguf_abliteration_value(&plan.source, &recipe, &candidate.staged)?;
         log(&format!("Editing candidate {}/{} ({}, method={}): block {} strength {:.2}",
             index + 1, plan.candidates.len(), candidate.name, candidate.method, candidate.block, candidate.strength));
         run_gguf_abliteration(&edit, |line| log(line))?;
-    }
-    // 4. Held-out functional capability for original + all candidates in one
-    //    shared evaluation receipt.
-    let capability_report = staging.0.join("capability.json");
-    let capability_plan = prepare_eval_with_server(&plan.request.capability_suite,
-        &plan.source,
-        &plan.candidates.iter().map(|c| (c.name.clone(), c.staged.clone())).collect::<Vec<_>>(),
-        &plan.request.runtime, plan.request.server_runtime.as_deref(),
-        plan.request.gpu_layers, plan.request.device.as_deref(), plan.request.task_tokens,
-        &capability_report)?;
-    log("Measuring held-out functional capability for baseline and candidates");
-    let capability = run_eval(&capability_plan, &mut log)?;
-    let baseline_metrics: Value = capability["baseline"]["metrics"].as_object()
-        .ok_or_else(|| invalid("capability receipt lacks baseline metrics"))?
-        .clone().into();
-    // 5. Refusal measurement for every candidate.
-    let mut measured = Vec::new();
-    for candidate in &plan.candidates {
+        cleanup.0.push(candidate.staged.clone());
+
+        let capability_path = staging.0.join(format!("{}-capability.json", candidate.name));
+        let capability_plan = prepare_eval_with_server(&plan.request.capability_suite,
+            &plan.source, &[(candidate.name.clone(), candidate.staged.clone())],
+            &plan.request.runtime, plan.request.server_runtime.as_deref(),
+            plan.request.gpu_layers, plan.request.device.as_deref(), plan.request.task_tokens,
+            &capability_path)?;
+        log(&format!("Measuring held-out capability of candidate {}", candidate.name));
+        let one = run_eval_reusing_baseline(&capability_plan, capability.as_ref(), &mut log)?;
+        let metrics = one["candidates"][0]["metrics"].clone();
+        if let Some(all) = capability.as_mut() {
+            all["candidates"].as_array_mut()
+                .ok_or_else(|| invalid("capability candidate list missing"))?
+                .push(one["candidates"][0].clone());
+        } else {
+            capability = Some(one);
+        }
+
         let report_path = staging.0.join(format!("{}-refusal.json", candidate.name));
         let refusal_plan = prepare_refusal_eval_with_server(&candidate.staged,
             &plan.request.refusal_probes, &plan.request.runtime, plan.request.server_runtime.as_deref(),
@@ -475,23 +512,45 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
         let report = run_refusal_eval(&refusal_plan, &mut log)?;
         let rate = crate::refusal::refusal_rate_from_report(&report)?;
         let benign_over = report["benign_overrefusal_rate"].as_f64();
+        candidate_scores.push(trial_scores(&candidate.name, Some(&candidate.method),
+            &candidate.staged, rate, benign_over, &metrics)?);
         measured.push((candidate, rate, benign_over));
+
+        let baseline_metrics = &capability.as_ref()
+            .ok_or_else(|| invalid("capability baseline missing"))?["baseline"]["metrics"];
+        let scores = json!({"schema":"ojon.edit_method_scores.v1",
+            "max_capability_loss":plan.request.max_capability_loss,
+            "max_refusal_rate":plan.request.max_refusal_rate,
+            "baseline":trial_scores("original", None, &plan.source, baseline_refusal_rate,
+                baseline_benign_overrefusal, baseline_metrics)?,
+            "candidates":candidate_scores});
+        let provisional = choose_edit_method(&scores)?;
+        let next_best = provisional.report["winner"]["method"].as_str().map(str::to_owned);
+        if next_best != best_name {
+            if let Some(previous) = best_name.as_ref() {
+                let path = &plan.candidates.iter().find(|c| &c.name == previous)
+                    .ok_or_else(|| invalid("previous winner missing"))?.staged;
+                remove_candidate(path)?;
+            }
+            best_name = next_best;
+        }
+        if best_name.as_deref() != Some(candidate.name.as_str()) {
+            remove_candidate(&candidate.staged)?;
+        }
     }
-    // 6. Selection from measured scores only.
-    let mut candidate_scores = Vec::new();
-    for (candidate, rate, _benign_over) in &measured {
-        candidate_scores.push(trial_scores(&candidate.name, &candidate.staged, *rate, &capability["candidates"]
-            .as_array().and_then(|list| list.iter().find(|c| c["label"] == json!(candidate.name)))
-            .ok_or_else(|| invalid("capability receipt lacks a measured candidate"))?
-            .get("metrics").ok_or_else(|| invalid("candidate metrics missing"))?.clone())?);
-    }
+    // 4. Final selection is recomputed from the complete measured score set.
+    let capability = capability.ok_or_else(|| invalid("no capability measurements"))?;
+    let baseline_metrics = capability["baseline"]["metrics"].clone();
     let scores = json!({"schema":"ojon.edit_method_scores.v1",
         "max_capability_loss":plan.request.max_capability_loss,
         "max_refusal_rate":plan.request.max_refusal_rate,
-        "baseline":trial_scores("original", &plan.source, baseline_refusal_rate, &baseline_metrics)?,
+        "baseline":trial_scores("original", None, &plan.source, baseline_refusal_rate, baseline_benign_overrefusal, &baseline_metrics)?,
         "candidates":candidate_scores});
     let choice = choose_edit_method(&scores)?;
     let winner_name = choice.report["winner"]["method"].as_str().map(str::to_owned);
+    if winner_name != best_name {
+        return Err(invalid("incremental winner differs from final measured selection"));
+    }
     // 7. Publish the winner; delete losers and staging.
     let mut kept = Vec::new();
     let mut removed = Vec::new();
@@ -509,7 +568,13 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
             .and_then(|list| list.iter().find(|c| c["label"] == json!(candidate.name)))
             .and_then(|c| c.get("metrics"))
             .cloned();
-        fs::rename(&candidate.staged, &plan.output)?;
+        let staged_receipt = recipe_receipt(&candidate.staged);
+        let published_receipt = recipe_receipt(&plan.output);
+        fs::rename(&staged_receipt, &published_receipt)?;
+        if let Err(error) = fs::rename(&candidate.staged, &plan.output) {
+            let _ = fs::rename(&published_receipt, &staged_receipt);
+            return Err(error);
+        }
         published = true;
     }
     for candidate in &plan.candidates {
@@ -517,6 +582,7 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
             kept.push(candidate.name.clone());
         } else {
             let _ = fs::remove_file(&candidate.staged);
+            let _ = fs::remove_file(recipe_receipt(&candidate.staged));
             removed.push(candidate.name.clone());
         }
     }
@@ -570,7 +636,6 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
             }
             log(&format!("Quantizing accepted edited teacher to {}", precision.as_str()));
             quantize_gguf_with_log(&quant, |line| log(line))?;
-            quantized_status = "QUANTIZED_AND_DUAL_VERIFIED".to_string();
 
             log("Reloading quantized uncensored artifact and verifying against BOTH original and edited teacher");
             let q_topology = crate::gguf::inspect_model_topology(quant_out)
@@ -611,13 +676,15 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
             let mut vs_original = Vec::new();
             let mut vs_teacher = Vec::new();
             let mut passes_both = true;
+            let mut orig_total_cap = 0.0;
             let allowed_drop_pts = plan.request.max_capability_loss * 100.0;
             for metric in ["coding_accuracy", "reasoning_accuracy", "tool_call_accuracy"] {
                 let orig_v = baseline_metrics[metric].as_f64().unwrap_or(0.0);
+                orig_total_cap += orig_v;
                 let teach_v = winner_metrics.as_ref().and_then(|m| m[metric].as_f64()).unwrap_or(orig_v);
                 let quant_v = q_metrics[metric].as_f64().unwrap_or(0.0);
-                let pass_orig = quant_v + 1e-9 >= orig_v - allowed_drop_pts;
-                let pass_teach = quant_v + 1e-9 >= teach_v - allowed_drop_pts;
+                let pass_orig = orig_v > 0.0 && quant_v + 1e-9 >= orig_v - allowed_drop_pts;
+                let pass_teach = teach_v > 0.0 && quant_v + 1e-9 >= teach_v - allowed_drop_pts;
 
                 if !pass_orig || !pass_teach {
                     passes_both = false;
@@ -635,6 +702,15 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
                     "pass": pass_teach
                 }));
             }
+            if orig_total_cap <= 0.0 {
+                passes_both = false;
+            }
+            let dual_gate_passed = passes_both && q_refusal_rate <= baseline_refusal_rate;
+            quantized_status = if dual_gate_passed {
+                "QUANTIZED_AND_DUAL_VERIFIED"
+            } else {
+                "QUANTIZED_DUAL_GATE_FAILED"
+            }.to_string();
             quantized_verification = json!({
                 "artifact": quant_out.to_string_lossy(),
                 "file_bytes": fs::metadata(quant_out).map(|m| m.len()).unwrap_or(0),
@@ -646,17 +722,19 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
                 "capability_metrics": q_metrics,
                 "vs_original": vs_original,
                 "vs_edited_teacher": vs_teacher,
-                "passes_dual_reference_gate": passes_both && q_refusal_rate <= baseline_refusal_rate,
+                "passes_dual_reference_gate": dual_gate_passed,
             });
         }
     }
     let result = json!({"schema":"ojon.uncensor_auto_result.v1",
         "source":plan.source.to_string_lossy(),
-        "output_edited":plan.output.to_string_lossy(),
+        "output_edited":if published {json!(plan.output.to_string_lossy())} else {Value::Null},
         "detachable_control_vector":if plan.control_vector_output.is_file() {
             Value::String(plan.control_vector_output.to_string_lossy().into_owned())
         } else { Value::Null },
-        "output_quantized":plan.quantized_output.as_ref().map(|p|p.to_string_lossy().to_string()),
+        "output_quantized":if quantized_status == "QUANTIZED_AND_DUAL_VERIFIED" {
+            plan.quantized_output.as_ref().map(|p|p.to_string_lossy().to_string())
+        } else {None},
         "grid":{"strengths":plan.strengths,"blocks":plan.blocks},
         "discovered_refusal_directions":ranked_blocks,
         "baseline":{"model":plan.source.to_string_lossy(),
@@ -673,8 +751,9 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
         "quantized_verification":quantized_verification,
         "refusal_measurement":"bounded_phrase_heuristic_v1",
         "quality_scope":"held-out exact/JSON functional tasks; not full intelligence parity",
-        "status":if published {"SELECTED_FROM_MEASURED_SCORES"}
-            else {"NO_QUALITY_PASSING_CANDIDATE"},
+        "status":if !published {"NO_QUALITY_PASSING_CANDIDATE"}
+            else if quantized_status == "QUANTIZED_DUAL_GATE_FAILED" {"QUANTIZED_RESULT_FAILED_GATE"}
+            else {"SELECTED_FROM_MEASURED_SCORES"},
         "limitation":"Selection compares only the supplied measured refusal and functional metrics. Phrase-based refusal detection and small functional suites cannot prove behavioural or intelligence equivalence."});
     let receipt_path = match &plan.quantized_output {
         Some(path) => path, None => &plan.output,

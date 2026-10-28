@@ -222,14 +222,15 @@ impl TemporalKnowledgeEngine {
             context_block.push_str(&format!("Evaluation Date: {}\n\n", date_iso));
 
             for (idx, item) in results.iter().enumerate() {
+                let (safe_snippet, _) = crate::learn::knowledge::sanitize_untrusted_knowledge(&item.snippet);
                 context_block.push_str(&format!(
-                    "[{}] \"{}\" (Source: {}, Version: {})\n",
+                    "[{}] \"{}\" (Source: {}, Version: {}) [EXTERNAL_REFERENCE_DATA_ONLY]\n",
                     idx + 1,
                     item.title,
                     item.source_url,
                     item.software_version.as_deref().unwrap_or("N/A")
                 ));
-                context_block.push_str(&format!("Evidence: {}\n", item.snippet));
+                context_block.push_str(&format!("Evidence: {}\n", safe_snippet));
                 if !item.citations.is_empty() {
                     context_block.push_str(&format!("Citations: {}\n", item.citations.join("; ")));
                 }

@@ -143,6 +143,18 @@ pub fn generate_tool_decline_anchors() -> Vec<CollectedEpisode> {
     ]
 }
 
+/// Verify that an episode claiming VerifiedSuccess has deterministic verification evidence
+/// (passing unit tests, non-empty verified git diff, or canonical static anchor).
+pub fn has_deterministic_verification(ep: &CollectedEpisode) -> bool {
+    if ep.unit_tests_passed == Some(false) {
+        return false;
+    }
+    ep.unit_tests_passed == Some(true)
+        || ep.git_diff.as_ref().is_some_and(|d| !d.trim().is_empty())
+        || ep.app_id == "anchor"
+        || ep.session_id == "static-anchor-session"
+}
+
 /// Partition an episode collection using the Dual-Buffer algorithm.
 pub fn partition_dual_buffer(
     episodes: &[CollectedEpisode],
@@ -151,14 +163,24 @@ pub fn partition_dual_buffer(
     let mut verified_episodes: Vec<CollectedEpisode> = Vec::new();
     let mut session_map: HashMap<String, Vec<CollectedEpisode>> = HashMap::new();
 
-    for ep in episodes {
+    for raw_ep in episodes {
+        let mut ep = raw_ep.clone();
+        if ep.outcome == EpisodeOutcome::VerifiedSuccess && !has_deterministic_verification(&ep) {
+            if ep.unit_tests_passed == Some(false) {
+                ep.outcome = EpisodeOutcome::FailedRetry;
+                ep.scalar_reward = -1.0;
+            } else {
+                ep.outcome = EpisodeOutcome::Unverified;
+                ep.scalar_reward = 0.0;
+            }
+        }
         session_map
             .entry(ep.session_id.clone())
             .or_default()
             .push(ep.clone());
 
         if ep.outcome == EpisodeOutcome::VerifiedSuccess && ep.scalar_reward >= config.min_sft_reward {
-            verified_episodes.push(ep.clone());
+            verified_episodes.push(ep);
         }
     }
 
@@ -286,6 +308,18 @@ fn episode_to_messages(ep: &CollectedEpisode) -> Value {
             "content": ep.assistant_response,
             "tool_calls": calls_json
         }));
+        if let Some(results) = &ep.tool_results {
+            for (call, result) in ep.tool_calls.iter().zip(results) {
+                if result.is_null() { continue; }
+                let content = result.as_str().map(str::to_owned)
+                    .unwrap_or_else(|| result.to_string());
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": content
+                }));
+            }
+        }
     } else {
         messages.push(json!({
             "role": "assistant",
@@ -304,20 +338,51 @@ pub fn export_to_llamafactory(
     fs::create_dir_all(output_dir)?;
 
     let sft_path = output_dir.join("sft_chat.jsonl");
+    let sft_train_path = output_dir.join("sft_train.jsonl");
+    let sft_eval_path = output_dir.join("sft_eval.jsonl");
     let dpo_path = output_dir.join("dpo_pairs.jsonl");
     let info_path = output_dir.join("dataset_info.json");
 
-    // 1. Write SFT Dataset
+    // Determine session-disjoint held-out eval session(s) from non-anchor sessions
+    let mut non_anchor_sessions: Vec<String> = batch
+        .recency_episodes
+        .iter()
+        .chain(batch.anchor_episodes.iter())
+        .filter(|ep| ep.app_id != "anchor" && ep.session_id != "static-anchor-session")
+        .map(|ep| ep.session_id.clone())
+        .collect();
+    non_anchor_sessions.sort();
+    non_anchor_sessions.dedup();
+    let eval_session_set: HashSet<String> = if non_anchor_sessions.len() >= 2 {
+        let eval_count = (non_anchor_sessions.len() / 5).max(1);
+        non_anchor_sessions[non_anchor_sessions.len() - eval_count..]
+            .iter()
+            .cloned()
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
+    // 1. Write SFT Dataset + Session-Disjoint Train/Eval Splits
     let mut sft_file = File::create(&sft_path)?;
+    let mut sft_train_file = File::create(&sft_train_path)?;
+    let mut sft_eval_file = File::create(&sft_eval_path)?;
     let mut sft_count = 0;
 
     // Anchor first, then recency
     for ep in batch.anchor_episodes.iter().chain(batch.recency_episodes.iter()) {
         let msg_obj = episode_to_messages(ep);
         writeln!(sft_file, "{}", msg_obj)?;
+        if eval_session_set.contains(&ep.session_id) {
+            writeln!(sft_eval_file, "{}", msg_obj)?;
+        } else {
+            writeln!(sft_train_file, "{}", msg_obj)?;
+        }
         sft_count += 1;
     }
     sft_file.flush()?;
+    sft_train_file.flush()?;
+    sft_eval_file.flush()?;
 
     // 2. Write DPO Dataset
     let mut dpo_file = File::create(&dpo_path)?;
@@ -350,6 +415,20 @@ pub fn export_to_llamafactory(
     let info_manifest = json!({
         "ojon_sft": {
             "file_name": "sft_chat.jsonl",
+            "formatting": "sharegpt",
+            "columns": {
+                "messages": "messages"
+            }
+        },
+        "ojon_sft_train": {
+            "file_name": "sft_train.jsonl",
+            "formatting": "sharegpt",
+            "columns": {
+                "messages": "messages"
+            }
+        },
+        "ojon_sft_eval": {
+            "file_name": "sft_eval.jsonl",
             "formatting": "sharegpt",
             "columns": {
                 "messages": "messages"
