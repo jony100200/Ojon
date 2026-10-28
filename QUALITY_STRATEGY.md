@@ -51,3 +51,7 @@ It publishes no edit when the baseline cannot support those comparisons. A
 quantised file is reported as the final output only when its dual-reference
 gate passes; a rejected file remains available for inspection with a failed
 status in the receipt.
+
+The edit sweep evaluates candidates sequentially and retains at most the
+current best plus the candidate under test. This bounds extra full-size GGUF
+storage to two copies during the sweep.
