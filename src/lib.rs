@@ -7,6 +7,7 @@ pub mod uncensor;
 pub mod models;
 pub mod eval;
 pub mod workflows;
+pub mod learn;
 
 // Root-level module re-exports for transparent backward compatibility
 // Core
@@ -163,4 +164,27 @@ pub use self::workflows::flint_pipeline::{
     FlintDirectLogitsComparison,
     assemble_flint_hybrid_gguf, verify_moe_router_storage,
     compare_flint_logits_files, router_storage_type_match_pct, parity_gate_passes,
+};
+
+// Learn
+pub use self::learn::{
+    collector, curate, daemon, eval as learn_eval, knowledge, packages, registry, temporal, train as learn_train,
+    redact_json_secrets, redact_secrets, CollectedEpisode, CollectorStats, EpisodeOutcome,
+    LearnCollector, ToolCallRecord,
+    DaemonConfig, DaemonStatus, LearnDaemon,
+    export_to_llamafactory, load_episodes_from_jsonl, partition_dual_buffer, CurationReceipt,
+    CuratedBatch, DpoPreferencePair, DualBufferConfig,
+    evaluate_and_promote, CandidateModelEvaluation, CandidateType, GateCheckResult,
+    PromotedModelPointer, PromotionDecision, PromotionPolicy, CANONICAL_TOOL_DECLINE_SUITE,
+    apply_supersession, compute_content_hash, create_knowledge_item, extract_clean_text,
+    load_knowledge_store, save_knowledge_store, KnowledgeItem, KnowledgeSourceKind,
+    create_knowledge_pack, create_model_release, create_skill_pack, hash_file_contents, install_package,
+    rollback_package, InstallReceipt, PackageKind, PackageManifest, RollbackReceipt,
+    get_dataset_by_id, list_curated_datasets,
+    import_and_sanitize_jsonl, DatasetCatalogEntry, DatasetCategory, ImportReceipt,
+    CURATED_DATASETS,
+    format_epoch_iso, parse_iso_date_to_epoch, AugmentedPromptResponse, TemporalKnowledgeEngine, TemporalRetrievalQuery,
+    TemporalSearchResult,
+    execute_training_plan, probe_host_hardware, HardwareDiagnosis, HardwareTier, LearnTrainPlan,
+    TrainReceipt,
 };
