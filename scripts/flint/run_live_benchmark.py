@@ -5,6 +5,9 @@ import time
 import re
 import sys
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 records = [f"Record {i:02d}: label=entry_{i:02d}; checksum={i*7919+104729:08x}; state=verified." for i in range(70)]
 records.insert(37, "The release key for record 42 is K7391. This is the authoritative key.")
 

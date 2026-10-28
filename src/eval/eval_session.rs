@@ -161,8 +161,19 @@ impl EvalSession{
         if response["truncated"]==true{
             return Err(bad("llama-server truncated task context; cannot grade this answer"));
         }
-        response["content"].as_str().map(str::to_owned)
-            .ok_or_else(||bad("missing completion text"))
+        let raw = response["content"].as_str().map(str::to_owned)
+            .ok_or_else(||bad("missing completion text"))?;
+        let stripped = if let Some((_think, after)) = raw.split_once("</think>") {
+            let trimmed = after.trim();
+            if !trimmed.is_empty() {
+                trimmed.to_string()
+            } else {
+                raw
+            }
+        } else {
+            raw
+        };
+        Ok(stripped)
     }
 }
 

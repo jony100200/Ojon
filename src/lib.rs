@@ -73,7 +73,7 @@ pub use discovery::{
     probe_backend_capabilities, probe_quantizer_formats, probe_runtime_devices,
     probe_quantizer_capabilities, bundled_data_file, bundled_data_dir,
 };
-pub use gguf::{inspect_gguf, GgufSummary};
+pub use gguf::{inspect_gguf, inspect_gguf_tensors, GgufSummary, GgufTensor};
 pub use hf::{
     inspect_hf_folder, prepare_hf, quantize_hf, quantize_hf_with_log,
     HfFolderInfo, HfQuantizePlan, HfQuantizeResult,
@@ -141,4 +141,6 @@ pub use self::workflows::flint_pipeline::{
     run_flint_functional_suite, generate_flint_roco_recipe,
     plan_flint_uncensor, FlintPipelinePlan, FlintMoETopology,
     FlintHardwareFit, FlintParityReceipt, FlintUncensorPlan,
+    assemble_flint_hybrid_gguf, verify_moe_router_storage,
+    compare_flint_logits_files, measure_moe_routing_agreement,
 };

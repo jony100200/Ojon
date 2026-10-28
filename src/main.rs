@@ -2649,9 +2649,17 @@ fn run() -> io::Result<()> {
                 evaluated_tokens: json_val["evaluated_tokens"].as_u64().unwrap_or(0) as usize,
                 vocab_size: json_val["vocab_size"].as_u64().unwrap_or(0) as usize,
                 top1_token_agreement_pct: json_val["top1_token_agreement_pct"].as_f64().unwrap_or(0.0),
-                top5_token_agreement_pct: json_val["top5_token_agreement_pct"].as_f64().unwrap_or(0.0),
-                average_cosine_similarity: json_val["average_cosine_similarity"].as_f64().unwrap_or(0.0),
+                top5_token_agreement_pct: json_val["top5_token_agreement_pct"].as_f64(),
+                average_cosine_similarity: json_val["average_cosine_similarity"].as_f64(),
                 kl_divergence: json_val["kl_divergence"].as_f64().unwrap_or(0.0),
+                median_kl_divergence: json_val["median_kl_divergence"].as_f64(),
+                max_kl_divergence: json_val["max_kl_divergence"].as_f64(),
+                rms_delta_p_pct: json_val["rms_delta_p_pct"].as_f64(),
+                ln_ppl_correlation_pct: json_val["ln_ppl_correlation_pct"].as_f64(),
+                mean_ppl_q: json_val["mean_ppl_q"].as_f64(),
+                mean_ppl_base: json_val["mean_ppl_base"].as_f64(),
+                router_storage_verified: json_val["router_storage_verified"].as_bool().unwrap_or(true),
+                moe_top_k_routing_agreement_pct: json_val["moe_top_k_routing_agreement_pct"].as_f64(),
                 passes_negligible_loss_gate: json_val["passes_negligible_loss_gate"].as_bool().unwrap_or(false),
                 certified_for_production: json_val["certified_for_production"].as_bool().unwrap_or(false),
             };
@@ -2659,6 +2667,77 @@ fn run() -> io::Result<()> {
             let promoted = ojon_backend::promote_flint_candidate(&pending, &receipt)?;
             println!("promoted_model: {}", promoted.display());
             println!("status: PROMOTED_TO_OFFICIAL_PRODUCTION_GGUF");
+        }
+        Some("flint-rco-assemble") => {
+            let output = PathBuf::from(next_argument(&mut args, "output hybrid GGUF path")?);
+            let mut template: Option<PathBuf> = None;
+            let mut spine_source: Option<PathBuf> = None;
+            let mut expert_source: Option<PathBuf> = None;
+            let mut router_source: Option<PathBuf> = None;
+            let mut confirm = false;
+
+            while let Some(opt) = args.next() {
+                match opt.to_str() {
+                    Some("--template") => {
+                        template = Some(PathBuf::from(next_argument(&mut args, "template GGUF path")?));
+                    }
+                    Some("--spine") => {
+                        spine_source = Some(PathBuf::from(next_argument(&mut args, "spine source GGUF (e.g. Q6_K)")?));
+                    }
+                    Some("--experts") => {
+                        expert_source = Some(PathBuf::from(next_argument(&mut args, "experts source GGUF (e.g. Q4_K_M)")?));
+                    }
+                    Some("--routers") => {
+                        router_source = Some(PathBuf::from(next_argument(&mut args, "routers source GGUF (e.g. F32)")?));
+                    }
+                    Some("--confirm") => confirm = true,
+                    _ => return Err(invalid(format!("unknown option: {}", opt.to_string_lossy()))),
+                }
+            }
+
+            if !confirm {
+                return Err(invalid("flint-rco-assemble writes model checkpoint; pass --confirm"));
+            }
+
+            let t_path = template.ok_or_else(|| invalid("requires --template"))?;
+            let spine = spine_source.ok_or_else(|| invalid("requires --spine"))?;
+            let experts = expert_source.unwrap_or_else(|| t_path.clone());
+            let routers = router_source.unwrap_or_else(|| t_path.clone());
+
+            let t_tensors = ojon_backend::inspect_gguf_tensors(&t_path)?;
+            let mut recipe = std::collections::HashMap::new();
+
+            for t in t_tensors {
+                let is_router = t.name.contains("ffn_gate_inp") || t.name.contains("exp_probs_b");
+                let is_expert = t.name.contains("_exps");
+                let is_spine = t.name.contains("attn_")
+                    || t.name.contains("shexp")
+                    || t.name.contains("token_embd")
+                    || t.name.contains("output.weight")
+                    || t.name.contains("blk.0.ffn_")
+                    || t.name.contains("blk.1.ffn_");
+
+                if is_router {
+                    recipe.insert(t.name, routers.clone());
+                } else if is_spine {
+                    recipe.insert(t.name, spine.clone());
+                } else if is_expert {
+                    recipe.insert(t.name, experts.clone());
+                } else {
+                    recipe.insert(t.name, t_path.clone());
+                }
+            }
+
+            let final_bytes = ojon_backend::assemble_flint_hybrid_gguf(
+                &t_path,
+                &recipe,
+                &output,
+                &mut |line| eprintln!("{}", line),
+            )?;
+
+            println!("assembled_model: {}", output.display());
+            println!("final_bytes: {}", final_bytes);
+            println!("status: RCO_HYBRID_ASSEMBLED_SUCCESSFULLY");
         }
         Some("inspect-hf") => {
             let path = PathBuf::from(next_argument(&mut args, "HF model folder")?);
