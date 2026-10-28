@@ -16,7 +16,10 @@ fn bad(msg: impl Into<String>) -> io::Error {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResearchKind { Hqq, OpenVino }
+pub enum ResearchKind {
+    Hqq,
+    OpenVino,
+}
 
 impl ResearchKind {
     pub fn parse(input: &str) -> io::Result<Self> {
@@ -27,7 +30,10 @@ impl ResearchKind {
         }
     }
     fn id(self) -> &'static str {
-        match self { Self::Hqq => "hqq", Self::OpenVino => "openvino_nncf" }
+        match self {
+            Self::Hqq => "hqq",
+            Self::OpenVino => "openvino_nncf",
+        }
     }
     fn format(self) -> &'static str {
         match self {
@@ -96,23 +102,35 @@ impl ResearchPlan {
 /// Inspect an ORIGINAL local Hugging Face checkpoint; never load the model.
 /// The caller must provide a new external destination. Avoid overwriting source.
 pub fn prepare_research(
-    kind: ResearchKind, source: &Path, output: &Path, executable: &Path,
-    bits: u32, group: u32, ratio: f64, device: &str
+    kind: ResearchKind,
+    source: &Path,
+    output: &Path,
+    executable: &Path,
+    bits: u32,
+    group: u32,
+    ratio: f64,
+    device: &str,
 ) -> io::Result<ResearchPlan> {
     let source = inspect_hf_folder(source)?;
     // This first bridge is causal-LM only. Refuse to drop a VLM's processor
     // or vision tower while exporting what looks like a complete model.
     let config_file = source.directory.join("config.json");
     if fs::metadata(&config_file)?.len() > 2_000_000 {
-        return Err(bad("config.json too large for bounded research capability check"));
+        return Err(bad(
+            "config.json too large for bounded research capability check",
+        ));
     }
     let config: Value = serde_json::from_slice(&fs::read(config_file)?)
         .map_err(|_| bad("invalid source config.json"))?;
-    let kind_hint = config["model_type"].as_str().unwrap_or("").to_ascii_lowercase();
+    let kind_hint = config["model_type"]
+        .as_str()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     if config["vision_config"].is_object()
         || config["vision_tower"].is_string()
         || config["mm_projector_type"].is_string()
-        || kind_hint.contains("_vl") || kind_hint.contains("vision")
+        || kind_hint.contains("_vl")
+        || kind_hint.contains("vision")
     {
         return Err(bad("multimodal source requires vision/processor-preserving export; HQQ/OpenVINO causal-only research route refused"));
     }
@@ -123,13 +141,21 @@ pub fn prepare_research(
         return Err(bad("output directory needs a name"));
     }
     if output.symlink_metadata().is_ok() {
-        return Err(io::Error::new(ErrorKind::AlreadyExists, "output already exists"));
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            "output already exists",
+        ));
     }
-    let parent = output.parent().ok_or_else(|| bad("missing output parent"))?.canonicalize()?;
+    let parent = output
+        .parent()
+        .ok_or_else(|| bad("missing output parent"))?
+        .canonicalize()?;
     if !parent.is_dir() {
         return Err(bad("output parent must be an existing directory"));
     }
-    let name = output.file_name().ok_or_else(|| bad("missing output filename"))?;
+    let name = output
+        .file_name()
+        .ok_or_else(|| bad("missing output filename"))?;
     let output = parent.join(name);
     if output.starts_with(&source.directory) {
         return Err(bad("output may not be inside the source checkpoint"));
@@ -163,18 +189,33 @@ pub fn prepare_research(
         return Err(bad("specified tool executable does not exist"));
     }
     Ok(ResearchPlan {
-        kind, source, output, executable: executable.to_path_buf(),
-        bits, group, ratio, device: device.to_owned(),
+        kind,
+        source,
+        output,
+        executable: executable.to_path_buf(),
+        bits,
+        group,
+        ratio,
+        device: device.to_owned(),
     })
 }
 
 struct Stage(PathBuf);
-impl Drop for Stage { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+impl Drop for Stage {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 fn stage_directory(parent: &Path) -> io::Result<Stage> {
     for attempt in 0..12 {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)
-            .map_err(|_| bad("invalid clock"))?.as_nanos();
-        let root = parent.join(format!(".ojon-research-{}-{now}-{attempt}", std::process::id()));
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| bad("invalid clock"))?
+            .as_nanos();
+        let root = parent.join(format!(
+            ".ojon-research-{}-{now}-{attempt}",
+            std::process::id()
+        ));
         match fs::create_dir(&root) {
             Ok(()) => return Ok(Stage(root)),
             Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
@@ -188,8 +229,13 @@ fn verified_output(kind: ResearchKind, root: &Path) -> io::Result<()> {
     match kind {
         ResearchKind::Hqq => {
             let weights = root.join("qmodel.pt");
-            if !root.join("config.json").is_file() || !weights.is_file() || fs::metadata(weights)?.len() == 0 {
-                return Err(io::Error::other("HQQ output missing nonempty qmodel.pt or config.json"));
+            if !root.join("config.json").is_file()
+                || !weights.is_file()
+                || fs::metadata(weights)?.len() == 0
+            {
+                return Err(io::Error::other(
+                    "HQQ output missing nonempty qmodel.pt or config.json",
+                ));
             }
         }
         ResearchKind::OpenVino => {
@@ -205,7 +251,9 @@ fn verified_output(kind: ResearchKind, root: &Path) -> io::Result<()> {
                 }
             }
             if !matched {
-                return Err(io::Error::other("OpenVINO export missing matching XML and BIN weights"));
+                return Err(io::Error::other(
+                    "OpenVINO export missing matching XML and BIN weights",
+                ));
             }
         }
     }
@@ -225,14 +273,18 @@ pub fn run_research_with_policy(plan: &ResearchPlan, allow_resource_risk: bool) 
         ResearchKind::Hqq => ResourceMode::Hqq,
         ResearchKind::OpenVino => ResourceMode::OpenVino,
     };
-    let parent = plan.output.parent().ok_or_else(|| bad("missing output parent"))?;
-    let preflight = assess_resources(
-        plan.source.source_weight_bytes, parent, mode, &plan.device
-    )?;
+    let parent = plan
+        .output
+        .parent()
+        .ok_or_else(|| bad("missing output parent"))?;
+    let preflight = assess_resources(plan.source.source_weight_bytes, parent, mode, &plan.device)?;
     eprintln!("Ojon resource preflight: {}", preflight.as_json());
     preflight.enforce(allow_resource_risk)?;
     if plan.output.symlink_metadata().is_ok() {
-        return Err(io::Error::new(ErrorKind::AlreadyExists, "output already exists"));
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            "output already exists",
+        ));
     }
     let parent = plan.output.parent().ok_or_else(|| bad("no parent"))?;
     let staging = stage_directory(parent)?;
@@ -240,34 +292,50 @@ pub fn run_research_with_policy(plan: &ResearchPlan, allow_resource_risk: bool) 
     let mut command = match plan.kind {
         ResearchKind::Hqq => {
             let mut c = Command::new(&plan.executable);
-            c.arg("-c").arg(include_str!("hqq_bridge.py"))
-                .arg("--source").arg(&plan.source.directory)
-                .arg("--output").arg(&partial)
-                .arg("--bits").arg(plan.bits.to_string())
-                .arg("--group").arg(plan.group.to_string())
-                .arg("--device").arg(&plan.device);
+            c.arg("-c")
+                .arg(include_str!("hqq_bridge.py"))
+                .arg("--source")
+                .arg(&plan.source.directory)
+                .arg("--output")
+                .arg(&partial)
+                .arg("--bits")
+                .arg(plan.bits.to_string())
+                .arg("--group")
+                .arg(plan.group.to_string())
+                .arg("--device")
+                .arg(&plan.device);
             c
         }
         ResearchKind::OpenVino => {
             let mut c = Command::new(&plan.executable);
-            c.arg("export").arg("openvino")
-                .arg("--model").arg(&plan.source.directory)
-                .arg("--task").arg("text-generation-with-past")
-                .arg("--weight-format").arg("int4")
-                .arg("--group-size").arg(plan.group.to_string())
-                .arg("--ratio").arg(plan.ratio.to_string())
+            c.arg("export")
+                .arg("openvino")
+                .arg("--model")
+                .arg(&plan.source.directory)
+                .arg("--task")
+                .arg("text-generation-with-past")
+                .arg("--weight-format")
+                .arg("int4")
+                .arg("--group-size")
+                .arg(plan.group.to_string())
+                .arg("--ratio")
+                .arg(plan.ratio.to_string())
                 .arg(&partial);
             c
         }
     };
-    command.env("HF_HUB_OFFLINE", "1")
+    command
+        .env("HF_HUB_OFFLINE", "1")
         .env("HF_DATASETS_OFFLINE", "1")
         .env("TRANSFORMERS_OFFLINE", "1")
         .env("HF_HUB_DISABLE_TELEMETRY", "1");
     run_with_log(&mut command, |line| println!("{line}"))?;
     verified_output(plan.kind, &partial)?;
     if plan.output.symlink_metadata().is_ok() {
-        return Err(io::Error::new(ErrorKind::AlreadyExists, "output was created concurrently"));
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            "output was created concurrently",
+        ));
     }
     fs::rename(&partial, &plan.output)?;
     Ok(())
@@ -277,8 +345,12 @@ pub fn run_research_with_policy(plan: &ResearchPlan, allow_resource_risk: bool) 
 mod tests {
     use super::*;
     fn fixture() -> (PathBuf, PathBuf) {
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("ojon-research-test-{}-{stamp}", std::process::id()));
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("ojon-research-test-{}-{stamp}", std::process::id()));
         let source = root.join("model");
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join("config.json"), r#"{"model_type":"llama"}"#).unwrap();
@@ -289,15 +361,81 @@ mod tests {
     fn independent_routes_and_strict_output_contract() {
         let (root, source) = fixture();
         let out = root.join("hqq-output");
-        let hqq = prepare_research(ResearchKind::Hqq, &source, &out, Path::new("python"), 4, 64, 1.0, "xpu").unwrap();
-        assert_eq!(hqq.as_json()["output_format"], "HQQ native qmodel.pt (NOT GGUF)");
+        let hqq = prepare_research(
+            ResearchKind::Hqq,
+            &source,
+            &out,
+            Path::new("python"),
+            4,
+            64,
+            1.0,
+            "xpu",
+        )
+        .unwrap();
+        assert_eq!(
+            hqq.as_json()["output_format"],
+            "HQQ native qmodel.pt (NOT GGUF)"
+        );
         assert_eq!(hqq.as_json()["runtime_load_verified"], false);
-        assert!(prepare_research(ResearchKind::Hqq, &source, &source.join("packed"), Path::new("python"), 4, 64, 1.0, "cpu").is_err());
-        assert!(prepare_research(ResearchKind::Hqq, &source, &out, Path::new("python"), 5, 64, 1.0, "cpu").is_err());
-        let ov = prepare_research(ResearchKind::OpenVino, &source, &out, Path::new("optimum-cli"), 4, 128, 0.8, "cpu").unwrap();
-        assert_eq!(ov.as_json()["output_format"], "OpenVINO IR .xml/.bin (NOT GGUF)");
-        assert!(prepare_research(ResearchKind::OpenVino, &source, &out, Path::new("optimum-cli"), 4, 128, 1.3, "cpu").is_err());
-        assert!(prepare_research(ResearchKind::OpenVino, &source, &out, Path::new("optimum-cli"), 4, 128, 1.0, "xpu").is_err());
+        assert!(prepare_research(
+            ResearchKind::Hqq,
+            &source,
+            &source.join("packed"),
+            Path::new("python"),
+            4,
+            64,
+            1.0,
+            "cpu"
+        )
+        .is_err());
+        assert!(prepare_research(
+            ResearchKind::Hqq,
+            &source,
+            &out,
+            Path::new("python"),
+            5,
+            64,
+            1.0,
+            "cpu"
+        )
+        .is_err());
+        let ov = prepare_research(
+            ResearchKind::OpenVino,
+            &source,
+            &out,
+            Path::new("optimum-cli"),
+            4,
+            128,
+            0.8,
+            "cpu",
+        )
+        .unwrap();
+        assert_eq!(
+            ov.as_json()["output_format"],
+            "OpenVINO IR .xml/.bin (NOT GGUF)"
+        );
+        assert!(prepare_research(
+            ResearchKind::OpenVino,
+            &source,
+            &out,
+            Path::new("optimum-cli"),
+            4,
+            128,
+            1.3,
+            "cpu"
+        )
+        .is_err());
+        assert!(prepare_research(
+            ResearchKind::OpenVino,
+            &source,
+            &out,
+            Path::new("optimum-cli"),
+            4,
+            128,
+            1.0,
+            "xpu"
+        )
+        .is_err());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

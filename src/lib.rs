@@ -2,12 +2,12 @@
 //! No GUI, Python, network access, or model weights are required for inspection.
 
 pub mod core;
+pub mod eval;
+pub mod learn;
+pub mod models;
 pub mod quant;
 pub mod uncensor;
-pub mod models;
-pub mod eval;
 pub mod workflows;
-pub mod learn;
 
 // Root-level module re-exports for transparent backward compatibility
 // Core
@@ -67,127 +67,132 @@ pub use self::workflows::simple_workflow;
 pub use self::workflows::train;
 
 // Re-export specific public items
-pub use settings::{LocalSettings, load_settings, save_settings, settings_path};
-pub use discovery::{
-    backend_specs, discover_backends, discovered_path, hf_python_path,
-    open_official_download_page, BackendId, FoundBackend, Integration,
-    probe_backend_capabilities, probe_quantizer_formats, probe_runtime_devices,
-    probe_quantizer_capabilities, bundled_data_file, bundled_data_dir,
+pub use self::workflows::flint_pipeline;
+pub use self::workflows::flint_pipeline::{
+    assemble_flint_hybrid_gguf, assess_flint_hardware_fit, compare_flint_logits_files,
+    evaluate_flint_candidate_logits, generate_flint_roco_recipe, inspect_flint_moe,
+    parity_gate_passes, plan_flint_pipeline, plan_flint_uncensor, promote_flint_candidate,
+    router_storage_type_match_pct, run_flint_functional_suite, verify_moe_router_storage,
+    FlintDirectLogitsComparison, FlintHardwareFit, FlintMoETopology, FlintParityReceipt,
+    FlintPipelinePlan, FlintUncensorPlan,
 };
-pub use jobs::{
-    request_job_cancel, clear_job_cancel, is_job_cancelled,
-    job_history_path, load_job_history, save_job_history,
-    record_job_start, update_job_stage, finish_job_history, JobHistoryEntry,
+pub use abliteration::{
+    direction_from_activations, prepare_abliteration, run_abliteration, AblationPlan,
+    AblationResult,
 };
-pub use gguf::{
-    inspect_gguf, inspect_gguf_tensors, inspect_model_topology,
-    ggml_type_name, ggml_type_block_info, classify_tensor_role,
-    GgufSummary, GgufTensor, ModelTopology, RuntimeMemoryEstimate,
-};
-pub use hf::{
-    inspect_hf_folder, prepare_hf, quantize_hf, quantize_hf_with_log,
-    HfFolderInfo, HfQuantizePlan, HfQuantizeResult,
-};
-pub use llama::{
-    quantize_gguf, quantize_gguf_with_log, prepare_gguf, Precision,
-    QuantizePlan, QuantizeResult,
-};
-pub use smoke::{smoke_gguf, smoke_gguf_capture, SmokeCapture};
-pub use probe::{probe_model, ModelCategory, ModelProbe};
-pub use train::{prepare_train, run_train, TrainPlan};
-pub use quality::{evaluate_optimization_readiness, parse_quality_report, recommend, QualityReport};
-pub use sweep::{execute_sweep, parse_precisions, prepare_sweep, SweepPlan};
-pub use ppl::{evaluate_sweep, parse_final_perplexity, PplSettings};
-pub use advanced::{
-    plan_gsq, plan_gsq_assemble, plan_rco_database, plan_rco_search,
-    plan_rco_assemble, run_advanced, discover_advanced, AdvancedPlan,
-};
-pub use distill::{
-    audit_dataset_file, prepare_distill_plan, retrieve_recipes,
-    DatasetAuditReport, DatasetEntry, DistillPlan, KnowledgeTier, RecipeMatch,
-};
-pub use autoround::{prepare_autoround_plan, run_autoround, AutoRoundDevice, AutoRoundPlan};
-pub use diffusion::{
-    plan_diffusion, run_diffusion, inspect_diffusion_recipe, discover_diffusion,
-    DiffusionPlan, DiffusionResult, DiffusionEngine, DiffusionKind, DiffusionFormat,
-};
-pub use packed::{plan_pack, run_pack, unpack, PackPlan, PackResult};
-pub use calibration::{prepare_imatrix, run_imatrix, ImatrixPlan};
-pub use options::plan_options;
-pub use research_routes::{prepare_research, run_research, ResearchKind, ResearchPlan};
-pub use resource::{
-    assess_resources, resource_plan, discover_runtime_gpu_devices,
-    resolve_auto_runtime_device, is_integrated_gpu_name,
-    ResourceAssessment, ResourceMode, RuntimeGpuDevice,
-};
-pub use benchmark::{prepare_bench, run_bench, compare_bench_files, BenchPlan};
-pub use exl3::{prepare_exl3, run_exl3, Exl3Plan};
-pub use task_eval::{parse_eval_suite, inspect_task_suite, prepare_eval, run_eval, EvalPlan, EvalSuite};
-pub use quant_compare::{prepare_existing_quant_comparison, run_existing_quant_comparison, ExistingQuantPlan};
-pub use quant_parity::{prepare_quant_parity, run_quant_parity, QuantParityOptions, QuantParityPlan};
-pub use adapter_smoke::{prepare_adapter_smoke, run_adapter_smoke, AdapterSmokePlan, AdapterSmokeResult};
-pub use compressed_edit::{
-    prepare_compressed_edit, prepare_compressed_edit_with_recipe,
-    run_compressed_edit, CompressedEditPlan, CompressedEditResult,
-};
-pub use ara::{fit_ara, fit_ara_file, save_ara_recipe, AraFitResult};
-pub use method_select::{choose_edit_method, choose_edit_method_file, MethodChoice};
-pub use model_build::{prepare_model_build, run_model_build, ModelBuildPlan, ModelBuildResult};
 pub use activation_trace::{compile_activation_recipe, save_activation_recipe, ActivationRecipe};
-pub use uncensor_trace::{prepare_uncensor_from_trace, run_uncensor_from_trace, UncensorTracePlan};
-pub use gguf_edit::{prepare_gguf_abliteration, prepare_gguf_abliteration_value, run_gguf_abliteration, GgufAblationPlan};
-pub use model_edit::{prepare_model_abliteration, run_model_abliteration, ModelAblationPlan, ModelAblationResult};
-pub use abliteration::{direction_from_activations, prepare_abliteration, run_abliteration, AblationPlan, AblationResult};
-pub use cvector_import::{
-    rank_control_vector_blocks, recipe_from_control_vector,
-    recipe_from_control_vector_with_options,
+pub use adapter_smoke::{
+    prepare_adapter_smoke, run_adapter_smoke, AdapterSmokePlan, AdapterSmokeResult,
 };
 pub use adaptive::{
     allocate_bits, allocate_bits_with_strategy, compare_allocation_strategies,
-    sensitive_spine_pinning_recipe, parse_tensor_sensitivity,
-    extract_sensitivity_from_imatrix, prepare_adaptive, run_adaptive,
-    AdaptivePlan, AllocationStrategy, TensorScore,
+    extract_sensitivity_from_imatrix, parse_tensor_sensitivity, prepare_adaptive, run_adaptive,
+    sensitive_spine_pinning_recipe, AdaptivePlan, AllocationStrategy, TensorScore,
+};
+pub use advanced::{
+    discover_advanced, plan_gsq, plan_gsq_assemble, plan_rco_assemble, plan_rco_database,
+    plan_rco_search, run_advanced, AdvancedPlan,
+};
+pub use ara::{fit_ara, fit_ara_file, save_ara_recipe, AraFitResult};
+pub use autoround::{prepare_autoround_plan, run_autoround, AutoRoundDevice, AutoRoundPlan};
+pub use benchmark::{compare_bench_files, prepare_bench, run_bench, BenchPlan};
+pub use calibration::{prepare_imatrix, run_imatrix, ImatrixPlan};
+pub use compressed_edit::{
+    prepare_compressed_edit, prepare_compressed_edit_with_recipe, run_compressed_edit,
+    CompressedEditPlan, CompressedEditResult,
+};
+pub use cvector_import::{
+    rank_control_vector_blocks, recipe_from_control_vector, recipe_from_control_vector_with_options,
+};
+pub use diffusion::{
+    discover_diffusion, inspect_diffusion_recipe, plan_diffusion, run_diffusion, DiffusionEngine,
+    DiffusionFormat, DiffusionKind, DiffusionPlan, DiffusionResult,
+};
+pub use discovery::{
+    backend_specs, bundled_data_dir, bundled_data_file, discover_backends, discovered_path,
+    hf_python_path, open_official_download_page, probe_backend_capabilities,
+    probe_quantizer_capabilities, probe_quantizer_formats, probe_runtime_devices, BackendId,
+    FoundBackend, Integration,
+};
+pub use distill::{
+    audit_dataset_file, prepare_distill_plan, retrieve_recipes, DatasetAuditReport, DatasetEntry,
+    DistillPlan, KnowledgeTier, RecipeMatch,
+};
+pub use exl3::{prepare_exl3, run_exl3, Exl3Plan};
+pub use gguf::{
+    classify_tensor_role, ggml_type_block_info, ggml_type_name, inspect_gguf, inspect_gguf_tensors,
+    inspect_model_topology, GgufSummary, GgufTensor, ModelTopology, RuntimeMemoryEstimate,
+};
+pub use gguf_edit::{
+    prepare_gguf_abliteration, prepare_gguf_abliteration_value, run_gguf_abliteration,
+    GgufAblationPlan,
+};
+pub use hf::{
+    inspect_hf_folder, prepare_hf, quantize_hf, quantize_hf_with_log, HfFolderInfo, HfQuantizePlan,
+    HfQuantizeResult,
+};
+pub use jobs::{
+    clear_job_cancel, finish_job_history, is_job_cancelled, job_history_path, load_job_history,
+    record_job_start, request_job_cancel, save_job_history, update_job_stage, JobHistoryEntry,
+};
+pub use llama::{
+    prepare_gguf, quantize_gguf, quantize_gguf_with_log, Precision, QuantizePlan, QuantizeResult,
+};
+pub use method_select::{choose_edit_method, choose_edit_method_file, MethodChoice};
+pub use model_build::{prepare_model_build, run_model_build, ModelBuildPlan, ModelBuildResult};
+pub use model_edit::{
+    prepare_model_abliteration, run_model_abliteration, ModelAblationPlan, ModelAblationResult,
 };
 pub use optimize_workflow::{
-    plan_optimize_workflow, run_optimize_workflow, OptimizeWorkflowRequest, OptimizeGoal,
+    plan_optimize_workflow, run_optimize_workflow, OptimizeGoal, OptimizeWorkflowRequest,
 };
-pub use uncensor_auto::{
-    prepare_uncensor_auto, run_uncensor_auto, UncensorAutoRequest,
+pub use options::plan_options;
+pub use packed::{plan_pack, run_pack, unpack, PackPlan, PackResult};
+pub use ppl::{evaluate_sweep, parse_final_perplexity, PplSettings};
+pub use probe::{probe_model, ModelCategory, ModelProbe};
+pub use quality::{
+    evaluate_optimization_readiness, parse_quality_report, recommend, QualityReport,
 };
-pub use self::workflows::flint_pipeline;
-pub use self::workflows::flint_pipeline::{
-    plan_flint_pipeline, inspect_flint_moe, assess_flint_hardware_fit,
-    promote_flint_candidate, evaluate_flint_candidate_logits,
-    run_flint_functional_suite, generate_flint_roco_recipe,
-    plan_flint_uncensor, FlintPipelinePlan, FlintMoETopology,
-    FlintHardwareFit, FlintParityReceipt, FlintUncensorPlan,
-    FlintDirectLogitsComparison,
-    assemble_flint_hybrid_gguf, verify_moe_router_storage,
-    compare_flint_logits_files, router_storage_type_match_pct, parity_gate_passes,
+pub use quant_compare::{
+    prepare_existing_quant_comparison, run_existing_quant_comparison, ExistingQuantPlan,
 };
+pub use quant_parity::{
+    prepare_quant_parity, run_quant_parity, QuantParityOptions, QuantParityPlan,
+};
+pub use research_routes::{prepare_research, run_research, ResearchKind, ResearchPlan};
+pub use resource::{
+    assess_resources, discover_runtime_gpu_devices, is_integrated_gpu_name,
+    resolve_auto_runtime_device, resource_plan, ResourceAssessment, ResourceMode, RuntimeGpuDevice,
+};
+pub use settings::{load_settings, save_settings, settings_path, LocalSettings};
+pub use smoke::{smoke_gguf, smoke_gguf_capture, SmokeCapture};
+pub use sweep::{execute_sweep, parse_precisions, prepare_sweep, SweepPlan};
+pub use task_eval::{
+    inspect_task_suite, parse_eval_suite, prepare_eval, run_eval, EvalPlan, EvalSuite,
+};
+pub use train::{prepare_train, run_train, TrainPlan};
+pub use uncensor_auto::{prepare_uncensor_auto, run_uncensor_auto, UncensorAutoRequest};
+pub use uncensor_trace::{prepare_uncensor_from_trace, run_uncensor_from_trace, UncensorTracePlan};
 
 // Learn
 pub use self::learn::{
-    collector, curate, daemon, eval as learn_eval, knowledge, packages, registry, temporal, train as learn_train,
-    default_utility_models, extract_episode_metadata, harvest_agent_sessions, redact_json_secrets,
-    redact_secrets, CollectedEpisode, CollectorStats, EpisodeOutcome, ExtractedEpisodeMetadata,
-    HarvestReceipt, LearnCollector, ToolCallRecord, UtilityModelSpec,
-    DaemonConfig, DaemonStatus, LearnDaemon,
-    export_to_llamafactory, has_deterministic_verification, load_episodes_from_jsonl,
-    partition_dual_buffer, CuratedBatch, CurationReceipt, DpoPreferencePair, DualBufferConfig,
-    evaluate_and_promote, CandidateModelEvaluation, CandidateType, GateCheckResult,
-    PromotedModelPointer, PromotionDecision, PromotionPolicy, CANONICAL_TOOL_DECLINE_SUITE,
-    apply_supersession, compute_content_hash, create_knowledge_item, extract_clean_text,
-    fetch_online_knowledge_url, load_knowledge_store, sanitize_untrusted_knowledge,
-    save_knowledge_store, sha256_bytes, sha256_hex, KnowledgeItem, KnowledgeSourceKind,
-    create_knowledge_pack, create_model_release, create_skill_pack, hash_file_contents,
-    install_package, install_package_for_model, list_active_packages, rollback_package,
-    verify_package_integrity, InstallReceipt, PackageKind, PackageManifest, RollbackReceipt,
-    get_dataset_by_id, list_curated_datasets,
-    import_and_sanitize_jsonl, DatasetCatalogEntry, DatasetCategory, ImportReceipt,
-    CURATED_DATASETS,
-    format_epoch_iso, parse_iso_date_to_epoch, AugmentedPromptResponse, TemporalKnowledgeEngine, TemporalRetrievalQuery,
-    TemporalSearchResult,
-    execute_training_plan, probe_host_hardware, HardwareDiagnosis, HardwareTier, LearnTrainPlan,
-    TrainReceipt,
+    apply_supersession, collector, compute_content_hash, create_knowledge_item,
+    create_knowledge_pack, create_model_release, create_skill_pack, curate, daemon,
+    default_utility_models, eval as learn_eval, evaluate_and_promote, execute_training_plan,
+    export_to_llamafactory, extract_clean_text, extract_episode_metadata,
+    fetch_online_knowledge_url, format_epoch_iso, get_dataset_by_id, harvest_agent_sessions,
+    has_deterministic_verification, hash_file_contents, import_and_sanitize_jsonl, install_package,
+    install_package_for_model, knowledge, list_active_packages, list_curated_datasets,
+    load_episodes_from_jsonl, load_knowledge_store, packages, parse_iso_date_to_epoch,
+    partition_dual_buffer, probe_host_hardware, redact_json_secrets, redact_secrets, registry,
+    rollback_package, sanitize_untrusted_knowledge, save_knowledge_store, sha256_bytes, sha256_hex,
+    temporal, train as learn_train, verify_package_integrity, AugmentedPromptResponse,
+    CandidateModelEvaluation, CandidateType, CollectedEpisode, CollectorStats, CuratedBatch,
+    CurationReceipt, DaemonConfig, DaemonStatus, DatasetCatalogEntry, DatasetCategory,
+    DpoPreferencePair, DualBufferConfig, EpisodeOutcome, ExtractedEpisodeMetadata, GateCheckResult,
+    HardwareDiagnosis, HardwareTier, HarvestReceipt, ImportReceipt, InstallReceipt, KnowledgeItem,
+    KnowledgeSourceKind, LearnCollector, LearnDaemon, LearnTrainPlan, PackageKind, PackageManifest,
+    PromotedModelPointer, PromotionDecision, PromotionPolicy, RollbackReceipt,
+    TemporalKnowledgeEngine, TemporalRetrievalQuery, TemporalSearchResult, ToolCallRecord,
+    TrainReceipt, UtilityModelSpec, CANONICAL_TOOL_DECLINE_SUITE, CURATED_DATASETS,
 };

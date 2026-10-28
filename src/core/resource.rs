@@ -20,7 +20,12 @@ fn invalid(message: impl Into<String>) -> io::Error {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResourceMode {
-    Hqq, OpenVino, AutoRound, Gguf, Pack, Exl3,
+    Hqq,
+    OpenVino,
+    AutoRound,
+    Gguf,
+    Pack,
+    Exl3,
 }
 impl ResourceMode {
     pub fn parse(s: &str) -> io::Result<Self> {
@@ -31,7 +36,9 @@ impl ResourceMode {
             "gguf" => Ok(Self::Gguf),
             "pack" => Ok(Self::Pack),
             "exl3" => Ok(Self::Exl3),
-            _ => Err(invalid("mode must be hqq, openvino, autoround, gguf, pack or exl3")),
+            _ => Err(invalid(
+                "mode must be hqq, openvino, autoround, gguf, pack or exl3",
+            )),
         }
     }
     pub fn name(self) -> &'static str {
@@ -49,7 +56,7 @@ impl ResourceMode {
         match self {
             Self::Hqq | Self::OpenVino | Self::AutoRound | Self::Exl3 => Some(1),
             Self::Gguf => Some(0), // reserve host RAM only; tensor stream peak is unknown.
-            Self::Pack => None, // packed pathways may stream tensors.
+            Self::Pack => None,    // packed pathways may stream tensors.
         }
     }
     fn disk_budget_multiplier(self) -> u64 {
@@ -133,26 +140,41 @@ impl ResourceAssessment {
 fn available_ram() -> Option<u64> {
     #[repr(C)]
     struct Status {
-        size: u32, load: u32, total_phys: u64, avail_phys: u64,
-        total_page: u64, avail_page: u64, total_virtual: u64, avail_virtual: u64,
+        size: u32,
+        load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page: u64,
+        avail_page: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
         avail_extended: u64,
     }
-    #[link(name="kernel32")]
+    #[link(name = "kernel32")]
     extern "system" {
         fn GlobalMemoryStatusEx(status: *mut Status) -> i32;
     }
     let mut status = Status {
         size: std::mem::size_of::<Status>() as u32,
-        load: 0, total_phys: 0, avail_phys: 0,
-        total_page: 0, avail_page: 0, total_virtual: 0, avail_virtual: 0,
+        load: 0,
+        total_phys: 0,
+        avail_phys: 0,
+        total_page: 0,
+        avail_page: 0,
+        total_virtual: 0,
+        avail_virtual: 0,
         avail_extended: 0,
     };
     // SAFETY: valid writable C-compatible struct, correct documented length.
     let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
-    if ok != 0 { Some(status.avail_phys) } else { None }
+    if ok != 0 {
+        Some(status.avail_phys)
+    } else {
+        None
+    }
 }
 
-#[cfg(target_os="linux")]
+#[cfg(target_os = "linux")]
 fn available_ram() -> Option<u64> {
     let data = fs::read_to_string("/proc/meminfo").ok()?;
     data.lines().find_map(|line| {
@@ -161,19 +183,21 @@ fn available_ram() -> Option<u64> {
         value.checked_mul(1024)
     })
 }
-#[cfg(not(any(windows, target_os="linux")))]
-fn available_ram() -> Option<u64> { None }
+#[cfg(not(any(windows, target_os = "linux")))]
+fn available_ram() -> Option<u64> {
+    None
+}
 
 #[cfg(windows)]
 pub(crate) fn free_disk(directory: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
-    #[link(name="kernel32")]
+    #[link(name = "kernel32")]
     extern "system" {
         fn GetDiskFreeSpaceExW(
             directory_name: *const u16,
             free_bytes_available: *mut u64,
             total_bytes: *mut u64,
-            total_free_bytes: *mut u64
+            total_free_bytes: *mut u64,
         ) -> i32;
     }
     let wide: Vec<u16> = directory.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -182,10 +206,17 @@ pub(crate) fn free_disk(directory: &Path) -> Option<u64> {
     // optional unused output pointers are null.
     let ok = unsafe {
         GetDiskFreeSpaceExW(
-            wide.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut()
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
         )
     };
-    if ok != 0 { Some(available) } else { None }
+    if ok != 0 {
+        Some(available)
+    } else {
+        None
+    }
 }
 
 #[cfg(not(windows))]
@@ -193,7 +224,9 @@ pub(crate) fn free_disk(directory: &Path) -> Option<u64> {
     // POSIX 'df' requires no Python dependency; safely passes path as an
     // argument (never through a shell). Failure => UNKNOWN, never 0.
     let result = Command::new("df").arg("-Pk").arg(directory).output().ok()?;
-    if !result.status.success() { return None; }
+    if !result.status.success() {
+        return None;
+    }
     let data = String::from_utf8(result.stdout).ok()?;
     let last = data.lines().last()?;
     let values: Vec<&str> = last.split_whitespace().collect();
@@ -204,24 +237,33 @@ pub(crate) fn free_disk(directory: &Path) -> Option<u64> {
 fn nvidia_devices() -> Vec<Value> {
     let mut result = Vec::new();
     let output = match Command::new("nvidia-smi")
-        .args(["--query-gpu=index,name,memory.total,memory.free", "--format=csv,noheader,nounits"])
-        .output() {
-            Ok(v) if v.status.success() => v,
-            _ => return result,
-        };
+        .args([
+            "--query-gpu=index,name,memory.total,memory.free",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+    {
+        Ok(v) if v.status.success() => v,
+        _ => return result,
+    };
     let text = match String::from_utf8(output.stdout) {
         Ok(s) => s,
         Err(_) => return result,
     };
     for line in text.lines().take(16) {
         let fields: Vec<&str> = line.splitn(4, ',').map(str::trim).collect();
-        if fields.len() != 4 { continue; }
-        if let (Ok(index), Ok(total_mib), Ok(free_mib)) =
-            (fields[0].parse::<u32>(), fields[2].parse::<u64>(), fields[3].parse::<u64>())
-        {
-            if let (Some(total), Some(free)) =
-                (total_mib.checked_mul(1024 * 1024), free_mib.checked_mul(1024 * 1024))
-            {
+        if fields.len() != 4 {
+            continue;
+        }
+        if let (Ok(index), Ok(total_mib), Ok(free_mib)) = (
+            fields[0].parse::<u32>(),
+            fields[2].parse::<u64>(),
+            fields[3].parse::<u64>(),
+        ) {
+            if let (Some(total), Some(free)) = (
+                total_mib.checked_mul(1024 * 1024),
+                free_mib.checked_mul(1024 * 1024),
+            ) {
                 result.push(json!({
                     "vendor": "nvidia", "device_index": index, "device_name": fields[1],
                     "total_vram_bytes": total, "free_vram_bytes": free,
@@ -269,26 +311,54 @@ pub fn discover_runtime_gpu_devices() -> Vec<RuntimeGpuDevice> {
                     );
                     for line in text.lines() {
                         let line = line.trim();
-                        let Some((id_part, desc_part)) = line.split_once(':') else { continue; };
+                        let Some((id_part, desc_part)) = line.split_once(':') else {
+                            continue;
+                        };
                         let id = id_part.trim();
-                        if !(id.starts_with("Vulkan") || id.starts_with("CUDA") || id.starts_with("SYCL") || id.starts_with("Metal") || id.starts_with("ROCm")) {
+                        if !(id.starts_with("Vulkan")
+                            || id.starts_with("CUDA")
+                            || id.starts_with("SYCL")
+                            || id.starts_with("Metal")
+                            || id.starts_with("ROCm"))
+                        {
                             continue;
                         }
                         let desc = desc_part.trim();
-                        let Some((name, mem_part)) = desc.split_once('(') else { continue; };
+                        let Some((name, mem_part)) = desc.split_once('(') else {
+                            continue;
+                        };
                         let name = name.trim();
-                        let Some(mem_str) = mem_part.strip_suffix(')') else { continue; };
-                        let Some((total_str, free_str)) = mem_str.split_once(',') else { continue; };
-                        let total_mib = total_str.trim().strip_suffix("MiB").map(str::trim).and_then(|s| s.parse::<f64>().ok());
-                        let free_mib = free_str.trim().strip_suffix("MiB free").map(str::trim).and_then(|s| s.parse::<f64>().ok());
+                        let Some(mem_str) = mem_part.strip_suffix(')') else {
+                            continue;
+                        };
+                        let Some((total_str, free_str)) = mem_str.split_once(',') else {
+                            continue;
+                        };
+                        let total_mib = total_str
+                            .trim()
+                            .strip_suffix("MiB")
+                            .map(str::trim)
+                            .and_then(|s| s.parse::<f64>().ok());
+                        let free_mib = free_str
+                            .trim()
+                            .strip_suffix("MiB free")
+                            .map(str::trim)
+                            .and_then(|s| s.parse::<f64>().ok());
                         if let (Some(t_mib), Some(f_mib)) = (total_mib, free_mib) {
                             if t_mib > 0.0 && f_mib >= 0.0 && f_mib <= t_mib {
                                 let total_bytes = (t_mib * 1024.0 * 1024.0) as u64;
                                 let free_bytes = (f_mib * 1024.0 * 1024.0) as u64;
                                 let lower = name.to_lowercase();
-                                let vendor = if lower.contains("intel") || lower.contains("arc") || id.starts_with("SYCL") {
+                                let vendor = if lower.contains("intel")
+                                    || lower.contains("arc")
+                                    || id.starts_with("SYCL")
+                                {
                                     "intel"
-                                } else if lower.contains("nvidia") || lower.contains("geforce") || lower.contains("rtx") || id.starts_with("CUDA") {
+                                } else if lower.contains("nvidia")
+                                    || lower.contains("geforce")
+                                    || lower.contains("rtx")
+                                    || id.starts_with("CUDA")
+                                {
                                     "nvidia"
                                 } else if lower.contains("amd") || lower.contains("radeon") {
                                     "amd"
@@ -330,7 +400,10 @@ pub fn resolve_auto_runtime_device(
     if preferred_device.eq_ignore_ascii_case("cpu") {
         return ("cpu".to_string(), None, 0);
     }
-    if let Some(rt) = explicit_runtime_device.map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(rt) = explicit_runtime_device
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let dev_family = if preferred_device == "auto" {
             if rt.starts_with("Vulkan") {
                 "vulkan"
@@ -344,7 +417,11 @@ pub fn resolve_auto_runtime_device(
         } else {
             preferred_device
         };
-        let layers = if explicit_gpu_layers == 0 { 99 } else { explicit_gpu_layers };
+        let layers = if explicit_gpu_layers == 0 {
+            99
+        } else {
+            explicit_gpu_layers
+        };
         return (dev_family.to_string(), Some(rt.to_string()), layers);
     }
     let devices = discover_runtime_gpu_devices();
@@ -360,7 +437,11 @@ pub fn resolve_auto_runtime_device(
         .max_by_key(|d| d.free_vram_bytes);
     if let Some(chosen) = best {
         let family = if chosen.runtime_id.starts_with("Vulkan") {
-            if preferred_device == "auto" { "vulkan" } else { preferred_device }
+            if preferred_device == "auto" {
+                "vulkan"
+            } else {
+                preferred_device
+            }
         } else if chosen.vendor == "intel" {
             "xpu"
         } else if chosen.vendor == "nvidia" {
@@ -368,7 +449,11 @@ pub fn resolve_auto_runtime_device(
         } else {
             "vulkan"
         };
-        let layers = if explicit_gpu_layers == 0 { 99 } else { explicit_gpu_layers };
+        let layers = if explicit_gpu_layers == 0 {
+            99
+        } else {
+            explicit_gpu_layers
+        };
         (family.to_string(), Some(chosen.runtime_id), layers)
     } else {
         ("cpu".to_string(), None, 0)
@@ -378,7 +463,8 @@ pub fn resolve_auto_runtime_device(
 fn llama_device_telemetry(vendor_filter: &str) -> Vec<Value> {
     let mut out = Vec::new();
     for dev in discover_runtime_gpu_devices() {
-        if dev.vendor == vendor_filter && !out.iter().any(|v: &Value| v["device_name"] == dev.name) {
+        if dev.vendor == vendor_filter && !out.iter().any(|v: &Value| v["device_name"] == dev.name)
+        {
             out.push(json!({
                 "vendor": dev.vendor,
                 "device_id": dev.runtime_id,
@@ -401,10 +487,11 @@ fn xpu_devices() -> Vec<Value> {
             "--query-gpu=index,name,memory.total,memory.free",
             "--format=csv,noheader,nounits",
         ])
-        .output() {
-            Ok(v) if v.status.success() => v,
-            _ => return llama_device_telemetry("intel"),
-        };
+        .output()
+    {
+        Ok(v) if v.status.success() => v,
+        _ => return llama_device_telemetry("intel"),
+    };
     let response = match String::from_utf8(output.stdout) {
         Ok(s) => s,
         Err(_) => return llama_device_telemetry("intel"),
@@ -422,19 +509,31 @@ fn parse_xpu_csv(text: &str) -> Vec<Value> {
     let mut out = Vec::new();
     for line in text.lines().take(32) {
         let cells: Vec<&str> = line.trim().splitn(4, ',').map(str::trim).collect();
-        if cells.len() != 4 { continue; }
-        let index: u32 = match cells[0].parse() { Ok(v) => v, Err(_) => continue };
+        if cells.len() != 4 {
+            continue;
+        }
+        let index: u32 = match cells[0].parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
         let to_bytes = |s: &str| -> Option<u64> {
             let mb: f64 = s.parse().ok()?;
-            if !mb.is_finite() || mb < 0.0 { return None; }
+            if !mb.is_finite() || mb < 0.0 {
+                return None;
+            }
             let bytes = mb * (1024.0 * 1024.0);
-            if bytes > u64::MAX as f64 { return None; }
+            if bytes > u64::MAX as f64 {
+                return None;
+            }
             Some(bytes.floor() as u64)
         };
-        let (Some(total), Some(free)) = (to_bytes(cells[2]), to_bytes(cells[3]))
-            else { continue };
+        let (Some(total), Some(free)) = (to_bytes(cells[2]), to_bytes(cells[3])) else {
+            continue;
+        };
         // Incoherent samples (N/A, free > total) are rejected, not trusted.
-        if total == 0 || free > total { continue; }
+        if total == 0 || free > total {
+            continue;
+        }
         out.push(json!({
             "vendor": "intel", "device_index": index,
             "device_name": cells[1],
@@ -447,12 +546,20 @@ fn parse_xpu_csv(text: &str) -> Vec<Value> {
 }
 
 fn budget(source_bytes: u64, mode: ResourceMode) -> io::Result<(Option<u64>, u64)> {
-    if source_bytes == 0 { return Err(invalid("no source weight bytes found")); }
-    let ram = mode.memory_budget_multiplier().map(|m|
-        source_bytes.checked_mul(m).and_then(|v| v.checked_add(RAM_RESERVE_BYTES))
-            .ok_or_else(|| invalid("RAM budget overflow"))
-    ).transpose()?;
-    let disk = source_bytes.checked_mul(mode.disk_budget_multiplier())
+    if source_bytes == 0 {
+        return Err(invalid("no source weight bytes found"));
+    }
+    let ram = mode
+        .memory_budget_multiplier()
+        .map(|m| {
+            source_bytes
+                .checked_mul(m)
+                .and_then(|v| v.checked_add(RAM_RESERVE_BYTES))
+                .ok_or_else(|| invalid("RAM budget overflow"))
+        })
+        .transpose()?;
+    let disk = source_bytes
+        .checked_mul(mode.disk_budget_multiplier())
         .and_then(|v| v.checked_add(SCRATCH_RESERVE_BYTES))
         .ok_or_else(|| invalid("scratch budget overflow"))?;
     Ok((ram, disk))
@@ -461,13 +568,18 @@ fn budget(source_bytes: u64, mode: ResourceMode) -> io::Result<(Option<u64>, u64
 /// Called from the GUI, CLI and guarded converters. For non-CPU devices,
 /// false/unknown VRAM telemetry never becomes an invented positive.
 pub fn assess_resources(
-    source_bytes: u64, output_parent: &Path, mode: ResourceMode, device: &str
+    source_bytes: u64,
+    output_parent: &Path,
+    mode: ResourceMode,
+    device: &str,
 ) -> io::Result<ResourceAssessment> {
     if !matches!(device, "cpu" | "cuda" | "xpu" | "vulkan" | "auto") {
         return Err(invalid("device must be cpu, cuda, xpu, vulkan, auto"));
     }
     let parent = output_parent.canonicalize()?;
-    if !parent.is_dir() { return Err(invalid("output parent is not a directory")); }
+    if !parent.is_dir() {
+        return Err(invalid("output parent is not a directory"));
+    }
     let (ram, disk) = budget(source_bytes, mode)?;
     let free_ram = available_ram();
     let free_volume = free_disk(&parent);
@@ -484,7 +596,10 @@ pub fn assess_resources(
                 "is_integrated": rt_dev.is_integrated,
                 "telemetry_source": rt_dev.telemetry_source,
             }));
-        } else if let Some(existing) = gpu_devices.iter_mut().find(|d| d["device_name"] == rt_dev.name) {
+        } else if let Some(existing) = gpu_devices
+            .iter_mut()
+            .find(|d| d["device_name"] == rt_dev.name)
+        {
             if existing.get("device_id").is_none() {
                 existing["device_id"] = json!(rt_dev.runtime_id);
             }
@@ -493,10 +608,16 @@ pub fn assess_resources(
     }
     let device_measured = match device {
         "cpu" => true,
-        "cuda" => gpu_devices.iter().any(|d| d["vendor"] == "nvidia" && d["free_vram_bytes"].as_u64().is_some()),
-        "xpu" => gpu_devices.iter().any(|d| d["vendor"] == "intel" && d["free_vram_bytes"].as_u64().is_some()),
+        "cuda" => gpu_devices
+            .iter()
+            .any(|d| d["vendor"] == "nvidia" && d["free_vram_bytes"].as_u64().is_some()),
+        "xpu" => gpu_devices
+            .iter()
+            .any(|d| d["vendor"] == "intel" && d["free_vram_bytes"].as_u64().is_some()),
         "vulkan" => gpu_devices.iter().any(|d| {
-            d["device_id"].as_str().is_some_and(|id| id.starts_with("Vulkan"))
+            d["device_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("Vulkan"))
                 && d["free_vram_bytes"].as_u64().is_some()
         }),
         // Auto-routing requires a selected physical device; enumeration alone is insufficient.
@@ -504,7 +625,9 @@ pub fn assess_resources(
         _ => false,
     };
     Ok(ResourceAssessment {
-        source_bytes, mode, device: device.to_owned(),
+        source_bytes,
+        mode,
+        device: device.to_owned(),
         available_ram_bytes: free_ram,
         free_disk_bytes: free_volume,
         ram_safety_budget_bytes: ram,
@@ -524,7 +647,10 @@ pub fn assess_resources(
 /// Read-only command entry point: model probe + host snapshot.
 /// Model variants and target tool support are still unverified.
 pub fn resource_plan(
-    input: &Path, output_parent: &Path, mode: ResourceMode, device: &str
+    input: &Path,
+    output_parent: &Path,
+    mode: ResourceMode,
+    device: &str,
 ) -> io::Result<Value> {
     let model = probe_model(input)?;
     let mut result = assess_resources(model.bytes, output_parent, mode, device)?.as_json();
@@ -558,23 +684,37 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["vendor"], "intel");
         assert_eq!(rows[0]["device_index"], 0);
-        assert_eq!(rows[0]["free_vram_bytes"], (20118.5 * 1024.0 * 1024.0) as u64);
+        assert_eq!(
+            rows[0]["free_vram_bytes"],
+            (20118.5 * 1024.0 * 1024.0) as u64
+        );
         assert!(parse_xpu_csv("0, Intel Arc, N/A, N/A\n").is_empty());
         assert!(parse_xpu_csv("0, Intel Arc, 24000, NaN\n").is_empty());
     }
     #[test]
     fn insufficient_and_unknown_resources_do_not_pass() {
         let base = ResourceAssessment {
-            source_bytes: 1, mode: ResourceMode::Hqq, device: "xpu".into(),
-            available_ram_bytes: Some(100), free_disk_bytes: Some(100),
-            ram_safety_budget_bytes: Some(1), scratch_safety_budget_bytes: 1,
-            gpu_devices: vec![], ram_safe: Some(true), disk_safe: Some(true),
-            device_measured: false, output_parent: ".".into(),
+            source_bytes: 1,
+            mode: ResourceMode::Hqq,
+            device: "xpu".into(),
+            available_ram_bytes: Some(100),
+            free_disk_bytes: Some(100),
+            ram_safety_budget_bytes: Some(1),
+            scratch_safety_budget_bytes: 1,
+            gpu_devices: vec![],
+            ram_safe: Some(true),
+            disk_safe: Some(true),
+            device_measured: false,
+            output_parent: ".".into(),
         };
         assert_eq!(base.status(), "unverified");
         assert!(base.enforce(false).is_err());
         assert!(base.enforce(true).is_ok());
-        let failed = ResourceAssessment {disk_safe: Some(false), device_measured: true, ..base};
+        let failed = ResourceAssessment {
+            disk_safe: Some(false),
+            device_measured: true,
+            ..base
+        };
         assert_eq!(failed.status(), "budget_below_policy");
         assert!(failed.enforce(false).is_err());
         assert_eq!(failed.as_json()["predicted_peak_ram_bytes"], Value::Null);

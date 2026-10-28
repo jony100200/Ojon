@@ -1,15 +1,14 @@
 //! Common CLI helpers and usage text.
 
-use ojon_backend::{
-    prepare_gguf, BackendId, GgufSummary, Precision, QuantizePlan,
-};
+use ojon_backend::{prepare_gguf, BackendId, GgufSummary, Precision, QuantizePlan};
 use std::ffi::OsString;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 pub fn usage() {
-    eprintln!(r#"Ojon (ওজন) — native quantization backend (early development)
+    eprintln!(
+        r#"Ojon (ওজন) — native quantization backend (early development)
 
 Commands:
   ojon inspect   <model.gguf>
@@ -159,38 +158,80 @@ Important:
     Conversion and inspection require explicit --confirm. No image/video quality is implied.
   - RCO searches an EXISTING upstream per-bit GPTQ database; it does not create that database yet.
   - GSQ/RCO assembly must be explicitly requested. Their artifacts are NOT guaranteed GGUF or load-tested.
-"#);
+"#
+    );
 }
 pub fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::InvalidInput, message.into())
 }
-pub fn next_argument(iter: &mut impl Iterator<Item = OsString>, label: &str) -> io::Result<OsString> {
-    iter.next().ok_or_else(|| invalid(format!("missing {label}")))
+pub fn next_argument(
+    iter: &mut impl Iterator<Item = OsString>,
+    label: &str,
+) -> io::Result<OsString> {
+    iter.next()
+        .ok_or_else(|| invalid(format!("missing {label}")))
 }
 pub fn show_gguf(path: &Path, info: &GgufSummary) {
     println!("path: {}", path.display());
-    println!("format: GGUF v{} ({})", info.version, if info.big_endian { "big-endian" } else { "little-endian" });
-    println!("model: {}", info.model_name.as_deref().unwrap_or("(not specified)"));
-    println!("architecture: {}", info.architecture.as_deref().unwrap_or("(not specified)"));
+    println!(
+        "format: GGUF v{} ({})",
+        info.version,
+        if info.big_endian {
+            "big-endian"
+        } else {
+            "little-endian"
+        }
+    );
+    println!(
+        "model: {}",
+        info.model_name.as_deref().unwrap_or("(not specified)")
+    );
+    println!(
+        "architecture: {}",
+        info.architecture.as_deref().unwrap_or("(not specified)")
+    );
     println!("file_bytes: {}", info.file_bytes);
     println!("tensors: {}", info.tensor_count);
     println!("metadata_entries: {}", info.metadata_count);
     println!("tensor_data_offset: {}", info.data_offset);
     println!("alignment: {}", info.alignment);
-    println!("general.file_type: {}", info.file_type.map(|n| n.to_string()).unwrap_or_else(|| "unknown".into()));
+    println!(
+        "general.file_type: {}",
+        info.file_type
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "unknown".into())
+    );
 }
 pub fn show_plan(plan: &QuantizePlan) {
     println!("adapter: llama.cpp-quantize (external executable)");
     println!("source: {}", plan.source.display());
     println!("source_bytes: {}", plan.source_info.file_bytes);
-    println!("source_architecture: {}", plan.source_info.architecture.as_deref().unwrap_or("unknown; backend determines compatibility"));
+    println!(
+        "source_architecture: {}",
+        plan.source_info
+            .architecture
+            .as_deref()
+            .unwrap_or("unknown; backend determines compatibility")
+    );
     println!("output: {}", plan.output.display());
     println!("precision: {}", plan.precision);
-    if let Some(ot) = &plan.output_tensor_type { println!("output_tensor_type: {ot}"); }
-    if let Some(et) = &plan.token_embedding_type { println!("token_embedding_type: {et}"); }
-    if let Some(tf) = &plan.tensor_type_file { println!("tensor_type_file: {}", tf.display()); }
+    if let Some(ot) = &plan.output_tensor_type {
+        println!("output_tensor_type: {ot}");
+    }
+    if let Some(et) = &plan.token_embedding_type {
+        println!("token_embedding_type: {et}");
+    }
+    if let Some(tf) = &plan.tensor_type_file {
+        println!("tensor_type_file: {}", tf.display());
+    }
     println!("threads: {}", plan.threads);
-    println!("importance_matrix: {}", plan.imatrix.as_ref().map(|p|p.display().to_string()).unwrap_or_else(||"none".into()));
+    println!(
+        "importance_matrix: {}",
+        plan.imatrix
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "none".into())
+    );
     println!("tool: {}", plan.executable.display());
     println!("peak_ram: UNKNOWN (depends on backend/model)");
     println!("peak_vram: UNKNOWN (typically CPU quantization, backend dependent)");
@@ -209,43 +250,87 @@ pub fn parse_plan(mut args: impl Iterator<Item = OsString>) -> io::Result<Quanti
     let mut max_buffer: Option<u32> = None;
     let mut tool = ojon_backend::discovered_path(BackendId::LlamaQuantize)
         .unwrap_or_else(|| PathBuf::from("llama-quantize"));
-    let mut threads = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(4);
+    let mut threads = std::thread::available_parallelism()
+        .map(|x| x.get())
+        .unwrap_or(4);
     while let Some(option) = args.next() {
         match option.to_str() {
             Some("--precision") => {
                 let value = next_argument(&mut args, "precision value")?;
-                let s = value.to_str().ok_or_else(|| invalid("precision must be text"))?;
+                let s = value
+                    .to_str()
+                    .ok_or_else(|| invalid("precision must be text"))?;
                 precision = Precision::from_str(s).map_err(invalid)?;
             }
-            Some("--tool") => tool = PathBuf::from(next_argument(&mut args, "quantizer executable path")?),
-            Some("--imatrix") => matrix = Some(PathBuf::from(next_argument(&mut args, "importance matrix file")?)),
-            Some("--tensor-type-file") => tensor_types = Some(PathBuf::from(next_argument(&mut args, "tensor type file")?)),
+            Some("--tool") => {
+                tool = PathBuf::from(next_argument(&mut args, "quantizer executable path")?)
+            }
+            Some("--imatrix") => {
+                matrix = Some(PathBuf::from(next_argument(
+                    &mut args,
+                    "importance matrix file",
+                )?))
+            }
+            Some("--tensor-type-file") => {
+                tensor_types = Some(PathBuf::from(next_argument(&mut args, "tensor type file")?))
+            }
             Some("--output-tensor-type") => {
                 let val = next_argument(&mut args, "output tensor type")?;
-                output_type = Some(val.to_str().ok_or_else(|| invalid("invalid output tensor type"))?.to_owned());
+                output_type = Some(
+                    val.to_str()
+                        .ok_or_else(|| invalid("invalid output tensor type"))?
+                        .to_owned(),
+                );
             }
             Some("--token-embedding-type") => {
                 let val = next_argument(&mut args, "token embedding type")?;
-                embed_type = Some(val.to_str().ok_or_else(|| invalid("invalid token embedding type"))?.to_owned());
+                embed_type = Some(
+                    val.to_str()
+                        .ok_or_else(|| invalid("invalid token embedding type"))?
+                        .to_owned(),
+                );
             }
             Some("--max-buffer-size") => {
                 let val = next_argument(&mut args, "max buffer size in MiB")?;
-                max_buffer = Some(val.to_str().ok_or_else(|| invalid("invalid buffer size"))?
-                    .parse().map_err(|_| invalid("invalid buffer size integer"))?);
+                max_buffer = Some(
+                    val.to_str()
+                        .ok_or_else(|| invalid("invalid buffer size"))?
+                        .parse()
+                        .map_err(|_| invalid("invalid buffer size integer"))?,
+                );
             }
             Some("--threads") => {
                 let value = next_argument(&mut args, "thread count")?;
-                let s = value.to_str().ok_or_else(|| invalid("thread count must be text"))?;
-                threads = s.parse::<usize>().map_err(|_| invalid("thread count must be a positive integer"))?;
+                let s = value
+                    .to_str()
+                    .ok_or_else(|| invalid("thread count must be text"))?;
+                threads = s
+                    .parse::<usize>()
+                    .map_err(|_| invalid("thread count must be a positive integer"))?;
             }
-            _ => return Err(invalid(format!("unknown option: {}", option.to_string_lossy()))),
+            _ => {
+                return Err(invalid(format!(
+                    "unknown option: {}",
+                    option.to_string_lossy()
+                )))
+            }
         }
     }
     let mut plan = prepare_gguf(&source, &output, &tool, precision, threads)?;
-    if let Some(path) = &matrix { plan = plan.with_imatrix(path)?; }
-    if let Some(path) = &tensor_types { plan = plan.with_tensor_type_file(path)?; }
-    if let Some(ot) = &output_type { plan = plan.with_output_tensor_type(ot)?; }
-    if let Some(et) = &embed_type { plan = plan.with_token_embedding_type(et)?; }
-    if let Some(mb) = max_buffer { plan = plan.with_max_buffer_mib(mb)?; }
+    if let Some(path) = &matrix {
+        plan = plan.with_imatrix(path)?;
+    }
+    if let Some(path) = &tensor_types {
+        plan = plan.with_tensor_type_file(path)?;
+    }
+    if let Some(ot) = &output_type {
+        plan = plan.with_output_tensor_type(ot)?;
+    }
+    if let Some(et) = &embed_type {
+        plan = plan.with_token_embedding_type(et)?;
+    }
+    if let Some(mb) = max_buffer {
+        plan = plan.with_max_buffer_mib(mb)?;
+    }
     Ok(plan)
 }

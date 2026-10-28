@@ -9,12 +9,12 @@
 //! - Checks local model files and Python executable without side effects.
 //! - Does not overwrite existing output directories.
 
-use crate::jobs::run_with_log;
 use crate::gguf::inspect_gguf;
 use crate::hf::inspect_hf_folder;
+use crate::jobs::run_with_log;
 use crate::resource::{assess_resources, ResourceMode};
-use std::fs;
 use serde_json::{json, Value};
+use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -40,7 +40,9 @@ impl AutoRoundDevice {
             "xpu" | "intel" => Ok(AutoRoundDevice::Xpu),
             "cuda" | "nvidia" => Ok(AutoRoundDevice::Cuda),
             "cpu" => Ok(AutoRoundDevice::Cpu),
-            _ => Err(bad_input(format!("unsupported device: {s}; must be 'xpu', 'cuda', or 'cpu'"))),
+            _ => Err(bad_input(format!(
+                "unsupported device: {s}; must be 'xpu', 'cuda', or 'cpu'"
+            ))),
         }
     }
 
@@ -116,8 +118,9 @@ pub fn prepare_autoround_plan(
     seqlen: u32,
 ) -> io::Result<AutoRoundPlan> {
     // Preserve existing API and GUI calls: 0-iteration optimized RTN by default.
-    prepare_autoround_recipe_plan(model_dir, output_dir, bits, device_str,
-        python, nsamples, seqlen, None, 0, None)
+    prepare_autoround_recipe_plan(
+        model_dir, output_dir, bits, device_str, python, nsamples, seqlen, None, 0, None,
+    )
 }
 
 /// Explicit paper-backed recipe: local original HF -> experimental GGUF export.
@@ -136,11 +139,17 @@ pub fn prepare_autoround_recipe_plan(
     dataset: Option<&Path>,
 ) -> io::Result<AutoRoundPlan> {
     if !model_dir.is_dir() {
-        return Err(bad_input(format!("model directory does not exist: {}", model_dir.display())));
+        return Err(bad_input(format!(
+            "model directory does not exist: {}",
+            model_dir.display()
+        )));
     }
     let model_dir = model_dir.canonicalize()?;
     if !model_dir.join("config.json").is_file() {
-        return Err(bad_input(format!("model directory lacks config.json: {}", model_dir.display())));
+        return Err(bad_input(format!(
+            "model directory lacks config.json: {}",
+            model_dir.display()
+        )));
     }
 
     let default_format = match bits {
@@ -149,21 +158,32 @@ pub fn prepare_autoround_recipe_plan(
         4 => "gguf:q4_k_m",
         5 => "gguf:q5_k_m",
         6 => "gguf:q6_k",
-        8 => "gguf:q8_0",  // Explicit legacy opt-in only, never a default.
-        _ => return Err(bad_input("unsupported AutoRound bit width (2, 3, 4, 5, 6 or 8)")),
+        8 => "gguf:q8_0", // Explicit legacy opt-in only, never a default.
+        _ => {
+            return Err(bad_input(
+                "unsupported AutoRound bit width (2, 3, 4, 5, 6 or 8)",
+            ))
+        }
     };
-    let selected = requested_format.unwrap_or(default_format).to_ascii_lowercase();
-    let format_bits = match selected.as_str() {
-        "gguf:q2_k_s" => 2,
-        "gguf:q3_k_s" | "gguf:q3_k_m" | "gguf:q3_k_l" => 3,
-        "gguf:q4_k_s" | "gguf:q4_k_m" | "gguf:q4_0" | "gguf:q4_1" => 4,
-        "gguf:q5_k_s" | "gguf:q5_k_m" | "gguf:q5_0" | "gguf:q5_1" => 5,
-        "gguf:q6_k" => 6,
-        "gguf:q8_0" => 8,
-        _ => return Err(bad_input("unsupported AutoRound GGUF export format; check upstream 'auto_round list format'")),
-    };
+    let selected = requested_format
+        .unwrap_or(default_format)
+        .to_ascii_lowercase();
+    let format_bits =
+        match selected.as_str() {
+            "gguf:q2_k_s" => 2,
+            "gguf:q3_k_s" | "gguf:q3_k_m" | "gguf:q3_k_l" => 3,
+            "gguf:q4_k_s" | "gguf:q4_k_m" | "gguf:q4_0" | "gguf:q4_1" => 4,
+            "gguf:q5_k_s" | "gguf:q5_k_m" | "gguf:q5_0" | "gguf:q5_1" => 5,
+            "gguf:q6_k" => 6,
+            "gguf:q8_0" => 8,
+            _ => return Err(bad_input(
+                "unsupported AutoRound GGUF export format; check upstream 'auto_round list format'",
+            )),
+        };
     if format_bits != bits {
-        return Err(bad_input(format!("bits={bits} does not match export format {selected}")));
+        return Err(bad_input(format!(
+            "bits={bits} does not match export format {selected}"
+        )));
     }
     if iters > 1000 {
         return Err(bad_input("AutoRound iterations must be in 0..=1000"));
@@ -174,13 +194,23 @@ pub fn prepare_autoround_recipe_plan(
     let dataset = if let Some(dataset) = dataset {
         let resolved = dataset.canonicalize()?;
         if !resolved.is_file() || fs::metadata(&resolved)?.len() == 0 {
-            return Err(bad_input("calibration dataset must be a nonempty local file"));
+            return Err(bad_input(
+                "calibration dataset must be a nonempty local file",
+            ));
         }
-        if !resolved.extension().and_then(|s| s.to_str()).is_some_and(|s| s.eq_ignore_ascii_case("json")) {
-            return Err(bad_input("AutoRound local calibration input must be a .json file"));
+        if !resolved
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case("json"))
+        {
+            return Err(bad_input(
+                "AutoRound local calibration input must be a .json file",
+            ));
         }
         Some(resolved)
-    } else { None };
+    } else {
+        None
+    };
     let device = AutoRoundDevice::parse(device_str)?;
 
     if !output_dir.is_absolute() {
@@ -189,20 +219,30 @@ pub fn prepare_autoround_recipe_plan(
     if output_dir.exists() {
         return Err(io::Error::new(
             ErrorKind::AlreadyExists,
-            format!("output directory already exists: {}; Ojon will not overwrite", output_dir.display()),
+            format!(
+                "output directory already exists: {}; Ojon will not overwrite",
+                output_dir.display()
+            ),
         ));
     }
-    let parent = output_dir.parent().ok_or_else(|| bad_input("output directory needs parent"))?;
+    let parent = output_dir
+        .parent()
+        .ok_or_else(|| bad_input("output directory needs parent"))?;
     if !parent.is_dir() {
         return Err(bad_input("output parent directory does not exist"));
     }
     if parent.canonicalize()?.starts_with(&model_dir) {
-        return Err(bad_input("output must be outside the original model directory"));
+        return Err(bad_input(
+            "output must be outside the original model directory",
+        ));
     }
 
     let python = if python.is_absolute() {
         if !python.is_file() {
-            return Err(bad_input(format!("Python executable does not exist: {}", python.display())));
+            return Err(bad_input(format!(
+                "Python executable does not exist: {}",
+                python.display()
+            )));
         }
         python.to_path_buf()
     } else {
@@ -259,18 +299,30 @@ pub fn run_autoround(plan: &AutoRoundPlan) -> io::Result<()> {
 }
 
 /// Like run_autoround but permits explicitly accepted resource uncertainty.
-pub fn run_autoround_with_policy(plan: &AutoRoundPlan, allow_resource_risk: bool) -> io::Result<()> {
+pub fn run_autoround_with_policy(
+    plan: &AutoRoundPlan,
+    allow_resource_risk: bool,
+) -> io::Result<()> {
     let source = inspect_hf_folder(&plan.model_dir)?;
-    let parent = plan.output_dir.parent().ok_or_else(|| bad_input("output has no parent"))?;
+    let parent = plan
+        .output_dir
+        .parent()
+        .ok_or_else(|| bad_input("output has no parent"))?;
     let preflight = assess_resources(
-        source.source_weight_bytes, parent, ResourceMode::AutoRound, plan.device.as_str()
+        source.source_weight_bytes,
+        parent,
+        ResourceMode::AutoRound,
+        plan.device.as_str(),
     )?;
     eprintln!("Ojon resource preflight: {}", preflight.as_json());
     preflight.enforce(allow_resource_risk)?;
     if plan.output_dir.exists() {
         return Err(io::Error::new(
             ErrorKind::AlreadyExists,
-            format!("output directory already exists: {}", plan.output_dir.display()),
+            format!(
+                "output directory already exists: {}",
+                plan.output_dir.display()
+            ),
         ));
     }
 
@@ -305,15 +357,24 @@ pub fn run_autoround_with_policy(plan: &AutoRoundPlan, allow_resource_risk: bool
         for entry in fs::read_dir(directory)? {
             discovered += 1;
             if discovered > 4096 {
-                return Err(io::Error::other("AutoRound output contains too many entries to validate safely"));
+                return Err(io::Error::other(
+                    "AutoRound output contains too many entries to validate safely",
+                ));
             }
             let entry = entry?;
             let filetype = entry.file_type()?;
-            if filetype.is_symlink() { continue; }
+            if filetype.is_symlink() {
+                continue;
+            }
             if filetype.is_dir() && depth < 2 {
                 directories.push((entry.path(), depth + 1));
-            } else if filetype.is_file() && entry.path().extension()
-                .and_then(|s| s.to_str()).is_some_and(|s| s.eq_ignore_ascii_case("gguf")) {
+            } else if filetype.is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.eq_ignore_ascii_case("gguf"))
+            {
                 inspect_gguf(&entry.path())?;
                 inspected += 1;
             }
@@ -332,39 +393,108 @@ mod tests {
     #[test]
     fn test_autoround_device_parse() {
         assert_eq!(AutoRoundDevice::parse("xpu").unwrap(), AutoRoundDevice::Xpu);
-        assert_eq!(AutoRoundDevice::parse("intel").unwrap(), AutoRoundDevice::Xpu);
-        assert_eq!(AutoRoundDevice::parse("cuda").unwrap(), AutoRoundDevice::Cuda);
+        assert_eq!(
+            AutoRoundDevice::parse("intel").unwrap(),
+            AutoRoundDevice::Xpu
+        );
+        assert_eq!(
+            AutoRoundDevice::parse("cuda").unwrap(),
+            AutoRoundDevice::Cuda
+        );
         assert_eq!(AutoRoundDevice::parse("cpu").unwrap(), AutoRoundDevice::Cpu);
         assert!(AutoRoundDevice::parse("tpu").is_err());
     }
 
-
     #[test]
     fn test_research_gguf_formats_and_local_calibration() {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let id = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let root = std::env::temp_dir().join(format!("ojon-ar-{id}-{}", std::process::id()));
         let model = root.join("source");
         fs::create_dir_all(&model).unwrap();
         fs::write(model.join("config.json"), "{}").unwrap();
         let out = root.join("out");
-        let rt = prepare_autoround_recipe_plan(&model, &out, 4, "cpu",
-            Path::new("python"), 128, 2048, None, 0, None).unwrap();
+        let rt = prepare_autoround_recipe_plan(
+            &model,
+            &out,
+            4,
+            "cpu",
+            Path::new("python"),
+            128,
+            2048,
+            None,
+            0,
+            None,
+        )
+        .unwrap();
         assert_eq!(rt.format, "gguf:q4_k_m");
-        assert!(rt.arguments.windows(2).any(|w| w[0] == "--iters" && w[1] == "0"));
+        assert!(rt
+            .arguments
+            .windows(2)
+            .any(|w| w[0] == "--iters" && w[1] == "0"));
         let path = root.join("calibration.json");
         fs::write(&path, "[]").unwrap();
-        let calibrated = prepare_autoround_recipe_plan(&model, &out, 5, "xpu",
-            Path::new("python"), 128, 2048, Some("gguf:q5_k_m"), 200, Some(&path)).unwrap();
+        let calibrated = prepare_autoround_recipe_plan(
+            &model,
+            &out,
+            5,
+            "xpu",
+            Path::new("python"),
+            128,
+            2048,
+            Some("gguf:q5_k_m"),
+            200,
+            Some(&path),
+        )
+        .unwrap();
         assert_eq!(calibrated.format, "gguf:q5_k_m");
         assert_eq!(calibrated.json()["method"], "calibrated_auto_round");
-        assert!(calibrated.arguments.windows(2).any(|w| w.first().map(String::as_str) == Some("--dataset")));
-        assert!(prepare_autoround_recipe_plan(&model, &out, 4, "cpu",
-            Path::new("python"), 128, 2048, Some("auto_round:gguf"), 0, None).is_err());
-        assert!(prepare_autoround_recipe_plan(&model, &out, 4, "cpu",
-            Path::new("python"), 128, 2048, Some("gguf:q5_k_m"), 0, None).is_err());
-        assert!(prepare_autoround_recipe_plan(&model, &out, 4, "cpu",
-            Path::new("python"), 128, 2048, None, 200, None).is_err());
+        assert!(calibrated
+            .arguments
+            .windows(2)
+            .any(|w| w.first().map(String::as_str) == Some("--dataset")));
+        assert!(prepare_autoround_recipe_plan(
+            &model,
+            &out,
+            4,
+            "cpu",
+            Path::new("python"),
+            128,
+            2048,
+            Some("auto_round:gguf"),
+            0,
+            None
+        )
+        .is_err());
+        assert!(prepare_autoround_recipe_plan(
+            &model,
+            &out,
+            4,
+            "cpu",
+            Path::new("python"),
+            128,
+            2048,
+            Some("gguf:q5_k_m"),
+            0,
+            None
+        )
+        .is_err());
+        assert!(prepare_autoround_recipe_plan(
+            &model,
+            &out,
+            4,
+            "cpu",
+            Path::new("python"),
+            128,
+            2048,
+            None,
+            200,
+            None
+        )
+        .is_err());
         let _ = fs::remove_dir_all(root);
     }
     #[test]

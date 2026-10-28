@@ -189,7 +189,10 @@ pub fn audit_referenced_paths(val: &Value) -> (usize, usize) {
         }
         for line in text.lines() {
             let trimmed = line.trim();
-            if let Some(rest) = trimmed.strip_prefix("FILES:").or_else(|| trimmed.strip_prefix("File:")) {
+            if let Some(rest) = trimmed
+                .strip_prefix("FILES:")
+                .or_else(|| trimmed.strip_prefix("File:"))
+            {
                 for p in rest.split(',') {
                     check_path_str(p.trim(), live, dead);
                 }
@@ -316,7 +319,10 @@ impl DatasetEntry {
             if let Some(msgs) = obj.get("messages").and_then(Value::as_array) {
                 for msg in msgs {
                     let role = msg.get("role").and_then(Value::as_str).unwrap_or_default();
-                    let content = msg.get("content").and_then(Value::as_str).unwrap_or_default();
+                    let content = msg
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
                     if role == "user" && instruction.is_empty() {
                         instruction = content.to_string();
                     } else if (role == "assistant" || role == "model") && output.is_empty() {
@@ -396,7 +402,10 @@ impl DatasetEntry {
         let liveness_factor = calculate_liveness_factor(live_refs, dead_refs);
 
         // Composite Quality Score
-        let base_score = obj.get("quality_score").and_then(Value::as_f64).unwrap_or(0.85);
+        let base_score = obj
+            .get("quality_score")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.85);
         let tombstone_mult = if is_superseded { 0.0 } else { 1.0 };
         let composite_score = base_score * liveness_factor * decay_factor * tombstone_mult;
 
@@ -692,8 +701,8 @@ pub fn prepare_distill_plan(
 
     // Write manifest
     let manifest_path = output_dir.join("distill_plan.json");
-    let manifest_json = serde_json::to_string_pretty(&plan.json())
-        .map_err(|err| bad_input(err.to_string()))?;
+    let manifest_json =
+        serde_json::to_string_pretty(&plan.json()).map_err(|err| bad_input(err.to_string()))?;
     fs::write(manifest_path, manifest_json)?;
 
     Ok(plan)
@@ -757,7 +766,9 @@ pub fn retrieve_recipes(
         .collect();
 
     if query_tokens.is_empty() {
-        return Err(bad_input("query must contain at least one token (length >= 2)"));
+        return Err(bad_input(
+            "query must contain at least one token (length >= 2)",
+        ));
     }
 
     let mut matches = Vec::new();
@@ -801,7 +812,11 @@ pub fn retrieve_recipes(
             if final_score >= min_score {
                 matches.push(RecipeMatch {
                     id: e.id,
-                    title: if e.title.is_empty() { e.instruction.clone() } else { e.title },
+                    title: if e.title.is_empty() {
+                        e.instruction.clone()
+                    } else {
+                        e.title
+                    },
                     tier: e.tier.as_str(),
                     match_score: final_score,
                     liveness_factor: e.liveness_factor,

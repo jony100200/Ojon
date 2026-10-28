@@ -93,7 +93,10 @@ pub struct RollbackReceipt {
 /// Calculate a deterministic SHA-256 hex hash of file contents.
 pub fn hash_file_contents(path: &Path) -> io::Result<String> {
     let bytes = fs::read(path)?;
-    Ok(format!("sha256:{}", crate::learn::knowledge::sha256_hex(&bytes)))
+    Ok(format!(
+        "sha256:{}",
+        crate::learn::knowledge::sha256_hex(&bytes)
+    ))
 }
 
 /// Verify package manifest, payload existence, SHA-256 content hash, and optional base-model compatibility.
@@ -122,7 +125,11 @@ pub fn verify_package_integrity(
 
     if let (Some(expected), Some(required)) = (
         expected_base_model.map(str::trim).filter(|s| !s.is_empty()),
-        manifest.base_model_compatibility.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+        manifest
+            .base_model_compatibility
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
     ) {
         let exp_low = expected.to_ascii_lowercase();
         let req_low = required.to_ascii_lowercase();
@@ -362,9 +369,12 @@ pub fn install_package_for_model(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let staging_dir = base_install_root
-        .join("staging")
-        .join(format!("{}_{}_{}", kind_str, std::process::id(), now_nanos));
+    let staging_dir = base_install_root.join("staging").join(format!(
+        "{}_{}_{}",
+        kind_str,
+        std::process::id(),
+        now_nanos
+    ));
 
     if staging_dir.exists() {
         fs::remove_dir_all(&staging_dir)?;
@@ -385,7 +395,8 @@ pub fn install_package_for_model(
     }
 
     // 2. If an active package exists, archive it into rollback directory
-    let had_previous = active_dir.is_dir() && active_dir.join("ojon_package_manifest.json").is_file();
+    let had_previous =
+        active_dir.is_dir() && active_dir.join("ojon_package_manifest.json").is_file();
     if had_previous {
         if rollback_dir.exists() {
             fs::remove_dir_all(&rollback_dir)?;
@@ -418,7 +429,11 @@ pub fn install_package_for_model(
         kind: manifest.kind,
         active_path: active_dir,
         rollback_available: had_previous,
-        rollback_path: if had_previous { Some(rollback_dir) } else { None },
+        rollback_path: if had_previous {
+            Some(rollback_dir)
+        } else {
+            None
+        },
         installed_at_epoch_s: now,
     };
 
@@ -453,7 +468,10 @@ pub fn list_active_packages(base_install_root: &Path) -> io::Result<Vec<PackageM
 }
 
 /// Roll back to the previous working package of the specified kind.
-pub fn rollback_package(kind: PackageKind, base_install_root: &Path) -> io::Result<RollbackReceipt> {
+pub fn rollback_package(
+    kind: PackageKind,
+    base_install_root: &Path,
+) -> io::Result<RollbackReceipt> {
     let kind_str = kind.as_str();
     let active_dir = base_install_root.join("active").join(kind_str);
     let rollback_dir = base_install_root.join("rollback").join(kind_str);
@@ -465,7 +483,8 @@ pub fn rollback_package(kind: PackageKind, base_install_root: &Path) -> io::Resu
         )));
     }
 
-    let rollback_manifest_text = fs::read_to_string(rollback_dir.join("ojon_package_manifest.json"))?;
+    let rollback_manifest_text =
+        fs::read_to_string(rollback_dir.join("ojon_package_manifest.json"))?;
     let manifest: PackageManifest = serde_json::from_str(&rollback_manifest_text)
         .map_err(|e| bad_input(format!("Corrupt rollback manifest: {e}")))?;
 
@@ -504,7 +523,10 @@ mod tests {
     fn test_knowledge_pack_lifecycle_and_rollback() {
         let temp_root = std::env::temp_dir().join(format!(
             "ojon_pkg_test_{}",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let pkg_v1_dir = temp_root.join("src_pkg_v1");
         let pkg_v2_dir = temp_root.join("src_pkg_v2");
@@ -512,8 +534,16 @@ mod tests {
         let dummy_facts_v2 = temp_root.join("facts_v2.jsonl");
 
         fs::create_dir_all(&temp_root).unwrap();
-        fs::write(&dummy_facts_v1, "{\"item_id\":\"fact-1\",\"content\":\"v1 content\"}\n").unwrap();
-        fs::write(&dummy_facts_v2, "{\"item_id\":\"fact-1\",\"content\":\"v2 content\"}\n").unwrap();
+        fs::write(
+            &dummy_facts_v1,
+            "{\"item_id\":\"fact-1\",\"content\":\"v1 content\"}\n",
+        )
+        .unwrap();
+        fs::write(
+            &dummy_facts_v2,
+            "{\"item_id\":\"fact-1\",\"content\":\"v2 content\"}\n",
+        )
+        .unwrap();
 
         // 1. Create Knowledge Pack v1.0.0
         let m1 = create_knowledge_pack(
@@ -555,7 +585,10 @@ mod tests {
         assert!(receipt2.rollback_available); // v1.0.0 preserved in rollback
 
         // Verify active directory has v2
-        let active_manifest = fs::read_to_string(install_root.join("active/knowledge_pack/ojon_package_manifest.json")).unwrap();
+        let active_manifest = fs::read_to_string(
+            install_root.join("active/knowledge_pack/ojon_package_manifest.json"),
+        )
+        .unwrap();
         assert!(active_manifest.contains("\"version\": \"2.0.0\""));
 
         // 4. Trigger atomic Rollback
@@ -564,7 +597,10 @@ mod tests {
         assert_eq!(rb_receipt.restored_version, "1.0.0");
 
         // Verify active directory was restored back to v1.0.0
-        let restored_manifest = fs::read_to_string(install_root.join("active/knowledge_pack/ojon_package_manifest.json")).unwrap();
+        let restored_manifest = fs::read_to_string(
+            install_root.join("active/knowledge_pack/ojon_package_manifest.json"),
+        )
+        .unwrap();
         assert!(restored_manifest.contains("\"version\": \"1.0.0\""));
 
         let _ = fs::remove_dir_all(&temp_root);
@@ -574,7 +610,10 @@ mod tests {
     fn test_corrupted_package_and_incompatible_base_model_rejected_before_touching_active() {
         let temp_root = std::env::temp_dir().join(format!(
             "ojon_pkg_tamper_{}",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(&temp_root).unwrap();
         let install_root = temp_root.join("install");

@@ -208,7 +208,10 @@ impl LearnTrainPlan {
             .collect();
 
         let quant_str = match self.quantization_bit {
-            Some(b) => format!("quantization_bit: {}\nquantization_method: bitsandbytes\n", b),
+            Some(b) => format!(
+                "quantization_bit: {}\nquantization_method: bitsandbytes\n",
+                b
+            ),
             None => "".to_string(),
         };
 
@@ -367,7 +370,12 @@ pub fn execute_training_plan(
 
     let receipt = TrainReceipt {
         schema: "ojon.learn.train_receipt.v1".to_string(),
-        status: if exit_status.success() { "completed" } else { "failed" }.to_string(),
+        status: if exit_status.success() {
+            "completed"
+        } else {
+            "failed"
+        }
+        .to_string(),
         base_model: plan.base_model_path.to_string_lossy().to_string(),
         dataset_dir: plan.dataset_dir.to_string_lossy().to_string(),
         output_dir: plan.output_dir.to_string_lossy().to_string(),
@@ -440,7 +448,8 @@ mod tests {
             Some(Some(4)),
         );
 
-        let receipt = execute_training_plan(&plan, true, None).expect("dry run execution should succeed");
+        let receipt =
+            execute_training_plan(&plan, true, None).expect("dry run execution should succeed");
         assert_eq!(receipt.status, "dry_run_success");
         assert!(receipt.simulated);
 

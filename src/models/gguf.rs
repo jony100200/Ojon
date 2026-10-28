@@ -51,38 +51,38 @@ pub fn ggml_type_name(storage_type: u32) -> &'static str {
 /// Returns `(block_elements, block_bytes)` for standard GGML storage types.
 pub fn ggml_type_block_info(storage_type: u32) -> Option<(u64, u64)> {
     match storage_type {
-        0 => Some((1, 4)),     // F32
-        1 => Some((1, 2)),     // F16
-        2 => Some((32, 18)),   // Q4_0
-        3 => Some((32, 20)),   // Q4_1
-        6 => Some((32, 22)),   // Q5_0
-        7 => Some((32, 24)),   // Q5_1
-        8 => Some((32, 34)),   // Q8_0
-        9 => Some((32, 36)),   // Q8_1
-        10 => Some((256, 84)), // Q2_K
-        11 => Some((256, 110)),// Q3_K
-        12 => Some((256, 144)),// Q4_K
-        13 => Some((256, 176)),// Q5_K
-        14 => Some((256, 210)),// Q6_K
-        15 => Some((256, 292)),// Q8_K
-        16 => Some((256, 66)), // IQ2_XXS
-        17 => Some((256, 74)), // IQ2_XS
-        18 => Some((256, 98)), // IQ3_XXS
-        19 => Some((256, 50)), // IQ1_S
-        20 => Some((32, 18)),  // IQ4_NL
-        21 => Some((256, 110)),// IQ3_S
-        22 => Some((256, 82)), // IQ2_S
-        23 => Some((256, 136)),// IQ4_XS
-        24 => Some((1, 1)),    // I8
-        25 => Some((1, 2)),    // I16
-        26 => Some((1, 4)),    // I32
-        27 => Some((1, 8)),    // I64
-        28 => Some((1, 8)),    // F64
-        29 => Some((256, 56)), // IQ1_M
-        30 => Some((1, 2)),    // BF16
-        34 => Some((256, 54)), // TQ1_0
-        35 => Some((256, 66)), // TQ2_0
-        39 => Some((32, 17)),  // MXFP4
+        0 => Some((1, 4)),      // F32
+        1 => Some((1, 2)),      // F16
+        2 => Some((32, 18)),    // Q4_0
+        3 => Some((32, 20)),    // Q4_1
+        6 => Some((32, 22)),    // Q5_0
+        7 => Some((32, 24)),    // Q5_1
+        8 => Some((32, 34)),    // Q8_0
+        9 => Some((32, 36)),    // Q8_1
+        10 => Some((256, 84)),  // Q2_K
+        11 => Some((256, 110)), // Q3_K
+        12 => Some((256, 144)), // Q4_K
+        13 => Some((256, 176)), // Q5_K
+        14 => Some((256, 210)), // Q6_K
+        15 => Some((256, 292)), // Q8_K
+        16 => Some((256, 66)),  // IQ2_XXS
+        17 => Some((256, 74)),  // IQ2_XS
+        18 => Some((256, 98)),  // IQ3_XXS
+        19 => Some((256, 50)),  // IQ1_S
+        20 => Some((32, 18)),   // IQ4_NL
+        21 => Some((256, 110)), // IQ3_S
+        22 => Some((256, 82)),  // IQ2_S
+        23 => Some((256, 136)), // IQ4_XS
+        24 => Some((1, 1)),     // I8
+        25 => Some((1, 2)),     // I16
+        26 => Some((1, 4)),     // I32
+        27 => Some((1, 8)),     // I64
+        28 => Some((1, 8)),     // F64
+        29 => Some((256, 56)),  // IQ1_M
+        30 => Some((1, 2)),     // BF16
+        34 => Some((256, 54)),  // TQ1_0
+        35 => Some((256, 66)),  // TQ2_0
+        39 => Some((32, 17)),   // MXFP4
         _ => None,
     }
 }
@@ -96,7 +96,11 @@ pub fn classify_tensor_role(name: &str) -> &'static str {
         "routed_expert"
     } else if name.contains("token_embd") || name == "output.weight" || name.contains("lm_head") {
         "embeddings_and_head"
-    } else if name.contains("norm") || name.ends_with(".bias") || name.contains("ssm_a") || name.contains("ssm_d") {
+    } else if name.contains("norm")
+        || name.ends_with(".bias")
+        || name.contains("ssm_a")
+        || name.contains("ssm_d")
+    {
         "norms_and_biases"
     } else if name.contains("attn_") || name.contains("ssm_") {
         "attention"
@@ -150,7 +154,11 @@ pub struct ModelTopology {
 }
 
 impl ModelTopology {
-    pub fn estimate_runtime_memory(&self, context_tokens: u32, batch_size: u32) -> RuntimeMemoryEstimate {
+    pub fn estimate_runtime_memory(
+        &self,
+        context_tokens: u32,
+        batch_size: u32,
+    ) -> RuntimeMemoryEstimate {
         let weights_bytes = self.payload_bytes;
         let blocks = (self.block_count as u64).max(1);
         let embd = self.embedding_length.max(512);
@@ -162,9 +170,7 @@ impl ModelTopology {
             .saturating_mul(2)
             .saturating_mul(context_tokens as u64);
         let moe_extra = if self.is_moe { 256 * 1024 * 1024 } else { 0 };
-        let compute_buffer_bytes = ((batch_size as u64)
-            .saturating_mul(embd)
-            .saturating_mul(32))
+        let compute_buffer_bytes = ((batch_size as u64).saturating_mul(embd).saturating_mul(32))
             .max(128 * 1024 * 1024)
             .saturating_add(moe_extra);
         let runtime_overhead_bytes = 384 * 1024 * 1024;
@@ -319,7 +325,10 @@ impl Reader {
         self.file.stream_position()
     }
     fn ensure(&mut self, bytes: u64) -> io::Result<()> {
-        let end = self.position()?.checked_add(bytes).ok_or_else(|| invalid("offset overflow"))?;
+        let end = self
+            .position()?
+            .checked_add(bytes)
+            .ok_or_else(|| invalid("offset overflow"))?;
         if end > self.size {
             return Err(invalid("GGUF metadata or tensor catalog is truncated"));
         }
@@ -332,18 +341,32 @@ impl Reader {
         Ok(buf)
     }
     #[allow(dead_code)]
-    fn u8(&mut self) -> io::Result<u8> { Ok(self.raw::<1>()?[0]) }
+    fn u8(&mut self) -> io::Result<u8> {
+        Ok(self.raw::<1>()?[0])
+    }
     fn u16(&mut self) -> io::Result<u16> {
         let b = self.raw::<2>()?;
-        Ok(if self.big_endian { u16::from_be_bytes(b) } else { u16::from_le_bytes(b) })
+        Ok(if self.big_endian {
+            u16::from_be_bytes(b)
+        } else {
+            u16::from_le_bytes(b)
+        })
     }
     fn u32(&mut self) -> io::Result<u32> {
         let b = self.raw::<4>()?;
-        Ok(if self.big_endian { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) })
+        Ok(if self.big_endian {
+            u32::from_be_bytes(b)
+        } else {
+            u32::from_le_bytes(b)
+        })
     }
     fn u64(&mut self) -> io::Result<u64> {
         let b = self.raw::<8>()?;
-        Ok(if self.big_endian { u64::from_be_bytes(b) } else { u64::from_le_bytes(b) })
+        Ok(if self.big_endian {
+            u64::from_be_bytes(b)
+        } else {
+            u64::from_le_bytes(b)
+        })
     }
     fn skip(&mut self, bytes: u64) -> io::Result<()> {
         self.ensure(bytes)?;
@@ -361,7 +384,9 @@ impl Reader {
         }
         let mut bytes = vec![0u8; n as usize];
         self.file.read_exact(&mut bytes)?;
-        String::from_utf8(bytes).map(Some).map_err(|_| invalid("invalid UTF-8 GGUF string"))
+        String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|_| invalid("invalid UTF-8 GGUF string"))
     }
     fn skip_value(&mut self, ty: u32) -> io::Result<()> {
         if ty == 8 {
@@ -373,7 +398,9 @@ impl Reader {
             let count = self.u64()?;
             if elem_type == 8 {
                 // Each string consumes at least its eight-byte length field.
-                if count > self.size / 8 { return Err(invalid("invalid GGUF string array length")); }
+                if count > self.size / 8 {
+                    return Err(invalid("invalid GGUF string array length"));
+                }
                 for _ in 0..count {
                     let len = self.u64()?;
                     self.skip(len)?;
@@ -382,7 +409,9 @@ impl Reader {
             }
             let width = scalar_width(elem_type)
                 .ok_or_else(|| invalid("unsupported GGUF array element type"))?;
-            let bytes = count.checked_mul(width).ok_or_else(|| invalid("GGUF array overflow"))?;
+            let bytes = count
+                .checked_mul(width)
+                .ok_or_else(|| invalid("GGUF array overflow"))?;
             return self.skip(bytes);
         }
         let width = scalar_width(ty).ok_or_else(|| invalid("unsupported GGUF metadata type"))?;
@@ -392,16 +421,17 @@ impl Reader {
 
 fn scalar_width(ty: u32) -> Option<u64> {
     match ty {
-        0 | 1 | 7 => Some(1),          // unsigned/signed byte, bool
-        2 | 3 => Some(2),              // uint16/int16
-        4 | 5 | 6 => Some(4),          // uint32/int32/f32
-        10 | 11 | 12 => Some(8),       // uint64/int64/f64
+        0 | 1 | 7 => Some(1),    // unsigned/signed byte, bool
+        2 | 3 => Some(2),        // uint16/int16
+        4 | 5 | 6 => Some(4),    // uint32/int32/f32
+        10 | 11 | 12 => Some(8), // uint64/int64/f64
         _ => None,
     }
 }
 fn align_up(pos: u64, align: u64) -> io::Result<u64> {
     let padding = (align - (pos % align)) % align;
-    pos.checked_add(padding).ok_or_else(|| invalid("alignment overflow"))
+    pos.checked_add(padding)
+        .ok_or_else(|| invalid("alignment overflow"))
 }
 
 /// Inspects a local GGUF file without allocating or loading model tensors.
@@ -411,10 +441,18 @@ fn align_up(pos: u64, align: u64) -> io::Result<u64> {
 /// require the actual target runtime and are NOT established here.
 fn inspect_gguf_inner(path: &Path, collect: bool) -> io::Result<(GgufSummary, Vec<GgufTensor>)> {
     let file = File::open(path)?;
-    if !fs::metadata(path)?.is_file() { return Err(invalid("not a regular file")); }
+    if !fs::metadata(path)?.is_file() {
+        return Err(invalid("not a regular file"));
+    }
     let size = file.metadata()?.len();
-    if size < 24 { return Err(invalid("GGUF file is shorter than its header")); }
-    let mut reader = Reader { file, size, big_endian: false };
+    if size < 24 {
+        return Err(invalid("GGUF file is shorter than its header"));
+    }
+    let mut reader = Reader {
+        file,
+        size,
+        big_endian: false,
+    };
     if &reader.raw::<4>()? != b"GGUF" {
         return Err(invalid("not a GGUF file (wrong magic)"));
     }
@@ -438,7 +476,9 @@ fn inspect_gguf_inner(path: &Path, collect: bool) -> io::Result<(GgufSummary, Ve
     let mut split_count = None;
     let mut alignment = 32u32;
     for _ in 0..metadata_count {
-        let key = reader.string(65_535)?.ok_or_else(|| invalid("oversized GGUF metadata key"))?;
+        let key = reader
+            .string(65_535)?
+            .ok_or_else(|| invalid("oversized GGUF metadata key"))?;
         let ty = reader.u32()?;
         match (key.as_str(), ty) {
             ("general.architecture", 8) => architecture = reader.string(256)?,
@@ -455,20 +495,38 @@ fn inspect_gguf_inner(path: &Path, collect: bool) -> io::Result<(GgufSummary, Ve
     let mut max_tensor_offset = 0u64;
     let mut tensors = Vec::new();
     for _ in 0..tensor_count {
-        let name=reader.string(4096)?.ok_or_else(|| invalid("oversized tensor name"))?;
-        let dimensions=reader.u32()?;
-        if !(1..=4).contains(&dimensions) {return Err(invalid("unsupported tensor dimension count"));}
-        let mut shape=Vec::new();
-        let mut elements=1u64;
-        for _ in 0..dimensions {
-            let dim=reader.u64()?;
-            if dim==0 {return Err(invalid("zero-sized tensor dimension"));}
-            elements=elements.checked_mul(dim).ok_or_else(||invalid("tensor elements overflow"))?;
-            if collect {shape.push(dim);}
+        let name = reader
+            .string(4096)?
+            .ok_or_else(|| invalid("oversized tensor name"))?;
+        let dimensions = reader.u32()?;
+        if !(1..=4).contains(&dimensions) {
+            return Err(invalid("unsupported tensor dimension count"));
         }
-        let storage_type=reader.u32()?;
+        let mut shape = Vec::new();
+        let mut elements = 1u64;
+        for _ in 0..dimensions {
+            let dim = reader.u64()?;
+            if dim == 0 {
+                return Err(invalid("zero-sized tensor dimension"));
+            }
+            elements = elements
+                .checked_mul(dim)
+                .ok_or_else(|| invalid("tensor elements overflow"))?;
+            if collect {
+                shape.push(dim);
+            }
+        }
+        let storage_type = reader.u32()?;
         let offset = reader.u64()?;
-        if collect {tensors.push(GgufTensor{name,elements,shape,storage_type,relative_offset:offset});}
+        if collect {
+            tensors.push(GgufTensor {
+                name,
+                elements,
+                shape,
+                storage_type,
+                relative_offset: offset,
+            });
+        }
         if offset % u64::from(alignment) != 0 {
             return Err(invalid("misaligned GGUF tensor offset"));
         }
@@ -476,16 +534,31 @@ fn inspect_gguf_inner(path: &Path, collect: bool) -> io::Result<(GgufSummary, Ve
     }
     let data_offset = align_up(reader.position()?, u64::from(alignment))?;
     if tensor_count > 0 {
-        let payload = data_offset.checked_add(max_tensor_offset)
+        let payload = data_offset
+            .checked_add(max_tensor_offset)
             .ok_or_else(|| invalid("GGUF tensor data offset overflow"))?;
-        if payload >= size { return Err(invalid("tensor payload offset outside GGUF file")); }
+        if payload >= size {
+            return Err(invalid("tensor payload offset outside GGUF file"));
+        }
     } else if data_offset > size {
         return Err(invalid("missing GGUF data section"));
     }
-    Ok((GgufSummary {
-        version, tensor_count, metadata_count, file_bytes: size,
-        architecture, model_name, file_type, data_offset, alignment, split_count, big_endian,
-    }, tensors))
+    Ok((
+        GgufSummary {
+            version,
+            tensor_count,
+            metadata_count,
+            file_bytes: size,
+            architecture,
+            model_name,
+            file_type,
+            data_offset,
+            alignment,
+            split_count,
+            big_endian,
+        },
+        tensors,
+    ))
 }
 
 pub fn inspect_gguf(path: &Path) -> io::Result<GgufSummary> {
@@ -497,54 +570,76 @@ pub fn inspect_gguf_tensors(path: &Path) -> io::Result<Vec<GgufTensor>> {
     Ok(inspect_gguf_inner(path, true)?.1)
 }
 
-
 /// For GGUF-format llama-imatrix files: read bounded F32 in_sum2 and counts
 /// arrays and derive the mean squared activation-energy proxy per tensor.
 /// This is a proxy, not measured post-quantization task sensitivity.
 pub fn read_imatrix_energy(path: &Path) -> io::Result<Vec<(String, f64)>> {
-    let summary=inspect_gguf(path)?;
-    if summary.big_endian {return Err(invalid("big-endian imatrix F32 unsupported"));}
-    let descriptors=inspect_gguf_tensors(path)?;
-    let mut sums=std::collections::HashMap::new();
-    let mut counts=std::collections::HashMap::new();
-    let mut file=File::open(path)?;
+    let summary = inspect_gguf(path)?;
+    if summary.big_endian {
+        return Err(invalid("big-endian imatrix F32 unsupported"));
+    }
+    let descriptors = inspect_gguf_tensors(path)?;
+    let mut sums = std::collections::HashMap::new();
+    let mut counts = std::collections::HashMap::new();
+    let mut file = File::open(path)?;
     for tensor in descriptors {
-        let (name,is_sum)=if let Some(base)=tensor.name.strip_suffix(".in_sum2"){
-            (base.to_owned(),true)
-        }else if let Some(base)=tensor.name.strip_suffix(".counts"){
-            (base.to_owned(),false)
-        }else{continue;};
-        if tensor.storage_type!=0 || tensor.elements>2_000_000 {
-            return Err(invalid("importance matrix requires bounded F32 tensor arrays"));
+        let (name, is_sum) = if let Some(base) = tensor.name.strip_suffix(".in_sum2") {
+            (base.to_owned(), true)
+        } else if let Some(base) = tensor.name.strip_suffix(".counts") {
+            (base.to_owned(), false)
+        } else {
+            continue;
+        };
+        if tensor.storage_type != 0 || tensor.elements > 2_000_000 {
+            return Err(invalid(
+                "importance matrix requires bounded F32 tensor arrays",
+            ));
         }
-        let len=tensor.elements.checked_mul(4).ok_or_else(||invalid("imatrix overflow"))?;
-        let offset=summary.data_offset.checked_add(tensor.relative_offset)
-            .ok_or_else(||invalid("imatrix offset overflow"))?;
-        if offset.checked_add(len).is_none_or(|end|end>summary.file_bytes){
+        let len = tensor
+            .elements
+            .checked_mul(4)
+            .ok_or_else(|| invalid("imatrix overflow"))?;
+        let offset = summary
+            .data_offset
+            .checked_add(tensor.relative_offset)
+            .ok_or_else(|| invalid("imatrix offset overflow"))?;
+        if offset
+            .checked_add(len)
+            .is_none_or(|end| end > summary.file_bytes)
+        {
             return Err(invalid("truncated imatrix tensor"));
         }
         file.seek(SeekFrom::Start(offset))?;
-        let mut bytes=[0u8;4];
-        let mut total=0.0f64;
+        let mut bytes = [0u8; 4];
+        let mut total = 0.0f64;
         for _ in 0..tensor.elements {
             file.read_exact(&mut bytes)?;
-            let sample=f32::from_le_bytes(bytes) as f64;
-            if !sample.is_finite()||sample<0.0{return Err(invalid("invalid imatrix F32 energy/count"));}
-            total+=sample;
+            let sample = f32::from_le_bytes(bytes) as f64;
+            if !sample.is_finite() || sample < 0.0 {
+                return Err(invalid("invalid imatrix F32 energy/count"));
+            }
+            total += sample;
         }
-        if is_sum {sums.insert(name,(total,tensor.elements));}
-        else {counts.insert(name,total);}
+        if is_sum {
+            sums.insert(name, (total, tensor.elements));
+        } else {
+            counts.insert(name, total);
+        }
     }
-    let mut result=Vec::new();
-    for (name,(sum,nval)) in sums {
-        if let Some(count)=counts.get(&name) {
-            if *count>0.0&&nval>0 {
-                let energy=sum/(*count*nval as f64);
-                if energy.is_finite()&&energy>0.0{result.push((name,energy));}
+    let mut result = Vec::new();
+    for (name, (sum, nval)) in sums {
+        if let Some(count) = counts.get(&name) {
+            if *count > 0.0 && nval > 0 {
+                let energy = sum / (*count * nval as f64);
+                if energy.is_finite() && energy > 0.0 {
+                    result.push((name, energy));
+                }
             }
         }
     }
-    if result.is_empty(){return Err(invalid("no valid GGUF imatrix in_sum2/counts pairs"));}
-    result.sort_by(|a,b|a.0.cmp(&b.0));
+    if result.is_empty() {
+        return Err(invalid("no valid GGUF imatrix in_sum2/counts pairs"));
+    }
+    result.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(result)
 }

@@ -21,8 +21,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-
-
 /// Scrub sensitive authentication tokens and API keys from arbitrary text.
 pub fn redact_secrets(input: &str) -> (String, bool) {
     let mut redacted = false;
@@ -74,7 +72,10 @@ pub fn redact_secrets(input: &str) -> (String, bool) {
             .take_while(|b| b.is_ascii_alphanumeric() || *b == b'.' || *b == b'_' || *b == b'-')
             .count();
         if token_len >= 16 {
-            out.replace_range(abs_pos + 7..abs_pos + 7 + token_len, "[REDACTED_BEARER_TOKEN]");
+            out.replace_range(
+                abs_pos + 7..abs_pos + 7 + token_len,
+                "[REDACTED_BEARER_TOKEN]",
+            );
             redacted = true;
             cursor = abs_pos + 7 + "[REDACTED_BEARER_TOKEN]".len();
         } else {
@@ -176,23 +177,24 @@ pub fn redact_secrets(input: &str) -> (String, bool) {
     }
 
     // 9. OS User Profile Paths (C:\Users\<name>, /Users/<name>, /home/<name>)
-    for prefix in ["C:\\Users\\", "c:\\Users\\", "C:/Users/", "/Users/", "/home/"] {
+    for prefix in [
+        "C:\\Users\\",
+        "c:\\Users\\",
+        "C:/Users/",
+        "/Users/",
+        "/home/",
+    ] {
         cursor = 0;
         while let Some(pos) = out[cursor..].find(prefix) {
             let user_start = cursor + pos + prefix.len();
             let rest = &out[user_start..];
             let user_len = rest
                 .bytes()
-                .take_while(|b| {
-                    b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-' || *b == b'.'
-                })
+                .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-' || *b == b'.')
                 .count();
             if user_len > 0 {
                 let username = &rest[..user_len];
-                if username != "[REDACTED_USER]"
-                    && username != "Public"
-                    && username != "Default"
-                {
+                if username != "[REDACTED_USER]" && username != "Public" && username != "Default" {
                     out.replace_range(user_start..user_start + user_len, "[REDACTED_USER]");
                     redacted = true;
                     cursor = user_start + "[REDACTED_USER]".len();
@@ -211,7 +213,9 @@ pub fn redact_secrets(input: &str) -> (String, bool) {
         let local_len = before
             .bytes()
             .rev()
-            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'.' || *b == b'_' || *b == b'-' || *b == b'+')
+            .take_while(|b| {
+                b.is_ascii_alphanumeric() || *b == b'.' || *b == b'_' || *b == b'-' || *b == b'+'
+            })
             .count();
         let after = &out[at_pos + 1..];
         let domain_len = after
@@ -847,7 +851,9 @@ fn handle_http_connection(
                 let resp_body = json!({"status": "recorded"}).to_string().into_bytes();
                 write_http_response(&mut stream, 200, "application/json", &resp_body)?;
             } else {
-                let err_body = json!({"error": "invalid episode json"}).to_string().into_bytes();
+                let err_body = json!({"error": "invalid episode json"})
+                    .to_string()
+                    .into_bytes();
                 write_http_response(&mut stream, 400, "application/json", &err_body)?;
             }
         }
@@ -866,7 +872,9 @@ fn handle_http_connection(
                     }
                 }
             } else {
-                let err_body = json!({"error": "invalid otel trace json"}).to_string().into_bytes();
+                let err_body = json!({"error": "invalid otel trace json"})
+                    .to_string()
+                    .into_bytes();
                 write_http_response(&mut stream, 400, "application/json", &err_body)?;
             }
         }
@@ -912,14 +920,13 @@ fn handle_http_connection(
                     .cloned()
                     .or_else(|| collector.upstream_endpoint());
 
-                let (resp_json, assistant_text, tool_calls) = if let Some(ref up_url) = upstream_target {
+                let (resp_json, assistant_text, tool_calls) = if let Some(ref up_url) =
+                    upstream_target
+                {
                     match forward_chat_completion_to_upstream(up_url, &body) {
                         Ok(up_resp) => {
                             let choice_msg = &up_resp["choices"][0]["message"];
-                            let content = choice_msg["content"]
-                                .as_str()
-                                .unwrap_or("")
-                                .to_string();
+                            let content = choice_msg["content"].as_str().unwrap_or("").to_string();
                             let mut parsed_tools = Vec::new();
                             if let Some(tc_arr) = choice_msg["tool_calls"].as_array() {
                                 for tc in tc_arr {
@@ -929,7 +936,9 @@ fn handle_http_connection(
                                         .or_else(|| tc["name"].as_str())
                                         .unwrap_or("unknown_tool")
                                         .to_string();
-                                    let args_val = if let Some(arg_str) = tc["function"]["arguments"].as_str() {
+                                    let args_val = if let Some(arg_str) =
+                                        tc["function"]["arguments"].as_str()
+                                    {
                                         serde_json::from_str::<Value>(arg_str)
                                             .unwrap_or_else(|_| Value::String(arg_str.to_string()))
                                     } else {
@@ -1000,8 +1009,14 @@ fn handle_http_connection(
 
                 let mut ep = CollectedEpisode::new(
                     &ep_id,
-                    headers.get("x-session-id").cloned().unwrap_or_else(|| "sess-default".into()),
-                    headers.get("user-agent").cloned().unwrap_or_else(|| "agent-proxy".into()),
+                    headers
+                        .get("x-session-id")
+                        .cloned()
+                        .unwrap_or_else(|| "sess-default".into()),
+                    headers
+                        .get("user-agent")
+                        .cloned()
+                        .unwrap_or_else(|| "agent-proxy".into()),
                     model,
                     user_msg,
                     assistant_text,
@@ -1015,7 +1030,9 @@ fn handle_http_connection(
                 let resp_bytes = serde_json::to_vec(&resp_json).unwrap_or_default();
                 write_http_response(&mut stream, 200, "application/json", &resp_bytes)?;
             } else {
-                let err_body = json!({"error": "invalid chat json"}).to_string().into_bytes();
+                let err_body = json!({"error": "invalid chat json"})
+                    .to_string()
+                    .into_bytes();
                 write_http_response(&mut stream, 400, "application/json", &err_body)?;
             }
         }
@@ -1031,7 +1048,10 @@ fn handle_http_connection(
             let token_valid = if let Some(expected_tok) = collector.auth_token() {
                 headers
                     .get("authorization")
-                    .and_then(|h| h.strip_prefix("Bearer ").or_else(|| h.strip_prefix("bearer ")))
+                    .and_then(|h| {
+                        h.strip_prefix("Bearer ")
+                            .or_else(|| h.strip_prefix("bearer "))
+                    })
                     .map(|t| t.trim() == expected_tok)
                     .unwrap_or(false)
             } else {
@@ -1063,9 +1083,12 @@ fn handle_http_connection(
 /// Forward a `/v1/chat/completions` JSON payload to an upstream local HTTP endpoint (e.g. `http://127.0.0.1:1234/v1`).
 fn forward_chat_completion_to_upstream(upstream_base: &str, body: &[u8]) -> io::Result<Value> {
     let trimmed = upstream_base.trim().trim_end_matches('/');
-    let without_scheme = trimmed
-        .strip_prefix("http://")
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "upstream must start with http://"))?;
+    let without_scheme = trimmed.strip_prefix("http://").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "upstream must start with http://",
+        )
+    })?;
     let (host_port, base_path) = match without_scheme.find('/') {
         Some(idx) => (&without_scheme[..idx], &without_scheme[idx..]),
         None => (without_scheme, ""),
@@ -1104,10 +1127,16 @@ fn forward_chat_completion_to_upstream(upstream_base: &str, body: &[u8]) -> io::
     let (_, json_part) = resp_str
         .split_once("\r\n\r\n")
         .or_else(|| resp_str.split_once("\n\n"))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid upstream HTTP response"))?;
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid upstream HTTP response")
+        })?;
 
-    serde_json::from_str::<Value>(json_part.trim())
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("invalid upstream JSON: {e}")))
+    serde_json::from_str::<Value>(json_part.trim()).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid upstream JSON: {e}"),
+        )
+    })
 }
 
 fn write_http_response(
@@ -1233,22 +1262,32 @@ pub fn extract_episode_metadata(ep: &CollectedEpisode) -> ExtractedEpisodeMetada
     );
     let lower = combined.to_ascii_lowercase();
 
-    let task_category = if lower.contains("fix") || lower.contains("bug") || lower.contains("error") {
-        "bugfix"
-    } else if lower.contains("test") || lower.contains("assert") {
-        "testing"
-    } else if lower.contains("refactor") || lower.contains("clean") {
-        "refactoring"
-    } else if lower.contains("doc") || lower.contains("readme") {
-        "documentation"
-    } else {
-        "feature"
-    }
-    .to_string();
+    let task_category =
+        if lower.contains("fix") || lower.contains("bug") || lower.contains("error") {
+            "bugfix"
+        } else if lower.contains("test") || lower.contains("assert") {
+            "testing"
+        } else if lower.contains("refactor") || lower.contains("clean") {
+            "refactoring"
+        } else if lower.contains("doc") || lower.contains("readme") {
+            "documentation"
+        } else {
+            "feature"
+        }
+        .to_string();
 
     let mut detected_files = Vec::new();
-    let exts = [".rs", ".py", ".ts", ".tsx", ".js", ".json", ".toml", ".yaml", ".yml", ".md", ".c", ".cpp", ".h"];
-    for token in combined.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':')) {
+    let exts = [
+        ".rs", ".py", ".ts", ".tsx", ".js", ".json", ".toml", ".yaml", ".yml", ".md", ".c", ".cpp",
+        ".h",
+    ];
+    for token in combined.split(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '"' | '\'' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':'
+            )
+    }) {
         let trimmed = token.trim_matches(|c: char| c == '.' || c == '/');
         if trimmed.len() >= 3 && exts.iter().any(|ext| trimmed.ends_with(ext)) {
             if !detected_files.contains(&trimmed.to_string()) {
@@ -1297,7 +1336,12 @@ pub fn extract_episode_metadata(ep: &CollectedEpisode) -> ExtractedEpisodeMetada
     if ep.unit_tests_passed == Some(true) {
         quality_score += 0.10;
     }
-    if ep.git_diff.as_ref().map(|d| d.contains("@@")).unwrap_or(false) {
+    if ep
+        .git_diff
+        .as_ref()
+        .map(|d| d.contains("@@"))
+        .unwrap_or(false)
+    {
         quality_score += 0.05;
     }
     quality_score = quality_score.clamp(0.0, 1.0);
@@ -1339,7 +1383,7 @@ pub struct HarvestReceipt {
 /// Dolil `agent_runs/*.jsonl`, and OpenAI/ShareGPT JSONL traces) into the `LearnCollector` with strict
 /// deterministic verification gates and automatic PII/secret scrubbing.
 pub fn harvest_agent_sessions(
-    source_dir: & std::path::Path,
+    source_dir: &std::path::Path,
     collector: &LearnCollector,
 ) -> io::Result<HarvestReceipt> {
     let mut receipt = HarvestReceipt {
@@ -1349,7 +1393,10 @@ pub fn harvest_agent_sessions(
     if !source_dir.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("harvest source path does not exist: {}", source_dir.display()),
+            format!(
+                "harvest source path does not exist: {}",
+                source_dir.display()
+            ),
         ));
     }
 
@@ -1434,6 +1481,14 @@ fn collect_harvest_files(
             collect_harvest_files(&path, depth + 1, max_depth, out)?;
         } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             if ext.eq_ignore_ascii_case("json") || ext.eq_ignore_ascii_case("jsonl") {
+                // If transcript_full.jsonl exists alongside transcript.jsonl, prefer transcript_full.jsonl
+                // so edit_file / write_file code payloads are never truncated.
+                if path.file_name().and_then(|n| n.to_str()) == Some("transcript.jsonl") {
+                    let full_sibling = path.with_file_name("transcript_full.jsonl");
+                    if full_sibling.is_file() {
+                        continue;
+                    }
+                }
                 out.push(path);
             }
         }
@@ -1443,8 +1498,8 @@ fn collect_harvest_files(
 
 fn parse_json_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpisode>> {
     let raw = fs::read_to_string(path)?;
-    let val: Value = serde_json::from_str(&raw)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let val: Value =
+        serde_json::from_str(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     if let Ok(ep) = serde_json::from_value::<CollectedEpisode>(val.clone()) {
         return Ok(vec![ep]);
@@ -1471,19 +1526,13 @@ fn parse_json_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpiso
         return Ok(Vec::new());
     }
 
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("run");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("run");
     let run_id = val["run_id"]
         .as_str()
         .or_else(|| val["episode_id"].as_str())
         .or_else(|| val["id"].as_str())
         .unwrap_or(stem);
-    let session_id = val["session_id"]
-        .as_str()
-        .unwrap_or(run_id)
-        .to_string();
+    let session_id = val["session_id"].as_str().unwrap_or(run_id).to_string();
     let app_id = val["agent"]
         .as_str()
         .or_else(|| val["app_id"].as_str())
@@ -1559,10 +1608,7 @@ fn parse_jsonl_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpis
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let mut episodes = Vec::new();
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("trace");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("trace");
 
     let mut pending_agy_user: Option<String> = None;
     let mut pending_agy_step_idx: usize = 0;
@@ -1584,7 +1630,8 @@ fn parse_jsonl_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpis
                     if let Some(c) = val["content"].as_str() {
                         if !c.trim().is_empty() {
                             pending_agy_user = Some(c.to_string());
-                            pending_agy_step_idx = val["step_index"].as_u64().unwrap_or(idx as u64) as usize;
+                            pending_agy_step_idx =
+                                val["step_index"].as_u64().unwrap_or(idx as u64) as usize;
                         }
                     }
                     continue;
@@ -1606,25 +1653,16 @@ fn parse_jsonl_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpis
                 }
                 "PLANNER_RESPONSE" => {
                     let content = val["content"].as_str().unwrap_or("").trim().to_string();
+                    let thinking = val["thinking"].as_str().unwrap_or("").trim().to_string();
                     let tool_calls_arr = val["tool_calls"].as_array();
                     let has_tools = tool_calls_arr.map(|a| !a.is_empty()).unwrap_or(false);
                     if let Some(ref user_prompt) = pending_agy_user {
                         if !content.is_empty() || has_tools {
                             let step_no = val["step_index"].as_u64().unwrap_or(idx as u64);
-                            let ep_id = format!("harvest-agy-{stem}-{pending_agy_step_idx}-{step_no}");
-                            let resp_text = if !content.is_empty() {
-                                content
-                            } else {
-                                format!("Executed {} tool call(s)", tool_calls_arr.map(|a| a.len()).unwrap_or(0))
-                            };
-                            let mut ep = CollectedEpisode::new(
-                                ep_id,
-                                format!("{stem}-task-{pending_agy_step_idx}"),
-                                "agy",
-                                "agy-coding-agent",
-                                user_prompt.clone(),
-                                resp_text,
-                            );
+                            let ep_id =
+                                format!("harvest-agy-{stem}-{pending_agy_step_idx}-{step_no}");
+                            let mut parsed_tools = Vec::new();
+                            let mut synthesized_diffs = Vec::new();
                             if let Some(tc_list) = tool_calls_arr {
                                 for (t_i, tc) in tc_list.iter().enumerate() {
                                     let name = tc["name"]
@@ -1637,15 +1675,76 @@ fn parse_jsonl_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpis
                                     } else {
                                         tc["args"].clone()
                                     };
-                                    ep.tool_calls.push(ToolCallRecord {
+                                    if name == "edit_file" {
+                                        let p = args["Path"]
+                                            .as_str()
+                                            .unwrap_or("file")
+                                            .trim_matches('"');
+                                        let tgt =
+                                            args["Target"].as_str().unwrap_or("").trim_matches('"');
+                                        let rep = args["Replacement"]
+                                            .as_str()
+                                            .unwrap_or("")
+                                            .trim_matches('"');
+                                        if !tgt.is_empty() || !rep.is_empty() {
+                                            synthesized_diffs.push(format!(
+                                                "--- a/{p}\n+++ b/{p}\n@@ -1 +1 @@\n-{tgt}\n+{rep}"
+                                            ));
+                                        }
+                                    } else if name == "write_file" {
+                                        let p = args["Path"]
+                                            .as_str()
+                                            .unwrap_or("file")
+                                            .trim_matches('"');
+                                        let body = args["Content"]
+                                            .as_str()
+                                            .unwrap_or("")
+                                            .trim_matches('"');
+                                        if !body.is_empty() {
+                                            synthesized_diffs.push(format!(
+                                                "--- /dev/null\n+++ b/{p}\n@@ -0,0 +1 @@\n+{body}"
+                                            ));
+                                        }
+                                    }
+                                    parsed_tools.push(ToolCallRecord {
                                         id: format!("call_{step_no}_{t_i}"),
                                         name,
                                         arguments: args,
                                     });
                                 }
                             }
+                            let resp_text = if !content.is_empty() {
+                                if !thinking.is_empty() {
+                                    format!("<think>\n{thinking}\n</think>\n{content}")
+                                } else {
+                                    content
+                                }
+                            } else if !synthesized_diffs.is_empty() {
+                                let diff_joined = synthesized_diffs.join("\n\n");
+                                if !thinking.is_empty() {
+                                    format!("<think>\n{thinking}\n</think>\n```diff\n{diff_joined}\n```")
+                                } else {
+                                    format!("```diff\n{diff_joined}\n```")
+                                }
+                            } else if !thinking.is_empty() {
+                                thinking
+                            } else {
+                                format!("Executed {} tool call(s)", parsed_tools.len())
+                            };
+                            let mut ep = CollectedEpisode::new(
+                                ep_id,
+                                format!("{stem}-task-{pending_agy_step_idx}"),
+                                "agy",
+                                "agy-coding-agent",
+                                user_prompt.clone(),
+                                resp_text,
+                            );
+                            ep.tool_calls = parsed_tools;
+                            if !synthesized_diffs.is_empty() {
+                                ep.git_diff = Some(synthesized_diffs.join("\n\n"));
+                            }
                             ep.unit_tests_passed = last_agy_test_passed;
-                            if last_agy_test_passed == Some(true) {
+                            if last_agy_test_passed == Some(true) || ep.git_diff.is_some() {
                                 ep.outcome = EpisodeOutcome::VerifiedSuccess;
                                 ep.scalar_reward = 1.0;
                             } else if last_agy_test_passed == Some(false) {
@@ -1723,10 +1822,7 @@ fn parse_jsonl_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpis
             .as_str()
             .map(str::to_string)
             .unwrap_or_else(|| format!("harvest-{stem}-{idx}"));
-        let session_id = val["session_id"]
-            .as_str()
-            .unwrap_or(stem)
-            .to_string();
+        let session_id = val["session_id"].as_str().unwrap_or(stem).to_string();
         let app_id = val["app_id"]
             .as_str()
             .or_else(|| val["agent"].as_str())

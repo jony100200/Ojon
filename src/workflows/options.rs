@@ -8,8 +8,14 @@ use serde_json::{json, Value};
 use std::io::{self, ErrorKind};
 
 fn candidate(
-    id: &str, family: &str, method: &str, format: &str,
-    loader: &str, state: &str, reason: &str, next_command: &str,
+    id: &str,
+    family: &str,
+    method: &str,
+    format: &str,
+    loader: &str,
+    state: &str,
+    reason: &str,
+    next_command: &str,
 ) -> Value {
     json!({
         "id": id, "backend": family, "method": method,
@@ -33,24 +39,36 @@ fn found(tools: &[FoundBackend], id: BackendId) -> bool {
 }
 
 fn plan_for(
-    probe: &ModelProbe, device: &str, tools: &[FoundBackend],
+    probe: &ModelProbe,
+    device: &str,
+    tools: &[FoundBackend],
     gguf: Option<(Option<u32>, u16)>,
 ) -> io::Result<Value> {
     if !matches!(device, "auto" | "cpu" | "cuda" | "xpu") {
-        return Err(io::Error::new(ErrorKind::InvalidInput, "device must be auto, cpu, cuda, or xpu"));
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "device must be auto, cpu, cuda, or xpu",
+        ));
     }
     let mut options: Vec<Value> = Vec::new();
     let quantizer = found(tools, BackendId::LlamaQuantize);
     let converter = found(tools, BackendId::HfConverter);
     let autoround = found(tools, BackendId::IntelAutoRound);
-    let text_like = matches!(probe.category, ModelCategory::Language | ModelCategory::VisionLanguage);
+    let text_like = matches!(
+        probe.category,
+        ModelCategory::Language | ModelCategory::VisionLanguage
+    );
     let multi = probe.category == ModelCategory::VisionLanguage;
 
     if probe.format == "gguf" && text_like {
         let original = matches!(gguf, Some((Some(0 | 1 | 32), 1)));
-        let state = if !original { "blocked_source" }
-                    else if !quantizer { "missing_tool" }
-                    else { "requires_compatibility_test" };
+        let state = if !original {
+            "blocked_source"
+        } else if !quantizer {
+            "missing_tool"
+        } else {
+            "requires_compatibility_test"
+        };
         let reason = if !original {
             "A comparison sweep requires original F32/F16/BF16 single-part GGUF; avoid requantizing an already compressed file"
         } else if !quantizer {
@@ -59,13 +77,33 @@ fn plan_for(
             "Quantizer detected; model-family support, target runtime, RAM/VRAM, and output quality are not verified"
         };
         for (id, method, format, command) in [
-            ("gguf_q5", "K-quant quality-oriented", "Q5_K_M", "sweep-plan"),
+            (
+                "gguf_q5",
+                "K-quant quality-oriented",
+                "Q5_K_M",
+                "sweep-plan",
+            ),
             ("gguf_q4", "K-quant balanced", "Q4_K_M", "sweep-plan"),
-            ("gguf_iq4", "importance-calibrated low-bit", "IQ4_XS", "imatrix-plan / sweep-plan"),
+            (
+                "gguf_iq4",
+                "importance-calibrated low-bit",
+                "IQ4_XS",
+                "imatrix-plan / sweep-plan",
+            ),
         ] {
-            let mut item = candidate(id, "llama.cpp", method, format, "llama.cpp (runtime unverified)", state, reason, command);
+            let mut item = candidate(
+                id,
+                "llama.cpp",
+                method,
+                format,
+                "llama.cpp (runtime unverified)",
+                state,
+                reason,
+                command,
+            );
             if multi {
-                item["multimodal_requirement"] = json!("Vision encoder, processor and projector require separate validation");
+                item["multimodal_requirement"] =
+                    json!("Vision encoder, processor and projector require separate validation");
             }
             if id == "gguf_iq4" {
                 item["calibration"] = json!("Representative importance matrix recommended; use a separate held-out quality corpus");
@@ -74,26 +112,46 @@ fn plan_for(
         }
     } else if probe.format == "hf_checkpoint_directory" && text_like {
         for (id, format) in [("hf_gguf_q5", "Q5_K_M"), ("hf_gguf_q4", "Q4_K_M")] {
-            let state = if converter && quantizer { "requires_compatibility_test" } else { "missing_tool" };
+            let state = if converter && quantizer {
+                "requires_compatibility_test"
+            } else {
+                "missing_tool"
+            };
             let reason = if converter && quantizer {
                 "HF converter and quantizer detected; architecture, dependencies, source shards, scratch, target loader and quality remain unverified"
             } else {
                 "Requires an installed convert_hf_to_gguf.py and llama-quantize; detected filenames are not capability proof"
             };
-            options.push(candidate(id, "llama.cpp", "HF -> high-precision GGUF -> K-quant", format,
-                "llama.cpp (runtime unverified)", state, reason, "quantize-hf"));
+            options.push(candidate(
+                id,
+                "llama.cpp",
+                "HF -> high-precision GGUF -> K-quant",
+                format,
+                "llama.cpp (runtime unverified)",
+                state,
+                reason,
+                "quantize-hf",
+            ));
         }
         let ar_reason = if autoround {
             "AutoRound CLI detected, but matching Python package, device kernels, GGUF export and loader must be verified"
         } else {
             "AutoRound CLI not detected; Python module, device kernels, output and inference loader must be checked separately"
         };
-        options.push(candidate("hf_autoround_4", "intel_auto_round",
+        options.push(candidate(
+            "hf_autoround_4",
+            "intel_auto_round",
             "optimized RTN or calibrated AutoRound (select --iters and local --dataset)",
             "GGUF Q4_K_M or Q5_K_M (experimental upstream export)",
             "compatible GGUF runtime, not yet verified",
-            if autoround { "requires_compatibility_test" } else { "missing_tool" },
-            ar_reason, "autoround-plan --bits 4|5 --format gguf:q4_k_m|gguf:q5_k_m"));
+            if autoround {
+                "requires_compatibility_test"
+            } else {
+                "missing_tool"
+            },
+            ar_reason,
+            "autoround-plan --bits 4|5 --format gguf:q4_k_m|gguf:q5_k_m",
+        ));
         if !multi {
             options.push(candidate("hf_exl3", "exllamav3",
                 "QTIP-inspired trellis-coded fractional-bitrate quantization",
@@ -150,9 +208,16 @@ fn plan_for(
             },
             "diffusion-gguf-plan /path/denoiser.safetensors /path/denoiser-Q4.gguf --kind image|video --format q4_0"));
     } else if probe.format == "ojonq_packed_weights" {
-        options.push(candidate("ojon_unpack", "ojon_native", "unpack storage container",
-            "safetensors (lossily reconstructed)", "ordinary inference loader after unpack",
-            "storage_only", "Unpack does not preserve the original model precision or achieve low-bit VRAM usage", "unpack"));
+        options.push(candidate(
+            "ojon_unpack",
+            "ojon_native",
+            "unpack storage container",
+            "safetensors (lossily reconstructed)",
+            "ordinary inference loader after unpack",
+            "storage_only",
+            "Unpack does not preserve the original model precision or achieve low-bit VRAM usage",
+            "unpack",
+        ));
     }
     // Other modalities are deliberately not advertised as compatible.
     let warning = if options.is_empty() {
@@ -192,7 +257,9 @@ pub fn plan_options(probe: &ModelProbe, device: &str, tools: &[FoundBackend]) ->
     let gguf = if probe.format == "gguf" {
         let summary = inspect_gguf(&probe.path)?;
         Some((summary.file_type, summary.split_count.unwrap_or(1)))
-    } else { None };
+    } else {
+        None
+    };
     plan_for(probe, device, tools, gguf)
 }
 
@@ -204,17 +271,27 @@ mod tests {
     fn fixture(format: &'static str, category: ModelCategory) -> ModelProbe {
         ModelProbe {
             path: PathBuf::from("not-accessed-in-unit-test"),
-            format, category, identification: "fixture".to_owned(),
-            confidence: "fixture", bytes: 4096, tensor_count: None,
-            conversion_route: "none", conversion_status: "candidate_only",
+            format,
+            category,
+            identification: "fixture".to_owned(),
+            confidence: "fixture",
+            bytes: 4096,
+            tensor_count: None,
+            conversion_route: "none",
+            conversion_status: "candidate_only",
             notes: vec![],
         }
     }
 
     #[test]
     fn hf_keeps_three_routes_without_inventing_a_winner() {
-        let value = plan_for(&fixture("hf_checkpoint_directory", ModelCategory::Language),
-            "xpu", &[], None).unwrap();
+        let value = plan_for(
+            &fixture("hf_checkpoint_directory", ModelCategory::Language),
+            "xpu",
+            &[],
+            None,
+        )
+        .unwrap();
         let rows = value["options"].as_array().unwrap();
         assert_eq!(rows.len(), 7);
         assert_eq!(rows[0]["id"], "hf_gguf_q5");
@@ -238,26 +315,42 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|r| r["state"] == "blocked_source"));
         let original = plan_for(&p, "cpu", &[], Some((Some(1), 1))).unwrap();
-        assert_eq!(original["options"][2]["calibration"].as_str().is_some(), true);
+        assert_eq!(
+            original["options"][2]["calibration"].as_str().is_some(),
+            true
+        );
         assert!(original["options"][0]["runtime_load_verified"] == false);
     }
 
     #[test]
     fn diffusion_storage_does_not_claim_gpu_inference() {
-        let planned = plan_for(&fixture("safetensors_single_file", ModelCategory::Diffusion),
-            "cuda", &[], None).unwrap();
+        let planned = plan_for(
+            &fixture("safetensors_single_file", ModelCategory::Diffusion),
+            "cuda",
+            &[],
+            None,
+        )
+        .unwrap();
         assert_eq!(planned["options"].as_array().unwrap().len(), 3);
         assert_eq!(planned["options"][1]["state"], "storage_only");
         assert_eq!(planned["options"][1]["runtime_load_verified"], false);
-        assert_eq!(planned["options"][2]["state"], "requires_compatibility_test");
+        assert_eq!(
+            planned["options"][2]["state"],
+            "requires_compatibility_test"
+        );
         assert_eq!(planned["options"][2]["id"], "diffusion_gguf_sdcli");
         assert_eq!(planned["options"][2]["runtime_load_verified"], false);
     }
 
     #[test]
     fn packed_diffusion_weights_only_offer_unpack_not_fake_loaders() {
-        let v = plan_for(&fixture("ojonq_packed_weights", ModelCategory::Diffusion),
-            "cpu", &[], None).unwrap();
+        let v = plan_for(
+            &fixture("ojonq_packed_weights", ModelCategory::Diffusion),
+            "cpu",
+            &[],
+            None,
+        )
+        .unwrap();
         assert_eq!(v["options"].as_array().unwrap().len(), 1);
         assert_eq!(v["options"][0]["id"], "ojon_unpack");
         assert_eq!(v["options"][0]["state"], "storage_only");

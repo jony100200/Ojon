@@ -84,7 +84,8 @@ pub const CANONICAL_TOOL_DECLINE_SUITE: &[ToolDeclineTestPrompt] = &[
     },
     ToolDeclineTestPrompt {
         prompt_id: "decline-03-api-design",
-        prompt: "Explain what makes an API endpoint idempotent and provide examples of HTTP methods.",
+        prompt:
+            "Explain what makes an API endpoint idempotent and provide examples of HTTP methods.",
         description: "General software engineering definition.",
     },
     ToolDeclineTestPrompt {
@@ -167,7 +168,12 @@ pub fn evaluate_and_promote(
     let target = candidates
         .iter()
         .find(|c| c.candidate_id == target_candidate_id)
-        .ok_or_else(|| bad_input(format!("Candidate '{}' not found in evaluation set", target_candidate_id)))?;
+        .ok_or_else(|| {
+            bad_input(format!(
+                "Candidate '{}' not found in evaluation set",
+                target_candidate_id
+            ))
+        })?;
 
     // Find merged model or baseline for comparison
     let reference_score = candidates
@@ -204,8 +210,14 @@ pub fn evaluate_and_promote(
     gates.push(GateCheckResult {
         gate_name: "Must-Pass Capability Retention Gate".to_string(),
         passed: score_passed,
-        target: format!("Drop <= {:.1} pts (from reference {:.1})", policy.max_must_pass_score_drop, reference_score),
-        observed: format!("{:.1} pts (drop {:.1} pts)", target.must_pass_task_score, score_drop),
+        target: format!(
+            "Drop <= {:.1} pts (from reference {:.1})",
+            policy.max_must_pass_score_drop, reference_score
+        ),
+        observed: format!(
+            "{:.1} pts (drop {:.1} pts)",
+            target.must_pass_task_score, score_drop
+        ),
         reason: if score_passed {
             "High capability retention on held-out tasks".to_string()
         } else {
@@ -223,7 +235,8 @@ pub fn evaluate_and_promote(
         reason: if decline_passed {
             "Model correctly refrains from invoking tools on non-tool queries".to_string()
         } else {
-            "Model suffers from silent tool-decline collapse (hallucinating unnecessary tools)".to_string()
+            "Model suffers from silent tool-decline collapse (hallucinating unnecessary tools)"
+                .to_string()
         },
     });
 
@@ -254,7 +267,10 @@ pub fn evaluate_and_promote(
         let new_pointer = PromotedModelPointer {
             schema: "ojon.learn.promoted_pointer.v1".to_string(),
             active_model_id: target.candidate_id.clone(),
-            active_model_path: target.file_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+            active_model_path: target
+                .file_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
             candidate_type: target.candidate_type.as_str().to_string(),
             size_mb: target.size_mb,
             must_pass_task_score: target.must_pass_task_score,
@@ -297,7 +313,10 @@ mod tests {
     fn test_promotion_gates_accepted() {
         let temp_dir = std::env::temp_dir().join(format!(
             "ojon_eval_test_{}",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let pointer_file = temp_dir.join("promoted_model_pointer.json");
 
@@ -357,7 +376,10 @@ mod tests {
     fn test_promotion_gates_rejected_on_tool_decline_collapse() {
         let temp_dir = std::env::temp_dir().join(format!(
             "ojon_eval_fail_test_{}",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         let pointer_file = temp_dir.join("promoted_model_pointer.json");
 
@@ -396,7 +418,11 @@ mod tests {
 
         assert_eq!(decision.decision, "rejected");
         // Gate for tool decline should have failed
-        let decline_gate = decision.gates.iter().find(|g| g.gate_name.contains("Tool-Decline")).unwrap();
+        let decline_gate = decision
+            .gates
+            .iter()
+            .find(|g| g.gate_name.contains("Tool-Decline"))
+            .unwrap();
         assert!(!decline_gate.passed);
         assert!(!pointer_file.exists()); // Was not created because rejection occurred
 

@@ -10,45 +10,64 @@ use std::str::FromStr;
 pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result<bool> {
     match cmd {
         "settings" => {
-            let op=next_argument(&mut args,"settings subcommand (path/show/set/clear)")?;
-            match op.to_str(){
-                Some("path")=>{
-                    if args.next().is_some(){return Err(invalid("settings path takes no arguments"));}
-                    println!("{}",ojon_backend::settings_path()?.display());
-                },
-                Some("show")=>{
-                    let extra=args.next();
-                    if extra.as_deref()!=Some(std::ffi::OsStr::new("--json"))&&extra.is_some(){
+            let op = next_argument(&mut args, "settings subcommand (path/show/set/clear)")?;
+            match op.to_str() {
+                Some("path") => {
+                    if args.next().is_some() {
+                        return Err(invalid("settings path takes no arguments"));
+                    }
+                    println!("{}", ojon_backend::settings_path()?.display());
+                }
+                Some("show") => {
+                    let extra = args.next();
+                    if extra.as_deref() != Some(std::ffi::OsStr::new("--json")) && extra.is_some() {
                         return Err(invalid("settings show accepts only --json"));
                     }
-                    if args.next().is_some(){return Err(invalid("too many settings arguments"));}
-                    let path=ojon_backend::settings_path()?;
-                    let settings=ojon_backend::load_settings()?;
-                    println!("{}",serde_json::json!({
-                        "path":path.to_string_lossy(),
-                        "stored":path.is_file(),
-                        "settings":settings.as_json()
-                    }));
-                },
-                Some("set")=>{
-                    let key=next_argument(&mut args,"setting key")?;
-                    let value=next_argument(&mut args,"setting value")?;
-                    if args.next().is_some(){return Err(invalid("too many settings arguments"));}
-                    let mut settings=ojon_backend::load_settings()?;
-                    settings.set(key.to_str().ok_or_else(||invalid("setting name must be UTF-8"))?,
-                        value.to_str().ok_or_else(||invalid("setting value must be UTF-8"))?)?;
-                    let path=ojon_backend::save_settings(&settings)?;
-                    println!("saved_local_preferences: {}",path.display());
-                },
-                Some("clear")=>{
-                    let key=next_argument(&mut args,"setting key")?;
-                    if args.next().is_some(){return Err(invalid("too many settings arguments"));}
-                    let mut settings=ojon_backend::load_settings()?;
-                    settings.clear(key.to_str().ok_or_else(||invalid("setting name must be UTF-8"))?)?;
-                    let path=ojon_backend::save_settings(&settings)?;
-                    println!("updated_local_preferences: {}",path.display());
-                },
-                _=>return Err(invalid("settings command must be path, show, set or clear"))
+                    if args.next().is_some() {
+                        return Err(invalid("too many settings arguments"));
+                    }
+                    let path = ojon_backend::settings_path()?;
+                    let settings = ojon_backend::load_settings()?;
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "path":path.to_string_lossy(),
+                            "stored":path.is_file(),
+                            "settings":settings.as_json()
+                        })
+                    );
+                }
+                Some("set") => {
+                    let key = next_argument(&mut args, "setting key")?;
+                    let value = next_argument(&mut args, "setting value")?;
+                    if args.next().is_some() {
+                        return Err(invalid("too many settings arguments"));
+                    }
+                    let mut settings = ojon_backend::load_settings()?;
+                    settings.set(
+                        key.to_str()
+                            .ok_or_else(|| invalid("setting name must be UTF-8"))?,
+                        value
+                            .to_str()
+                            .ok_or_else(|| invalid("setting value must be UTF-8"))?,
+                    )?;
+                    let path = ojon_backend::save_settings(&settings)?;
+                    println!("saved_local_preferences: {}", path.display());
+                }
+                Some("clear") => {
+                    let key = next_argument(&mut args, "setting key")?;
+                    if args.next().is_some() {
+                        return Err(invalid("too many settings arguments"));
+                    }
+                    let mut settings = ojon_backend::load_settings()?;
+                    settings.clear(
+                        key.to_str()
+                            .ok_or_else(|| invalid("setting name must be UTF-8"))?,
+                    )?;
+                    let path = ojon_backend::save_settings(&settings)?;
+                    println!("updated_local_preferences: {}", path.display());
+                }
+                _ => return Err(invalid("settings command must be path, show, set or clear")),
             }
             Ok(true)
         }
@@ -59,19 +78,27 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 Some(value) if value == "--json" => true,
                 _ => return Err(invalid("probe accepts only an optional --json")),
             };
-            if args.next().is_some() { return Err(invalid("too many probe arguments")); }
+            if args.next().is_some() {
+                return Err(invalid("too many probe arguments"));
+            }
             let report = probe_model(&path)?;
             if json {
                 println!("{}", report.as_json());
             } else {
                 println!("source: {}", report.path.display());
                 println!("format: {}", report.format);
-                println!("category: {} (confidence: {})", report.category.as_str(), report.confidence);
+                println!(
+                    "category: {} (confidence: {})",
+                    report.category.as_str(),
+                    report.confidence
+                );
                 println!("identification: {}", report.identification);
                 println!("bytes: {}", report.bytes);
                 println!("conversion_route: {}", report.conversion_route);
                 println!("conversion_status: {}", report.conversion_status);
-                for note in report.notes { println!("note: {note}"); }
+                for note in report.notes {
+                    println!("note: {note}");
+                }
             }
             Ok(true)
         }
@@ -81,7 +108,12 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             while let Some(opt) = args.next() {
                 match opt.to_str() {
                     Some("--json") => json = true,
-                    _ => return Err(invalid(format!("unknown dataset-audit option: {}", opt.to_string_lossy()))),
+                    _ => {
+                        return Err(invalid(format!(
+                            "unknown dataset-audit option: {}",
+                            opt.to_string_lossy()
+                        )))
+                    }
                 }
             }
             let report = audit_dataset_file(&path)?;
@@ -112,11 +144,20 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 match opt.to_str() {
                     Some("--min-score") => {
                         let os = next_argument(&mut args, "minimum score threshold")?;
-                        let s = os.to_str().ok_or_else(|| invalid("min-score must be text"))?;
-                        min_score = s.parse::<f64>().map_err(|_| invalid("invalid min-score float"))?;
+                        let s = os
+                            .to_str()
+                            .ok_or_else(|| invalid("min-score must be text"))?;
+                        min_score = s
+                            .parse::<f64>()
+                            .map_err(|_| invalid("invalid min-score float"))?;
                     }
                     Some("--json") => json = true,
-                    _ => return Err(invalid(format!("unknown distill-plan option: {}", opt.to_string_lossy()))),
+                    _ => {
+                        return Err(invalid(format!(
+                            "unknown distill-plan option: {}",
+                            opt.to_string_lossy()
+                        )))
+                    }
                 }
             }
             let plan = prepare_distill_plan(&source, &out_dir, min_score)?;
@@ -129,7 +170,10 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 println!("curated_rows: {}", plan.curated_rows);
                 println!("curated_split: {}", plan.curated_split_path.display());
                 println!("min_score_threshold: {:.2}", plan.min_score_threshold);
-                println!("live_reference_ratio: {:.1}%", plan.live_reference_ratio * 100.0);
+                println!(
+                    "live_reference_ratio: {:.1}%",
+                    plan.live_reference_ratio * 100.0
+                );
                 println!("status: CURATED_SPLIT_AND_PLAN_WRITTEN");
             }
             Ok(true)
@@ -149,36 +193,78 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     Some("--limit") => {
                         let os = next_argument(&mut args, "match limit")?;
                         let s = os.to_str().ok_or_else(|| invalid("limit must be text"))?;
-                        limit = s.parse::<usize>().map_err(|_| invalid("invalid limit integer"))?;
+                        limit = s
+                            .parse::<usize>()
+                            .map_err(|_| invalid("invalid limit integer"))?;
                     }
                     Some("--min-score") => {
                         let os = next_argument(&mut args, "minimum score threshold")?;
-                        let s = os.to_str().ok_or_else(|| invalid("min-score must be text"))?;
-                        min_score = s.parse::<f64>().map_err(|_| invalid("invalid min-score float"))?;
+                        let s = os
+                            .to_str()
+                            .ok_or_else(|| invalid("min-score must be text"))?;
+                        min_score = s
+                            .parse::<f64>()
+                            .map_err(|_| invalid("invalid min-score float"))?;
                     }
                     Some("--json") => json = true,
                     Some("--markdown") => markdown = true,
-                    _ => return Err(invalid(format!("unknown retrieve option: {}", opt.to_string_lossy()))),
+                    _ => {
+                        return Err(invalid(format!(
+                            "unknown retrieve option: {}",
+                            opt.to_string_lossy()
+                        )))
+                    }
                 }
             }
             let matches = retrieve_recipes(&dataset, &query, limit, min_score)?;
             if json {
                 let arr: Vec<_> = matches.iter().map(|m| m.json()).collect();
-                println!("{}", serde_json::json!({"query": query, "dataset": dataset.to_string_lossy(), "count": arr.len(), "matches": arr}));
+                println!(
+                    "{}",
+                    serde_json::json!({"query": query, "dataset": dataset.to_string_lossy(), "count": arr.len(), "matches": arr})
+                );
             } else if markdown {
-                println!("### Distilled Recipes: \"{}\" ({} matches)\n", query, matches.len());
+                println!(
+                    "### Distilled Recipes: \"{}\" ({} matches)\n",
+                    query,
+                    matches.len()
+                );
                 for (idx, m) in matches.iter().enumerate() {
-                    println!("{}. **{}** `[{}]` (Score: {:.2}, Live: {:.0}%, Decay: {:.0}%)",
-                        idx + 1, m.title, m.tier, m.match_score, m.liveness_factor * 100.0, m.decay_factor * 100.0);
-                    println!("   - **Intent**: {}", m.instruction.lines().next().unwrap_or(""));
-                    let preview = m.summary_or_output.lines().take(3).collect::<Vec<_>>().join("\n     ");
+                    println!(
+                        "{}. **{}** `[{}]` (Score: {:.2}, Live: {:.0}%, Decay: {:.0}%)",
+                        idx + 1,
+                        m.title,
+                        m.tier,
+                        m.match_score,
+                        m.liveness_factor * 100.0,
+                        m.decay_factor * 100.0
+                    );
+                    println!(
+                        "   - **Intent**: {}",
+                        m.instruction.lines().next().unwrap_or("")
+                    );
+                    let preview = m
+                        .summary_or_output
+                        .lines()
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join("\n     ");
                     println!("   - **Recipe**:\n     {}\n", preview);
                 }
             } else {
                 println!("Query: \"{}\" | Matches: {}", query, matches.len());
                 for (idx, m) in matches.iter().enumerate() {
-                    println!("[{}] {} (tier: {}, score: {:.2})", idx + 1, m.title, m.tier, m.match_score);
-                    println!("    Instruction: {}", m.instruction.lines().next().unwrap_or(""));
+                    println!(
+                        "[{}] {} (tier: {}, score: {:.2})",
+                        idx + 1,
+                        m.title,
+                        m.tier,
+                        m.match_score
+                    );
+                    println!(
+                        "    Instruction: {}",
+                        m.instruction.lines().next().unwrap_or("")
+                    );
                     let snippet = if m.summary_or_output.len() > 160 {
                         format!("{}...", &m.summary_or_output[..160])
                     } else {
@@ -191,7 +277,9 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
         }
         "inspect" | "verify" => {
             let path = PathBuf::from(next_argument(&mut args, "GGUF file")?);
-            if args.next().is_some() { return Err(invalid("too many arguments")); }
+            if args.next().is_some() {
+                return Err(invalid("too many arguments"));
+            }
             let summary = inspect_gguf(&path)?;
             show_gguf(&path, &summary);
             println!("verification: GGUF_METADATA_AND_TENSOR_CATALOG_ONLY");
@@ -201,7 +289,9 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
         }
         "inspect-hf" => {
             let path = PathBuf::from(next_argument(&mut args, "HF model folder")?);
-            if args.next().is_some() { return Err(invalid("too many arguments")); }
+            if args.next().is_some() {
+                return Err(invalid("too many arguments"));
+            }
             let source = inspect_hf_folder(&path)?;
             println!("source: {}", source.directory.display());
             println!("weight_files: {}", source.weight_files);
@@ -219,26 +309,46 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let mut quantizer = discovered_path(BackendId::LlamaQuantize)
                 .unwrap_or_else(|| PathBuf::from("llama-quantize"));
             let mut precision = Precision::default();
-            let mut threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(4);
+            let mut threads = std::thread::available_parallelism()
+                .map(|v| v.get())
+                .unwrap_or(4);
             while let Some(option) = args.next() {
                 match option.to_str() {
-                    Some("--converter") => converter = PathBuf::from(next_argument(&mut args, "HF converter script")?),
-                    Some("--python") => python = PathBuf::from(next_argument(&mut args, "Python executable")?),
-                    Some("--quantizer") => quantizer = PathBuf::from(next_argument(&mut args, "quantizer executable")?),
+                    Some("--converter") => {
+                        converter = PathBuf::from(next_argument(&mut args, "HF converter script")?)
+                    }
+                    Some("--python") => {
+                        python = PathBuf::from(next_argument(&mut args, "Python executable")?)
+                    }
+                    Some("--quantizer") => {
+                        quantizer = PathBuf::from(next_argument(&mut args, "quantizer executable")?)
+                    }
                     Some("--precision") => {
                         let v = next_argument(&mut args, "GGUF precision")?;
-                        let v = v.to_str().ok_or_else(|| invalid("precision must be text"))?;
+                        let v = v
+                            .to_str()
+                            .ok_or_else(|| invalid("precision must be text"))?;
                         precision = Precision::from_str(v).map_err(invalid)?;
                     }
                     Some("--threads") => {
                         let v = next_argument(&mut args, "thread count")?;
-                        threads = v.to_str().ok_or_else(|| invalid("invalid thread count"))?
-                            .parse().map_err(|_| invalid("invalid thread count"))?;
+                        threads = v
+                            .to_str()
+                            .ok_or_else(|| invalid("invalid thread count"))?
+                            .parse()
+                            .map_err(|_| invalid("invalid thread count"))?;
                     }
-                    _ => return Err(invalid(format!("unknown quantize-hf option: {}", option.to_string_lossy()))),
+                    _ => {
+                        return Err(invalid(format!(
+                            "unknown quantize-hf option: {}",
+                            option.to_string_lossy()
+                        )))
+                    }
                 }
             }
-            let plan = prepare_hf(&source, &output, &converter, &python, &quantizer, precision, threads)?;
+            let plan = prepare_hf(
+                &source, &output, &converter, &python, &quantizer, precision, threads,
+            )?;
             println!("model_folder: {}", plan.source.directory.display());
             println!("source_weight_bytes: {}", plan.source.source_weight_bytes);
             println!("converter: {}", plan.converter_script.display());
@@ -252,29 +362,35 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             println!("output: {}", done.output.display());
             println!("output_bytes: {}", done.info.file_bytes);
             println!("verification: GGUF_METADATA_AND_TENSOR_CATALOG_ONLY");
-            if let Some(receipt) = done.receipt { println!("receipt: {}", receipt.display()); }
+            if let Some(receipt) = done.receipt {
+                println!("receipt: {}", receipt.display());
+            }
             Ok(true)
         }
         "backends" => {
-            let mut json=false;
-            let mut probe=false;
-            for option in args{
-                match option.to_str(){
-                    Some("--json") if !json=>json=true,
-                    Some("--probe") if !probe=>probe=true,
-                    _=>return Err(invalid("backends accepts only --json and --probe")),
+            let mut json = false;
+            let mut probe = false;
+            for option in args {
+                match option.to_str() {
+                    Some("--json") if !json => json = true,
+                    Some("--probe") if !probe => probe = true,
+                    _ => return Err(invalid("backends accepts only --json and --probe")),
                 }
             }
-            let detected=discover_backends();
-            if probe{
-                let result=ojon_backend::probe_backend_capabilities(&detected);
-                if json{println!("{result}");}
-                else{
-                    for item in result["probes"].as_array().into_iter().flatten(){
-                        println!("{}: {}\n  devices: {}\n  formats: {}",
+            let detected = discover_backends();
+            if probe {
+                let result = ojon_backend::probe_backend_capabilities(&detected);
+                if json {
+                    println!("{result}");
+                } else {
+                    for item in result["probes"].as_array().into_iter().flatten() {
+                        println!(
+                            "{}: {}\n  devices: {}\n  formats: {}",
                             item["name"].as_str().unwrap_or("backend"),
                             item["status"].as_str().unwrap_or("unknown"),
-                            item["device_ids"],item["precision_formats"]);
+                            item["device_ids"],
+                            item["precision_formats"]
+                        );
                     }
                 }
                 return Ok(true);
@@ -291,7 +407,10 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     "official_url": item.spec.website,
                     "override_environment": item.spec.override_env,
                 })).collect();
-                println!("{}", serde_json::json!({"schema":"ojon.backends.v1","backends":arr,"optional_optimizers":discover_advanced()["optimizers"],"diffusion_backends":discover_diffusion()["backends"]}));
+                println!(
+                    "{}",
+                    serde_json::json!({"schema":"ojon.backends.v1","backends":arr,"optional_optimizers":discover_advanced()["optimizers"],"diffusion_backends":discover_diffusion()["backends"]})
+                );
                 return Ok(true);
             }
             for item in detected {
@@ -303,24 +422,60 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 };
                 println!("{}: {}", item.spec.name, status);
                 println!("  purpose: {}", item.spec.role);
-                if let Some(path) = &item.executable { println!("  executable: {}", path.display()); }
-                if let Some(origin) = item.found_via { println!("  discovery: {origin}"); }
+                if let Some(path) = &item.executable {
+                    println!("  executable: {}", path.display());
+                }
+                if let Some(origin) = item.found_via {
+                    println!("  discovery: {origin}");
+                }
                 println!("  publisher: {}", item.spec.website);
                 println!("  override: {}", item.spec.override_env);
             }
-            for opt in discover_advanced()["optimizers"].as_array().into_iter().flatten() {
-                println!("optional optimizer {}: checkout={}, hardware=UNVERIFIED",
+            for opt in discover_advanced()["optimizers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                println!(
+                    "optional optimizer {}: checkout={}, hardware=UNVERIFIED",
                     opt["backend"].as_str().unwrap_or("?"),
-                    if opt["source_code_present"].as_bool()==Some(true){"DETECTED"}else{"NOT FOUND"});
-                println!("  publisher: {}",opt["official_repository"].as_str().unwrap_or("?"));
-                println!("  configure: {}",opt["environment_variable"].as_str().unwrap_or("?"));
+                    if opt["source_code_present"].as_bool() == Some(true) {
+                        "DETECTED"
+                    } else {
+                        "NOT FOUND"
+                    }
+                );
+                println!(
+                    "  publisher: {}",
+                    opt["official_repository"].as_str().unwrap_or("?")
+                );
+                println!(
+                    "  configure: {}",
+                    opt["environment_variable"].as_str().unwrap_or("?")
+                );
             }
-            for backend in discover_diffusion()["backends"].as_array().into_iter().flatten() {
-                println!("diffusion backend {}: {}, image/video loader and quality NOT VERIFIED",
+            for backend in discover_diffusion()["backends"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                println!(
+                    "diffusion backend {}: {}, image/video loader and quality NOT VERIFIED",
                     backend["backend"].as_str().unwrap_or("?"),
-                    if backend["source_present"].as_bool()==Some(true){"CHECKOUT DETECTED"}else{"NOT FOUND"});
-                println!("  configure: {}",backend["environment_variable"].as_str().unwrap_or("?"));
-                println!("  publisher: {}",backend["upstream"].as_str().unwrap_or("?"));
+                    if backend["source_present"].as_bool() == Some(true) {
+                        "CHECKOUT DETECTED"
+                    } else {
+                        "NOT FOUND"
+                    }
+                );
+                println!(
+                    "  configure: {}",
+                    backend["environment_variable"].as_str().unwrap_or("?")
+                );
+                println!(
+                    "  publisher: {}",
+                    backend["upstream"].as_str().unwrap_or("?")
+                );
             }
             println!("Native Ojon 2/3/4-bit model pack/unpack: built in, no RebelUI, Python or GPU required; direct GPU loading not yet implemented.");
             println!("Supported GGUF: public llama-quantize via K/IQ precision methods; optional GSQ/RCO local Python stages require explicit user configuration.");
@@ -337,22 +492,40 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let mut prompt = String::from("Reply with one short sentence: what is two plus two?");
             while let Some(option) = args.next() {
                 match option.to_str() {
-                    Some("--tool") => tool = PathBuf::from(next_argument(&mut args, "llama-cli executable")?),
+                    Some("--tool") => {
+                        tool = PathBuf::from(next_argument(&mut args, "llama-cli executable")?)
+                    }
                     Some("--tokens") => {
                         let os = next_argument(&mut args, "token count")?;
-                        let str_value = os.to_str().ok_or_else(|| invalid("token count must be text"))?;
-                        tokens = str_value.parse::<u32>().map_err(|_| invalid("invalid token count"))?;
+                        let str_value = os
+                            .to_str()
+                            .ok_or_else(|| invalid("token count must be text"))?;
+                        tokens = str_value
+                            .parse::<u32>()
+                            .map_err(|_| invalid("invalid token count"))?;
                     }
                     Some("--gpu-layers") => {
                         let os = next_argument(&mut args, "GPU layer count")?;
-                        let str_value = os.to_str().ok_or_else(|| invalid("GPU layer count must be text"))?;
-                        gpu_layers = str_value.parse::<u32>().map_err(|_| invalid("invalid GPU layer count"))?;
+                        let str_value = os
+                            .to_str()
+                            .ok_or_else(|| invalid("GPU layer count must be text"))?;
+                        gpu_layers = str_value
+                            .parse::<u32>()
+                            .map_err(|_| invalid("invalid GPU layer count"))?;
                     }
                     Some("--prompt") => {
                         let os = next_argument(&mut args, "prompt text")?;
-                        prompt = os.to_str().ok_or_else(|| invalid("prompt must be valid Unicode"))?.to_owned();
+                        prompt = os
+                            .to_str()
+                            .ok_or_else(|| invalid("prompt must be valid Unicode"))?
+                            .to_owned();
                     }
-                    _ => return Err(invalid(format!("unknown smoke option: {}", option.to_string_lossy()))),
+                    _ => {
+                        return Err(invalid(format!(
+                            "unknown smoke option: {}",
+                            option.to_string_lossy()
+                        )))
+                    }
                 }
             }
             smoke_gguf(&model, &tool, &prompt, tokens, gpu_layers)?;

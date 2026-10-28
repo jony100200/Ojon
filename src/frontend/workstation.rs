@@ -4,23 +4,30 @@
 //! This optional frontend depends on ojon_backend; it is not a quantization engine.
 //! All model details displayed here come from inspected files. No demo benchmarks.
 
-use ojon_backend::{inspect_gguf, prepare_gguf, quantize_gguf_with_log, inspect_hf_folder, prepare_hf, quantize_hf_with_log, hf_python_path, smoke_gguf_capture, probe_model};
-use ojon_backend::{resource_plan, ResourceMode, prepare_bench, run_bench};
-use ojon_backend::{LocalSettings,load_settings,save_settings};
-use ojon_backend::{OptimizeWorkflowRequest, OptimizeGoal, plan_optimize_workflow, run_optimize_workflow};
-use ojon_backend::{compile_activation_recipe, prepare_gguf_abliteration_value,
-    run_gguf_abliteration, prepare_uncensor_from_trace, run_uncensor_from_trace};
 use ojon_backend::cvector_import::recipe_from_control_vector;
 use ojon_backend::{
-    GgufSummary, HfFolderInfo, ModelProbe, ModelTopology, RuntimeGpuDevice,
-    HfQuantizeResult, SmokeCapture, Precision, QuantizeResult, FoundBackend, BackendId,
-    discover_backends, open_official_download_page, inspect_model_topology,
-    discover_runtime_gpu_devices, resolve_auto_runtime_device,
-    request_job_cancel, clear_job_cancel, is_job_cancelled, load_job_history, save_job_history,
-    record_job_start, update_job_stage, finish_job_history, JobHistoryEntry,
+    clear_job_cancel, discover_backends, discover_runtime_gpu_devices, finish_job_history,
+    inspect_model_topology, is_job_cancelled, load_job_history, open_official_download_page,
+    record_job_start, request_job_cancel, resolve_auto_runtime_device, save_job_history,
+    update_job_stage, BackendId, FoundBackend, GgufSummary, HfFolderInfo, HfQuantizeResult,
+    JobHistoryEntry, ModelProbe, ModelTopology, Precision, QuantizeResult, RuntimeGpuDevice,
+    SmokeCapture,
 };
-use std::path::{Path, PathBuf};
+use ojon_backend::{
+    compile_activation_recipe, prepare_gguf_abliteration_value, prepare_uncensor_from_trace,
+    run_gguf_abliteration, run_uncensor_from_trace,
+};
+use ojon_backend::{
+    hf_python_path, inspect_gguf, inspect_hf_folder, prepare_gguf, prepare_hf, probe_model,
+    quantize_gguf_with_log, quantize_hf_with_log, smoke_gguf_capture,
+};
+use ojon_backend::{load_settings, save_settings, LocalSettings};
+use ojon_backend::{
+    plan_optimize_workflow, run_optimize_workflow, OptimizeGoal, OptimizeWorkflowRequest,
+};
+use ojon_backend::{prepare_bench, resource_plan, run_bench, ResourceMode};
 use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use ui_core::{Rect, SizeConstraint, Vec2};
@@ -35,8 +42,10 @@ use ui_platform::winit::{
 use ui_platform::PointerState;
 use ui_render::{CommandBuffer, CpuBackend, GpuBackend, RenderBackend, SoftwarePresenter};
 use ui_themes::{BilingualLabel, ThemePalette};
-use ui_widgets::{icon_cache::{IconAtlas, StudioIcon}, KathamoUi, NavigationRail, NavigationRailItem};
-
+use ui_widgets::{
+    icon_cache::{IconAtlas, StudioIcon},
+    KathamoUi, NavigationRail, NavigationRailItem,
+};
 
 // Native Windows clipboard: cheap path pasting without a browser/UI runtime.
 // Safe only for CF_UNICODETEXT global-memory clipboard handles.
@@ -47,7 +56,9 @@ fn clipboard_text() -> Option<String> {
     };
     use windows_sys::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
     unsafe {
-        if OpenClipboard(0) == 0 { return None; }
+        if OpenClipboard(0) == 0 {
+            return None;
+        }
         // Win32 CF_UNICODETEXT is the documented clipboard format 13.
         let handle = GetClipboardData(13u32);
         if handle == 0 {
@@ -63,7 +74,9 @@ fn clipboard_text() -> Option<String> {
         }
         let limit = size.min(8192);
         let mut len = 0usize;
-        while len < limit && *ptr.add(len) != 0 { len += 1; }
+        while len < limit && *ptr.add(len) != 0 {
+            len += 1;
+        }
         let value = String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len));
         GlobalUnlock(global);
         CloseClipboard();
@@ -72,7 +85,9 @@ fn clipboard_text() -> Option<String> {
 }
 
 #[cfg(not(windows))]
-fn clipboard_text() -> Option<String> { None }
+fn clipboard_text() -> Option<String> {
+    None
+}
 
 #[cfg(windows)]
 fn pick_model_file() -> Option<PathBuf> {
@@ -86,7 +101,9 @@ fn pick_model_file() -> Option<PathBuf> {
 }
 
 #[cfg(not(windows))]
-fn pick_model_file() -> Option<PathBuf> { None }
+fn pick_model_file() -> Option<PathBuf> {
+    None
+}
 
 #[cfg(windows)]
 fn pick_folder(description: &str) -> Option<PathBuf> {
@@ -103,7 +120,9 @@ fn pick_folder(description: &str) -> Option<PathBuf> {
 }
 
 #[cfg(not(windows))]
-fn pick_folder(_description: &str) -> Option<PathBuf> { None }
+fn pick_folder(_description: &str) -> Option<PathBuf> {
+    None
+}
 
 fn open_folder_in_explorer(path: &Path) -> std::io::Result<()> {
     let dir = if path.is_dir() {
@@ -124,65 +143,111 @@ fn open_folder_in_explorer(path: &Path) -> std::io::Result<()> {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Focus {
-    Model, Output, Quantizer, Converter, Runtime, EvalServer, Benchmark, Prompt, GpuLayers,
-    OptBaseline, OptCandidate, OptSuite, OptOutput, OptImatrix, OptSensitivity, OptPpl,
-    OptMinSaving, OptMaxLoss, OptMaxPpl, OptRuntimeDevice, OptPrecisions,
-    OptBenchPrompt, OptBenchGeneration, OptBenchRepetitions, OptSpeedRatio,
-    UncTrace, UncOutput, UncStrength, UncBlock,
-    UncPaired, UncRefusalSuite, UncTaskSuite,
+    Model,
+    Output,
+    Quantizer,
+    Converter,
+    Runtime,
+    EvalServer,
+    Benchmark,
+    Prompt,
+    GpuLayers,
+    OptBaseline,
+    OptCandidate,
+    OptSuite,
+    OptOutput,
+    OptImatrix,
+    OptSensitivity,
+    OptPpl,
+    OptMinSaving,
+    OptMaxLoss,
+    OptMaxPpl,
+    OptRuntimeDevice,
+    OptPrecisions,
+    OptBenchPrompt,
+    OptBenchGeneration,
+    OptBenchRepetitions,
+    OptSpeedRatio,
+    UncTrace,
+    UncOutput,
+    UncStrength,
+    UncBlock,
+    UncPaired,
+    UncRefusalSuite,
+    UncTaskSuite,
 }
 
-#[derive(Clone,PartialEq)]
+#[derive(Clone, PartialEq)]
 struct UncensorRequest {
-    source:PathBuf,
-    trace:PathBuf,
-    output:PathBuf,
-    strength:f64,
-    block:Option<usize>,
+    source: PathBuf,
+    trace: PathBuf,
+    output: PathBuf,
+    strength: f64,
+    block: Option<usize>,
 }
 
-fn plan_uncensor(request:&UncensorRequest)->std::io::Result<serde_json::Value>{
-    if let Some(block)=request.block {
-        let recipe=recipe_from_control_vector(&request.trace,block,request.strength)?;
-        let plan=prepare_gguf_abliteration_value(&request.source,&recipe,&request.output)?;
-        Ok(serde_json::json!({"model_edit":plan.as_json(),"activation_tensors":1,
+fn plan_uncensor(request: &UncensorRequest) -> std::io::Result<serde_json::Value> {
+    if let Some(block) = request.block {
+        let recipe = recipe_from_control_vector(&request.trace, block, request.strength)?;
+        let plan = prepare_gguf_abliteration_value(&request.source, &recipe, &request.output)?;
+        Ok(
+            serde_json::json!({"model_edit":plan.as_json(),"activation_tensors":1,
             "direction_origin":"LLAMA_CPP_RESIDUAL_CONTROL_VECTOR","selected_block":block,
-            "refusal_rate":"NOT_EVALUATED","capability_retention":"NOT_EVALUATED","status":"PLAN_ONLY"}))
-    }else if request.source.extension().and_then(|x|x.to_str())==Some("gguf"){
-        let activation=compile_activation_recipe(&request.trace,request.strength,true)?;
-        let plan=prepare_gguf_abliteration_value(&request.source,&activation.recipe,&request.output)?;
+            "refusal_rate":"NOT_EVALUATED","capability_retention":"NOT_EVALUATED","status":"PLAN_ONLY"}),
+        )
+    } else if request.source.extension().and_then(|x| x.to_str()) == Some("gguf") {
+        let activation = compile_activation_recipe(&request.trace, request.strength, true)?;
+        let plan =
+            prepare_gguf_abliteration_value(&request.source, &activation.recipe, &request.output)?;
         Ok(serde_json::json!({"model_edit":plan.as_json(),
             "activation_records":activation.records,"activation_tensors":activation.tensors,
             "activation_capture":"EXTERNAL_INSTRUMENTED_RUNTIME",
             "refusal_rate":"NOT_EVALUATED","capability_retention":"NOT_EVALUATED",
             "status":"PLAN_ONLY"}))
-    }else{
-        Ok(prepare_uncensor_from_trace(&request.source,&request.trace,&request.output,
-            request.strength,true)?.as_json())
+    } else {
+        Ok(prepare_uncensor_from_trace(
+            &request.source,
+            &request.trace,
+            &request.output,
+            request.strength,
+            true,
+        )?
+        .as_json())
     }
 }
 
-fn execute_uncensor(request:&UncensorRequest,mut log:impl FnMut(&str))->std::io::Result<serde_json::Value>{
-    if let Some(block)=request.block {
-        let recipe=recipe_from_control_vector(&request.trace,block,request.strength)?;
-        let plan=prepare_gguf_abliteration_value(&request.source,&recipe,&request.output)?;
-        let model=run_gguf_abliteration(&plan,|line|log(line))?;
+fn execute_uncensor(
+    request: &UncensorRequest,
+    mut log: impl FnMut(&str),
+) -> std::io::Result<serde_json::Value> {
+    if let Some(block) = request.block {
+        let recipe = recipe_from_control_vector(&request.trace, block, request.strength)?;
+        let plan = prepare_gguf_abliteration_value(&request.source, &recipe, &request.output)?;
+        let model = run_gguf_abliteration(&plan, |line| log(line))?;
         Ok(serde_json::json!({"model":model,"activation_tensors":1,
             "direction_origin":"LLAMA_CPP_RESIDUAL_CONTROL_VECTOR","selected_block":block,
             "refusal_rate":"NOT_EVALUATED","capability_retention":"NOT_EVALUATED",
             "status":"EDITED_GGUF_NOT_VALIDATED"}))
-    }else if request.source.extension().and_then(|x|x.to_str())==Some("gguf"){
-        let activation=compile_activation_recipe(&request.trace,request.strength,true)?;
-        let plan=prepare_gguf_abliteration_value(&request.source,&activation.recipe,&request.output)?;
-        let model=run_gguf_abliteration(&plan,|line|log(line))?;
-        Ok(serde_json::json!({"model":model,"activation_records":activation.records,
+    } else if request.source.extension().and_then(|x| x.to_str()) == Some("gguf") {
+        let activation = compile_activation_recipe(&request.trace, request.strength, true)?;
+        let plan =
+            prepare_gguf_abliteration_value(&request.source, &activation.recipe, &request.output)?;
+        let model = run_gguf_abliteration(&plan, |line| log(line))?;
+        Ok(
+            serde_json::json!({"model":model,"activation_records":activation.records,
             "activation_tensors":activation.tensors,"activation_capture":"EXTERNAL_INSTRUMENTED_RUNTIME",
             "refusal_rate":"NOT_EVALUATED","capability_retention":"NOT_EVALUATED",
-            "status":"EDITED_GGUF_NOT_VALIDATED"}))
-    }else{
-        let plan=prepare_uncensor_from_trace(&request.source,&request.trace,&request.output,
-            request.strength,true)?;
-        run_uncensor_from_trace(&plan,|line|log(line))
+            "status":"EDITED_GGUF_NOT_VALIDATED"}),
+        )
+    } else {
+        let plan = prepare_uncensor_from_trace(
+            &request.source,
+            &request.trace,
+            &request.output,
+            request.strength,
+            true,
+        )?;
+        run_uncensor_from_trace(&plan, |line| log(line))
     }
 }
 
@@ -191,12 +256,15 @@ enum WorkerEvent {
     HfInspected(Result<(HfFolderInfo, ModelProbe), String>),
     StandaloneProbed(Result<ModelProbe, String>),
     Planned(Result<String, String>),
-    OptimizerPlan(OptimizeWorkflowRequest, Result<serde_json::Value,String>),
-    OptimizerRun(Result<serde_json::Value,String>),
-    UncensorPlan(UncensorRequest,Result<serde_json::Value,String>),
-    UncensorRun(Result<serde_json::Value,String>),
-    UncensorAutoPlan(ojon_backend::uncensor_auto::UncensorAutoRequest,Result<serde_json::Value,String>),
-    UncensorAutoRun(Result<serde_json::Value,String>),
+    OptimizerPlan(OptimizeWorkflowRequest, Result<serde_json::Value, String>),
+    OptimizerRun(Result<serde_json::Value, String>),
+    UncensorPlan(UncensorRequest, Result<serde_json::Value, String>),
+    UncensorRun(Result<serde_json::Value, String>),
+    UncensorAutoPlan(
+        ojon_backend::uncensor_auto::UncensorAutoRequest,
+        Result<serde_json::Value, String>,
+    ),
+    UncensorAutoRun(Result<serde_json::Value, String>),
     Quantized(Result<QuantizeResult, String>),
     HfQuantized(Result<HfQuantizeResult, String>),
     Smoke(Result<SmokeCapture, String>),
@@ -210,11 +278,11 @@ struct Workstation {
     source: String,
     output: String,
     local_settings: LocalSettings,
-    settings_load_failed:bool,
+    settings_load_failed: bool,
     quantizer: String,
     converter: String,
     runtime: String,
-    eval_server:String,
+    eval_server: String,
     benchmark: String,
     prompt: String,
     gpu_layers: String,
@@ -227,7 +295,7 @@ struct Workstation {
     advanced_opt_expanded: bool,
     advanced_unc_expanded: bool,
     history_expanded: bool,
-    backend_capabilities:Option<serde_json::Value>,
+    backend_capabilities: Option<serde_json::Value>,
     detected_gpus: Vec<RuntimeGpuDevice>,
     opt_baseline: String,
     opt_candidate: String,
@@ -240,28 +308,31 @@ struct Workstation {
     opt_max_loss: String,
     opt_max_ppl: String,
     opt_goal: usize,
-    opt_device:usize,
-    opt_runtime_device:String,
-    opt_precisions:String,
-    opt_bench_prompt:String,
-    opt_bench_generation:String,
-    opt_bench_repetitions:String,
-    opt_speed_ratio:String,
-    opt_planned: Option<(OptimizeWorkflowRequest,serde_json::Value)>,
+    opt_device: usize,
+    opt_runtime_device: String,
+    opt_precisions: String,
+    opt_bench_prompt: String,
+    opt_bench_generation: String,
+    opt_bench_repetitions: String,
+    opt_speed_ratio: String,
+    opt_planned: Option<(OptimizeWorkflowRequest, serde_json::Value)>,
     opt_result: Option<serde_json::Value>,
-    unc_trace:String,
-    unc_output:String,
-    unc_strength:String,
-    unc_block:String,
-    unc_planned:Option<(UncensorRequest,serde_json::Value)>,
-    unc_result:Option<serde_json::Value>,
-    unc_tab:usize,
-    unc_paired:String,
-    unc_refusal_suite:String,
-    unc_task_suite:String,
-    unc_auto_quantize:usize,
-    unc_auto_planned:Option<(ojon_backend::uncensor_auto::UncensorAutoRequest,serde_json::Value)>,
-    unc_auto_result:Option<serde_json::Value>,
+    unc_trace: String,
+    unc_output: String,
+    unc_strength: String,
+    unc_block: String,
+    unc_planned: Option<(UncensorRequest, serde_json::Value)>,
+    unc_result: Option<serde_json::Value>,
+    unc_tab: usize,
+    unc_paired: String,
+    unc_refusal_suite: String,
+    unc_task_suite: String,
+    unc_auto_quantize: usize,
+    unc_auto_planned: Option<(
+        ojon_backend::uncensor_auto::UncensorAutoRequest,
+        serde_json::Value,
+    )>,
+    unc_auto_result: Option<serde_json::Value>,
     learn_subtab: usize,
     learn_dataset_filter: usize,
     learn_train_quant: usize,
@@ -298,63 +369,92 @@ struct Workstation {
 impl Workstation {
     fn new() -> Self {
         let (tx, rx) = mpsc::channel();
-        let (settings,settings_problem)=match load_settings(){
-            Ok(value)=>(value,None),
-            Err(e)=>(LocalSettings::default(),Some(e.to_string())),
+        let (settings, settings_problem) = match load_settings() {
+            Ok(value) => (value, None),
+            Err(e) => (LocalSettings::default(), Some(e.to_string())),
         };
-        let mut source=settings.last_model.as_deref()
-            .filter(|path|Path::new(path).exists()).unwrap_or("").to_string();
-        let backends=if settings_problem.is_none(){
+        let mut source = settings
+            .last_model
+            .as_deref()
+            .filter(|path| Path::new(path).exists())
+            .unwrap_or("")
+            .to_string();
+        let backends = if settings_problem.is_none() {
             ojon_backend::discovery::discover_backends_with_settings(&settings)
-        }else{
+        } else {
             // Never silently pick a different executable if a preferences
             // file exists but could not be parsed.
             Vec::new()
         };
-        let mut quantizer = backends.iter()
+        let mut quantizer = backends
+            .iter()
             .find(|b| b.spec.id == BackendId::LlamaQuantize)
             .and_then(|b| b.executable.as_ref())
             .map(|p| p.to_string_lossy().into_owned())
-            .or_else(||settings.backend("OJON_LLAMA_QUANTIZE").map(str::to_owned))
+            .or_else(|| settings.backend("OJON_LLAMA_QUANTIZE").map(str::to_owned))
             .unwrap_or_else(|| "llama-quantize".to_owned());
-        let mut converter = backends.iter()
+        let mut converter = backends
+            .iter()
             .find(|b| b.spec.id == BackendId::HfConverter)
             .and_then(|b| b.executable.as_ref())
             .map(|p| p.to_string_lossy().into_owned())
-            .or_else(||settings.backend("OJON_CONVERT_HF").map(str::to_owned))
+            .or_else(|| settings.backend("OJON_CONVERT_HF").map(str::to_owned))
             .unwrap_or_else(|| "convert_hf_to_gguf.py".to_owned());
-        let mut runtime = backends.iter()
+        let mut runtime = backends
+            .iter()
             .find(|b| b.spec.id == BackendId::LlamaCli)
             .and_then(|b| b.executable.as_ref())
             .map(|p| p.to_string_lossy().into_owned())
-            .or_else(||settings.backend("OJON_LLAMA_CLI").map(str::to_owned))
+            .or_else(|| settings.backend("OJON_LLAMA_CLI").map(str::to_owned))
             .unwrap_or_else(|| "llama-cli".to_owned());
-        let eval_server=backends.iter()
-            .find(|b|b.spec.id==BackendId::LlamaServer)
-            .and_then(|b|b.executable.as_ref())
-            .map(|path|path.to_string_lossy().into_owned())
-            .or_else(||settings.backend("OJON_LLAMA_SERVER").map(str::to_owned))
+        let eval_server = backends
+            .iter()
+            .find(|b| b.spec.id == BackendId::LlamaServer)
+            .and_then(|b| b.executable.as_ref())
+            .map(|path| path.to_string_lossy().into_owned())
+            .or_else(|| settings.backend("OJON_LLAMA_SERVER").map(str::to_owned))
             .unwrap_or_default();
-        let benchmark = backends.iter()
+        let benchmark = backends
+            .iter()
             .find(|b| b.spec.id == BackendId::LlamaBench)
             .and_then(|b| b.executable.as_ref())
             .map(|p| p.to_string_lossy().into_owned())
-            .or_else(||settings.backend("OJON_LLAMA_BENCH").map(str::to_owned))
+            .or_else(|| settings.backend("OJON_LLAMA_BENCH").map(str::to_owned))
             .unwrap_or_else(|| "llama-bench".to_owned());
         let mut args = std::env::args_os().skip(1);
         while let Some(key) = args.next() {
             match key.to_str() {
-                Some("--model") => if let Some(s) = args.next() { source = s.to_string_lossy().into_owned(); },
-                Some("--quantizer") => if let Some(s) = args.next() { quantizer = s.to_string_lossy().into_owned(); },
-                Some("--converter") => if let Some(s) = args.next() { converter = s.to_string_lossy().into_owned(); },
-                Some("--runtime") => if let Some(s) = args.next() { runtime = s.to_string_lossy().into_owned(); },
+                Some("--model") => {
+                    if let Some(s) = args.next() {
+                        source = s.to_string_lossy().into_owned();
+                    }
+                }
+                Some("--quantizer") => {
+                    if let Some(s) = args.next() {
+                        quantizer = s.to_string_lossy().into_owned();
+                    }
+                }
+                Some("--converter") => {
+                    if let Some(s) = args.next() {
+                        converter = s.to_string_lossy().into_owned();
+                    }
+                }
+                Some("--runtime") => {
+                    if let Some(s) = args.next() {
+                        runtime = s.to_string_lossy().into_owned();
+                    }
+                }
                 _ => {}
             }
         }
         let output = default_output(&source, Precision::default());
-        let initial_opt_output=settings.output_directory.clone().unwrap_or_else(||
-            Path::new(&output).parent().filter(|p|!p.as_os_str().is_empty())
-                .map(|p|p.to_string_lossy().into_owned()).unwrap_or_default());
+        let initial_opt_output = settings.output_directory.clone().unwrap_or_else(|| {
+            Path::new(&output)
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
         let detected_gpus = discover_runtime_gpu_devices();
         let job_history = load_job_history().unwrap_or_default();
         Self {
@@ -447,106 +547,158 @@ impl Workstation {
     }
     /// Save only user preferences. CLI overrides and inferred runtime
     /// capabilities are deliberately not treated as verified settings.
-    fn persist_local_settings(&mut self,show_success:bool){
-        if self.settings_load_failed{
+    fn persist_local_settings(&mut self, show_success: bool) {
+        if self.settings_load_failed {
             self.status="Settings file is invalid. Repair it with the CLI or restore a backup before saving GUI preferences.".into();
-            self.needs_redraw=true;
+            self.needs_redraw = true;
             return;
         }
-        let mut next=self.local_settings.clone();
-        next.last_model=Some(self.source.trim().to_string())
-            .filter(|v|!v.is_empty());
-        next.model_directory=next.last_model.as_deref()
-            .and_then(|v|Path::new(v).parent())
-            .filter(|v|!v.as_os_str().is_empty())
-            .map(|v|v.to_string_lossy().into_owned())
-            .or_else(||next.model_directory.clone());
-        next.output_directory=Some(self.opt_output.trim().to_string())
-            .filter(|v|!v.is_empty());
-        for (key,value,default) in [
-            ("OJON_LLAMA_QUANTIZE",self.quantizer.trim(),"llama-quantize"),
-            ("OJON_CONVERT_HF",self.converter.trim(),"convert_hf_to_gguf.py"),
-            ("OJON_LLAMA_CLI",self.runtime.trim(),"llama-cli"),
-            ("OJON_LLAMA_SERVER",self.eval_server.trim(),"llama-server"),
-            ("OJON_LLAMA_BENCH",self.benchmark.trim(),"llama-bench"),
-        ]{
-            if value.is_empty()||value==default{
+        let mut next = self.local_settings.clone();
+        next.last_model = Some(self.source.trim().to_string()).filter(|v| !v.is_empty());
+        next.model_directory = next
+            .last_model
+            .as_deref()
+            .and_then(|v| Path::new(v).parent())
+            .filter(|v| !v.as_os_str().is_empty())
+            .map(|v| v.to_string_lossy().into_owned())
+            .or_else(|| next.model_directory.clone());
+        next.output_directory = Some(self.opt_output.trim().to_string()).filter(|v| !v.is_empty());
+        for (key, value, default) in [
+            (
+                "OJON_LLAMA_QUANTIZE",
+                self.quantizer.trim(),
+                "llama-quantize",
+            ),
+            (
+                "OJON_CONVERT_HF",
+                self.converter.trim(),
+                "convert_hf_to_gguf.py",
+            ),
+            ("OJON_LLAMA_CLI", self.runtime.trim(), "llama-cli"),
+            ("OJON_LLAMA_SERVER", self.eval_server.trim(), "llama-server"),
+            ("OJON_LLAMA_BENCH", self.benchmark.trim(), "llama-bench"),
+        ] {
+            if value.is_empty() || value == default {
                 next.backend_paths.remove(key);
-            }else{
-                next.backend_paths.insert(key.to_owned(),value.to_owned());
+            } else {
+                next.backend_paths.insert(key.to_owned(), value.to_owned());
             }
         }
-        next.optimization_goal=match self.opt_goal{
-            1=>"smallest",2=>"fastest",3=>"maximum_quality",_=>"balanced"
-        }.into();
-        next.preferred_device=match self.opt_device{
-            1=>"cpu",2=>"cuda",3=>"xpu",4=>"vulkan",_=>"auto"
-        }.into();
-        next.runtime_device=if matches!(self.opt_device,2|3|4){
-            Some(self.opt_runtime_device.trim().to_string()).filter(|v|!v.is_empty())
-        }else{None};
-        next.precision_candidates=Some(self.opt_precisions.trim().to_string())
-            .filter(|v|!v.is_empty());
-        let parsed=(||{
-            next.min_saving_percent=self.opt_min_saving.trim().parse::<f64>()
-                .map_err(|_|"Invalid minimum size saving")?;
-            next.max_loss_points=self.opt_max_loss.trim().parse::<f64>()
-                .map_err(|_|"Invalid maximum task quality loss")?;
-            next.max_ppl_regression_pct=self.opt_max_ppl.trim().parse::<f64>()
-                .map_err(|_|"Invalid maximum PPL regression")?;
-            next.gpu_layers=self.gpu_layers.trim().parse::<u32>()
-                .map_err(|_|"Invalid GPU layer count")?;
-            next.bench_prompt_tokens=self.opt_bench_prompt.trim().parse::<u32>()
-                .map_err(|_|"Invalid benchmark prefill tokens")?;
-            next.bench_generation_tokens=self.opt_bench_generation.trim().parse::<u32>()
-                .map_err(|_|"Invalid benchmark decode tokens")?;
-            next.bench_repetitions=self.opt_bench_repetitions.trim().parse::<u32>()
-                .map_err(|_|"Invalid benchmark repetitions")?;
-            next.balanced_min_speed_ratio=self.opt_speed_ratio.trim().parse::<f64>()
-                .map_err(|_|"Invalid Balanced speed ratio")?;
-            next.validate().map_err(|_|"Invalid preference value")
+        next.optimization_goal = match self.opt_goal {
+            1 => "smallest",
+            2 => "fastest",
+            3 => "maximum_quality",
+            _ => "balanced",
+        }
+        .into();
+        next.preferred_device = match self.opt_device {
+            1 => "cpu",
+            2 => "cuda",
+            3 => "xpu",
+            4 => "vulkan",
+            _ => "auto",
+        }
+        .into();
+        next.runtime_device = if matches!(self.opt_device, 2 | 3 | 4) {
+            Some(self.opt_runtime_device.trim().to_string()).filter(|v| !v.is_empty())
+        } else {
+            None
+        };
+        next.precision_candidates =
+            Some(self.opt_precisions.trim().to_string()).filter(|v| !v.is_empty());
+        let parsed = (|| {
+            next.min_saving_percent = self
+                .opt_min_saving
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| "Invalid minimum size saving")?;
+            next.max_loss_points = self
+                .opt_max_loss
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| "Invalid maximum task quality loss")?;
+            next.max_ppl_regression_pct = self
+                .opt_max_ppl
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| "Invalid maximum PPL regression")?;
+            next.gpu_layers = self
+                .gpu_layers
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| "Invalid GPU layer count")?;
+            next.bench_prompt_tokens = self
+                .opt_bench_prompt
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| "Invalid benchmark prefill tokens")?;
+            next.bench_generation_tokens = self
+                .opt_bench_generation
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| "Invalid benchmark decode tokens")?;
+            next.bench_repetitions = self
+                .opt_bench_repetitions
+                .trim()
+                .parse::<u32>()
+                .map_err(|_| "Invalid benchmark repetitions")?;
+            next.balanced_min_speed_ratio = self
+                .opt_speed_ratio
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| "Invalid Balanced speed ratio")?;
+            next.validate().map_err(|_| "Invalid preference value")
         })();
-        if let Err(error)=parsed{
-            self.status=format!("Preferences not saved: {error}");
-            self.needs_redraw=true;
+        if let Err(error) = parsed {
+            self.status = format!("Preferences not saved: {error}");
+            self.needs_redraw = true;
             return;
         }
-        match save_settings(&next){
-            Ok(path)=>{
-                self.local_settings=next;
-                if show_success{
-                    self.status=format!("Local preferences saved: {}",path.display());
-                    self.needs_redraw=true;
+        match save_settings(&next) {
+            Ok(path) => {
+                self.local_settings = next;
+                if show_success {
+                    self.status = format!("Local preferences saved: {}", path.display());
+                    self.needs_redraw = true;
                 }
-            },
-            Err(e)=>{
-                self.status=format!("Cannot save local preferences: {e}");
-                self.needs_redraw=true;
+            }
+            Err(e) => {
+                self.status = format!("Cannot save local preferences: {e}");
+                self.needs_redraw = true;
                 eprintln!("Ojon local settings save failed: {e}");
             }
         }
     }
     fn rescan_backends(&mut self) {
-        self.backend_capabilities=None;
+        self.backend_capabilities = None;
         self.backends = discover_backends();
         if self.converter.trim() == "convert_hf_to_gguf.py" || self.converter.trim().is_empty() {
-            if let Some(path) = self.backends.iter()
+            if let Some(path) = self
+                .backends
+                .iter()
                 .find(|b| b.spec.id == BackendId::HfConverter)
-                .and_then(|b| b.executable.as_ref()) {
+                .and_then(|b| b.executable.as_ref())
+            {
                 self.converter = path.to_string_lossy().into_owned();
             }
         }
         if self.quantizer.trim() == "llama-quantize" || self.quantizer.trim().is_empty() {
-            if let Some(path) = self.backends.iter()
+            if let Some(path) = self
+                .backends
+                .iter()
                 .find(|b| b.spec.id == BackendId::LlamaQuantize)
-                .and_then(|b| b.executable.as_ref()) {
+                .and_then(|b| b.executable.as_ref())
+            {
                 self.quantizer = path.to_string_lossy().into_owned();
             }
         }
         if self.runtime.trim() == "llama-cli" || self.runtime.trim().is_empty() {
-            if let Some(path) = self.backends.iter()
+            if let Some(path) = self
+                .backends
+                .iter()
                 .find(|b| b.spec.id == BackendId::LlamaCli)
-                .and_then(|b| b.executable.as_ref()) {
+                .and_then(|b| b.executable.as_ref())
+            {
                 self.runtime = path.to_string_lossy().into_owned();
             }
         }
@@ -559,42 +711,61 @@ impl Workstation {
     /// preferences are not a prerequisite for an explicit per-run override.
     /// In particular, selecting a SYCL or Vulkan llama-cli must not
     /// accidentally run the first CUDA binary discovered at startup.
-    fn selected_backends(&self)->Vec<FoundBackend>{
-        let mut found=self.backends.clone();
-        for (id,current,default) in [
-            (BackendId::LlamaQuantize,self.quantizer.trim(),"llama-quantize"),
-            (BackendId::LlamaCli,self.runtime.trim(),"llama-cli"),
-            (BackendId::LlamaServer,self.eval_server.trim(),"llama-server"),
-            (BackendId::LlamaBench,self.benchmark.trim(),"llama-bench"),
-            (BackendId::HfConverter,self.converter.trim(),"convert_hf_to_gguf.py"),
-        ]{
-            if current.is_empty()||current==default{continue;}
-            if let Some(backend)=found.iter_mut().find(|item|item.spec.id==id){
-                let path=PathBuf::from(current);
-                backend.executable=path.is_file().then_some(path);
-                backend.found_via=Some("Kathamo selected executable");
+    fn selected_backends(&self) -> Vec<FoundBackend> {
+        let mut found = self.backends.clone();
+        for (id, current, default) in [
+            (
+                BackendId::LlamaQuantize,
+                self.quantizer.trim(),
+                "llama-quantize",
+            ),
+            (BackendId::LlamaCli, self.runtime.trim(), "llama-cli"),
+            (
+                BackendId::LlamaServer,
+                self.eval_server.trim(),
+                "llama-server",
+            ),
+            (BackendId::LlamaBench, self.benchmark.trim(), "llama-bench"),
+            (
+                BackendId::HfConverter,
+                self.converter.trim(),
+                "convert_hf_to_gguf.py",
+            ),
+        ] {
+            if current.is_empty() || current == default {
+                continue;
+            }
+            if let Some(backend) = found.iter_mut().find(|item| item.spec.id == id) {
+                let path = PathBuf::from(current);
+                backend.executable = path.is_file().then_some(path);
+                backend.found_via = Some("Kathamo selected executable");
             }
         }
         found
     }
     /// Explicit bounded tool probes, never an implicit model load.
-    fn start_capability_probe(&mut self){
-        if self.busy{return;}
-        let tools=self.selected_backends();
-        let tx=self.tx.clone();
-        self.backend_capabilities=None;
-        self.busy=true;
-        self.started_at=Some(Instant::now());
-        self.status="Probing selected local executables (no model inference or quantization)...".into();
-        self.needs_redraw=true;
-        std::thread::spawn(move||{
-            let receipt=ojon_backend::probe_backend_capabilities(&tools);
-            let _=tx.send(WorkerEvent::BackendCapabilities(receipt));
+    fn start_capability_probe(&mut self) {
+        if self.busy {
+            return;
+        }
+        let tools = self.selected_backends();
+        let tx = self.tx.clone();
+        self.backend_capabilities = None;
+        self.busy = true;
+        self.started_at = Some(Instant::now());
+        self.status =
+            "Probing selected local executables (no model inference or quantization)...".into();
+        self.needs_redraw = true;
+        std::thread::spawn(move || {
+            let receipt = ojon_backend::probe_backend_capabilities(&tools);
+            let _ = tx.send(WorkerEvent::BackendCapabilities(receipt));
         });
     }
 
     #[allow(dead_code)]
-    fn hf_converter(&self) -> &str { &self.converter }
+    fn hf_converter(&self) -> &str {
+        &self.converter
+    }
     fn precision(&self) -> Precision {
         match self.recipe {
             1 => Precision::Q4KM,
@@ -605,7 +776,8 @@ impl Workstation {
     }
     fn set_source(&mut self, path: &Path) {
         if self.busy {
-            self.status = "A job is already running. Finish it before importing a different model.".into();
+            self.status =
+                "A job is already running. Finish it before importing a different model.".into();
             self.needs_redraw = true;
             return;
         }
@@ -620,8 +792,10 @@ impl Workstation {
         self.last_output = None;
         self.opt_planned = None;
         self.opt_result = None;
-        let parent_dir = path.parent()
-            .map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        let parent_dir = path
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
         self.opt_output = parent_dir.clone();
         if self.unc_output.trim().is_empty() {
             self.unc_output = parent_dir;
@@ -632,7 +806,9 @@ impl Workstation {
         self.start_inspect();
     }
     fn start_inspect(&mut self) {
-        if self.busy { return; }
+        if self.busy {
+            return;
+        }
         self.inspected_source = None;
         self.model = None;
         self.model_topology = None;
@@ -640,12 +816,16 @@ impl Workstation {
         self.probe = None;
         self.last_output = None;
         let model = PathBuf::from(self.source.trim());
-        if self.source.trim().is_empty() { self.status = "Choose a GGUF file or local HF model folder first.".into(); return; }
+        if self.source.trim().is_empty() {
+            self.status = "Choose a GGUF file or local HF model folder first.".into();
+            return;
+        }
         let tx = self.tx.clone();
         if self.output.trim().is_empty() {
             self.output = default_output(&self.source, self.precision());
         }
-        self.status = "Reading model metadata and tensor topology without loading weights...".into();
+        self.status =
+            "Reading model metadata and tensor topology without loading weights...".into();
         self.current_stage = "Inspecting model metadata".into();
         self.inspected_source = Some(self.source.clone());
         self.started_at = Some(Instant::now());
@@ -654,11 +834,14 @@ impl Workstation {
         std::thread::spawn(move || {
             if model.is_dir() {
                 let result = inspect_hf_folder(&model)
-                    .and_then(|info| probe_model(&model).map(|p| (info,p)))
+                    .and_then(|info| probe_model(&model).map(|p| (info, p)))
                     .map_err(|e| e.to_string());
                 let _ = tx.send(WorkerEvent::HfInspected(result));
-            } else if model.extension().and_then(|s| s.to_str())
-                .is_some_and(|s| s.eq_ignore_ascii_case("gguf")) {
+            } else if model
+                .extension()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.eq_ignore_ascii_case("gguf"))
+            {
                 let result = inspect_gguf(&model)
                     .and_then(|info| {
                         let topo = inspect_model_topology(&model).ok();
@@ -667,21 +850,27 @@ impl Workstation {
                     .map_err(|e| e.to_string());
                 let _ = tx.send(WorkerEvent::Inspected(result));
             } else {
-                let result = probe_model(&model).map_err(|e|e.to_string());
+                let result = probe_model(&model).map_err(|e| e.to_string());
                 let _ = tx.send(WorkerEvent::StandaloneProbed(result));
             }
         });
     }
     fn start_plan(&mut self) {
-        if self.busy { return; }
+        if self.busy {
+            return;
+        }
         if !self.ready_to_convert() {
             self.status = "Import and inspect a compatible GGUF or HF folder before planning. GGUF is the only connected quantization format.".into();
             self.needs_redraw = true;
             return;
         }
         let (source, output, tool, converter, python, precision) = (
-            self.source.clone(), self.output.clone(), self.quantizer.clone(),
-            self.converter.clone(), hf_python_path(), self.precision(),
+            self.source.clone(),
+            self.output.clone(),
+            self.quantizer.clone(),
+            self.converter.clone(),
+            hf_python_path(),
+            self.precision(),
         );
         let tx = self.tx.clone();
         self.busy = true;
@@ -689,7 +878,9 @@ impl Workstation {
         self.status = "Checking source/output safety with installed public backends...".into();
         self.needs_redraw = true;
         std::thread::spawn(move || {
-            let threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(4);
+            let threads = std::thread::available_parallelism()
+                .map(|v| v.get())
+                .unwrap_or(4);
             let res = if Path::new(source.trim()).is_dir() {
                 prepare_hf(
                     Path::new(source.trim()), Path::new(output.trim()), Path::new(converter.trim()),
@@ -729,129 +920,188 @@ impl Workstation {
     }
     /// Read-only settings capture. The visual inputs are simple model-independent
     /// strings; this converts them to a strongly validated backend request.
-    fn optimize_request(&self) -> Result<OptimizeWorkflowRequest,String> {
-        let source=self.source.trim();
-        if source.is_empty(){return Err("Choose a model first".into());}
-        let mut req=OptimizeWorkflowRequest::new(PathBuf::from(source));
-        let server=self.eval_server.trim();
-        if !server.is_empty() && server!="llama-server" {
-            req.server_tool=Some(PathBuf::from(server));
+    fn optimize_request(&self) -> Result<OptimizeWorkflowRequest, String> {
+        let source = self.source.trim();
+        if source.is_empty() {
+            return Err("Choose a model first".into());
         }
-        req.goal=match self.opt_goal{
-            1=>OptimizeGoal::Smallest,
-            2=>OptimizeGoal::Fastest,
-            3=>OptimizeGoal::MaximumQuality,
-            _=>OptimizeGoal::Balanced
+        let mut req = OptimizeWorkflowRequest::new(PathBuf::from(source));
+        let server = self.eval_server.trim();
+        if !server.is_empty() && server != "llama-server" {
+            req.server_tool = Some(PathBuf::from(server));
+        }
+        req.goal = match self.opt_goal {
+            1 => OptimizeGoal::Smallest,
+            2 => OptimizeGoal::Fastest,
+            3 => OptimizeGoal::MaximumQuality,
+            _ => OptimizeGoal::Balanced,
         };
-        req.device=match self.opt_device{
-            1=>"cpu",2=>"cuda",3=>"xpu",4=>"vulkan",_=>"auto"
-        }.into();
-        if matches!(self.opt_device,2|3|4){
-            req.runtime_device=Some(self.opt_runtime_device.trim().to_string())
-                .filter(|v|!v.is_empty());
-            req.gpu_layers=self.gpu_layers.trim().parse::<i32>()
-                .map_err(|_|"GPU offload layers must be an integer")?;
+        req.device = match self.opt_device {
+            1 => "cpu",
+            2 => "cuda",
+            3 => "xpu",
+            4 => "vulkan",
+            _ => "auto",
         }
-        let recipe=self.opt_precisions.trim();
-        if !recipe.is_empty(){
-            req.precision_candidates=Some(ojon_backend::parse_precisions(recipe)
-                .map_err(|e|format!("Guided precisions: {e}"))?);
+        .into();
+        if matches!(self.opt_device, 2 | 3 | 4) {
+            req.runtime_device =
+                Some(self.opt_runtime_device.trim().to_string()).filter(|v| !v.is_empty());
+            req.gpu_layers = self
+                .gpu_layers
+                .trim()
+                .parse::<i32>()
+                .map_err(|_| "GPU offload layers must be an integer")?;
         }
-        req.bench_prompt_tokens=self.opt_bench_prompt.trim().parse()
-            .map_err(|_|"Benchmark prefill tokens must be an integer")?;
-        req.bench_generation_tokens=self.opt_bench_generation.trim().parse()
-            .map_err(|_|"Benchmark decode tokens must be an integer")?;
-        req.bench_repetitions=self.opt_bench_repetitions.trim().parse()
-            .map_err(|_|"Benchmark repetitions must be an integer")?;
-        req.balanced_min_speed_ratio=self.opt_speed_ratio.trim().parse()
-            .map_err(|_|"Balanced minimum speed ratio must be numeric")?;
-        let baseline=self.opt_baseline.trim();
-        if !baseline.is_empty(){req.current_baseline=Some(PathBuf::from(baseline));}
-        let candidate=self.opt_candidate.trim();
-        if !candidate.is_empty(){req.candidates.push(("smaller".into(),PathBuf::from(candidate)));}
-        let suite=self.opt_suite.trim();
-        if !suite.is_empty(){
-            req.suite=Some(PathBuf::from(suite));
-        }else{
+        let recipe = self.opt_precisions.trim();
+        if !recipe.is_empty() {
+            req.precision_candidates = Some(
+                ojon_backend::parse_precisions(recipe)
+                    .map_err(|e| format!("Guided precisions: {e}"))?,
+            );
+        }
+        req.bench_prompt_tokens = self
+            .opt_bench_prompt
+            .trim()
+            .parse()
+            .map_err(|_| "Benchmark prefill tokens must be an integer")?;
+        req.bench_generation_tokens = self
+            .opt_bench_generation
+            .trim()
+            .parse()
+            .map_err(|_| "Benchmark decode tokens must be an integer")?;
+        req.bench_repetitions = self
+            .opt_bench_repetitions
+            .trim()
+            .parse()
+            .map_err(|_| "Benchmark repetitions must be an integer")?;
+        req.balanced_min_speed_ratio = self
+            .opt_speed_ratio
+            .trim()
+            .parse()
+            .map_err(|_| "Balanced minimum speed ratio must be numeric")?;
+        let baseline = self.opt_baseline.trim();
+        if !baseline.is_empty() {
+            req.current_baseline = Some(PathBuf::from(baseline));
+        }
+        let candidate = self.opt_candidate.trim();
+        if !candidate.is_empty() {
+            req.candidates
+                .push(("smaller".into(), PathBuf::from(candidate)));
+        }
+        let suite = self.opt_suite.trim();
+        if !suite.is_empty() {
+            req.suite = Some(PathBuf::from(suite));
+        } else {
             // One-click default: the bundled structural sanity suite keeps the
             // guided search functional without user benchmark data. It is
             // explicitly a MINIMUM gate, not a representative benchmark.
-            req.suite=ojon_backend::discovery::bundled_data_file("sanity-tasks.json");
+            req.suite = ojon_backend::discovery::bundled_data_file("sanity-tasks.json");
         }
-        let output=self.opt_output.trim();
-        if !output.is_empty(){
-            req.output_dir=Some(PathBuf::from(output));
-        }else{
-            req.output_dir=Path::new(source).parent().map(Path::to_path_buf);
+        let output = self.opt_output.trim();
+        if !output.is_empty() {
+            req.output_dir = Some(PathBuf::from(output));
+        } else {
+            req.output_dir = Path::new(source).parent().map(Path::to_path_buf);
         }
-        let sensitivity=self.opt_sensitivity.trim();
-        if !sensitivity.is_empty(){req.tensor_sensitivity=Some(PathBuf::from(sensitivity));}
-        let imatrix=self.opt_imatrix.trim();
-        if !imatrix.is_empty(){
-            req.imatrix=Some(PathBuf::from(imatrix));
-        }else{
+        let sensitivity = self.opt_sensitivity.trim();
+        if !sensitivity.is_empty() {
+            req.tensor_sensitivity = Some(PathBuf::from(sensitivity));
+        }
+        let imatrix = self.opt_imatrix.trim();
+        if !imatrix.is_empty() {
+            req.imatrix = Some(PathBuf::from(imatrix));
+        } else {
             // One-click default: an approved run calibrates a bundled-corpus
             // importance matrix itself when the backend exists.
-            req.auto_imatrix=true;
+            req.auto_imatrix = true;
         }
-        let ppl=self.opt_ppl.trim();
-        if !ppl.is_empty(){req.ppl_corpus=Some(PathBuf::from(ppl));}
-        req.min_saving_percent=self.opt_min_saving.trim().parse()
-            .map_err(|_|"Minimum size reduction must be a number from 0 to 95".to_owned())?;
-        req.max_loss_points=self.opt_max_loss.trim().parse()
-            .map_err(|_|"Allowed task score loss must be a number from 0 to 100".to_owned())?;
-        req.max_ppl_regression_pct=self.opt_max_ppl.trim().parse()
-            .map_err(|_|"Allowed PPL regression must be a number from 0 to 100".to_owned())?;
+        let ppl = self.opt_ppl.trim();
+        if !ppl.is_empty() {
+            req.ppl_corpus = Some(PathBuf::from(ppl));
+        }
+        req.min_saving_percent = self
+            .opt_min_saving
+            .trim()
+            .parse()
+            .map_err(|_| "Minimum size reduction must be a number from 0 to 95".to_owned())?;
+        req.max_loss_points = self
+            .opt_max_loss
+            .trim()
+            .parse()
+            .map_err(|_| "Allowed task score loss must be a number from 0 to 100".to_owned())?;
+        req.max_ppl_regression_pct = self
+            .opt_max_ppl
+            .trim()
+            .parse()
+            .map_err(|_| "Allowed PPL regression must be a number from 0 to 100".to_owned())?;
         Ok(req)
     }
     fn start_optimizer_advice(&mut self) {
-        if self.busy{return;}
-        if self.inspected_source.as_deref()!=Some(self.source.as_str()) {
-            self.status="Inspect the currently selected model before planning optimization.".into();
-            self.needs_redraw=true;
+        if self.busy {
             return;
         }
-        let request=match self.optimize_request(){
-            Ok(v)=>v,
-            Err(e)=>{self.status=format!("Optimizer settings: {e}");self.needs_redraw=true;return;}
+        if self.inspected_source.as_deref() != Some(self.source.as_str()) {
+            self.status =
+                "Inspect the currently selected model before planning optimization.".into();
+            self.needs_redraw = true;
+            return;
+        }
+        let request = match self.optimize_request() {
+            Ok(v) => v,
+            Err(e) => {
+                self.status = format!("Optimizer settings: {e}");
+                self.needs_redraw = true;
+                return;
+            }
         };
-        let tools=self.selected_backends();
-        let tx=self.tx.clone();
-        self.opt_planned=None;
-        self.opt_result=None;
-        self.optimize_review_tab=0;
-        self.busy=true;
-        self.current_stage="Planning precision search route".into();
-        self.started_at=Some(Instant::now());
-        self.status="Planning optimal quantization route (read-only; no model weights or GPU)".into();
-        self.needs_redraw=true;
-        std::thread::spawn(move||{
-            let result=plan_optimize_workflow(&request,&tools).map_err(|e|e.to_string());
-            let _=tx.send(WorkerEvent::OptimizerPlan(request,result));
+        let tools = self.selected_backends();
+        let tx = self.tx.clone();
+        self.opt_planned = None;
+        self.opt_result = None;
+        self.optimize_review_tab = 0;
+        self.busy = true;
+        self.current_stage = "Planning precision search route".into();
+        self.started_at = Some(Instant::now());
+        self.status =
+            "Planning optimal quantization route (read-only; no model weights or GPU)".into();
+        self.needs_redraw = true;
+        std::thread::spawn(move || {
+            let result = plan_optimize_workflow(&request, &tools).map_err(|e| e.to_string());
+            let _ = tx.send(WorkerEvent::OptimizerPlan(request, result));
         });
     }
-    fn start_optimizer_run(&mut self){
-        if self.busy{return;}
-        if self.inspected_source.as_deref()!=Some(self.source.as_str()){
-            self.status="Inspect this model before running an optimizer.".into();
-            self.needs_redraw=true;return;
+    fn start_optimizer_run(&mut self) {
+        if self.busy {
+            return;
         }
-        let request=match self.optimize_request(){
-            Ok(v)=>v,
-            Err(e)=>{self.status=format!("Optimizer settings: {e}");self.needs_redraw=true;return;}
+        if self.inspected_source.as_deref() != Some(self.source.as_str()) {
+            self.status = "Inspect this model before running an optimizer.".into();
+            self.needs_redraw = true;
+            return;
+        }
+        let request = match self.optimize_request() {
+            Ok(v) => v,
+            Err(e) => {
+                self.status = format!("Optimizer settings: {e}");
+                self.needs_redraw = true;
+                return;
+            }
         };
-        let approved=matches!(self.opt_planned.as_ref(),
+        let approved = matches!(self.opt_planned.as_ref(),
             Some((planned,value)) if *planned==request && value["ready_for_user_approved_execution"]==true);
         if !approved {
             self.status="Settings changed or prerequisites are missing. Review a fresh plan before approving execution.".into();
-            self.opt_planned=None;
-            self.needs_redraw=true;
+            self.opt_planned = None;
+            self.needs_redraw = true;
             return;
         }
         self.launch_optimizer_worker(request);
     }
     fn start_one_click_optimize(&mut self) {
-        if self.busy { return; }
+        if self.busy {
+            return;
+        }
         if self.source.trim().is_empty() {
             self.status = "Select or drop a model first before clicking Optimise Model.".into();
             self.needs_redraw = true;
@@ -880,16 +1130,23 @@ impl Workstation {
         self.started_at = Some(Instant::now());
         self.last_elapsed = None;
         self.busy = true;
-        let out_dir = request.output_dir.clone().unwrap_or_else(|| PathBuf::from("."));
+        let out_dir = request
+            .output_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("."));
         let job_id = record_job_start(
             "optimize_model",
             &request.model,
             &out_dir,
             &format!("{:?}", request.goal),
             "Calibrating & searching precision candidates",
-        ).unwrap_or_else(|_| "opt_job".into());
+        )
+        .unwrap_or_else(|_| "opt_job".into());
         self.job_history = load_job_history().unwrap_or_default();
-        self.status = format!("Optimising model on {} ({:?}); live logs below.", request.device, request.goal);
+        self.status = format!(
+            "Optimising model on {} ({:?}); live logs below.",
+            request.device, request.goal
+        );
         self.needs_redraw = true;
         std::thread::spawn(move || {
             let logs = tx.clone();
@@ -901,21 +1158,35 @@ impl Workstation {
                 } else if line.contains("quantiz") {
                     let _ = logs.send(WorkerEvent::Stage("Quantising candidate GGUF".into()));
                     let _ = update_job_stage(&jid, "Quantising candidate GGUF");
-                } else if line.contains("eval") || line.contains("server") || line.contains("bench") {
-                    let _ = logs.send(WorkerEvent::Stage("Evaluating quality, reload & speed".into()));
+                } else if line.contains("eval") || line.contains("server") || line.contains("bench")
+                {
+                    let _ = logs.send(WorkerEvent::Stage(
+                        "Evaluating quality, reload & speed".into(),
+                    ));
                     let _ = update_job_stage(&jid, "Evaluating quality, reload & speed");
                 }
                 let _ = logs.send(WorkerEvent::Log(line.to_owned()));
-            }).map_err(|e| e.to_string());
+            })
+            .map_err(|e| e.to_string());
             match &result {
                 Ok(val) => {
-                    let cand = val["provisional_candidate"]["path"].as_str()
+                    let cand = val["provisional_candidate"]["path"]
+                        .as_str()
                         .or_else(|| val["provisional_candidate"].as_str());
                     let status = val["status"].as_str().unwrap_or("COMPLETED");
-                    let _ = finish_job_history(&job_id, status, cand.map(Path::new), "Optimization workflow finished");
+                    let _ = finish_job_history(
+                        &job_id,
+                        status,
+                        cand.map(Path::new),
+                        "Optimization workflow finished",
+                    );
                 }
                 Err(err) => {
-                    let status = if is_job_cancelled() { "CANCELLED" } else { "FAILED" };
+                    let status = if is_job_cancelled() {
+                        "CANCELLED"
+                    } else {
+                        "FAILED"
+                    };
                     let _ = finish_job_history(&job_id, status, None, err);
                 }
             }
@@ -923,7 +1194,9 @@ impl Workstation {
         });
     }
     fn cancel_active_job(&mut self) {
-        if !self.busy { return; }
+        if !self.busy {
+            return;
+        }
         request_job_cancel();
         self.busy = false;
         self.current_stage = "Cancelled by user".into();
@@ -941,193 +1214,283 @@ impl Workstation {
         self.status = "Active job cancelled safely. Any completed candidate checkpoints remain in the output folder.".into();
         self.needs_redraw = true;
     }
-    fn uncensor_request(&self)->Result<UncensorRequest,String>{
-        let source=self.source.trim();
-        let trace=self.unc_trace.trim();
-        let output=self.unc_output.trim();
-        if source.is_empty()||trace.is_empty()||output.is_empty(){
+    fn uncensor_request(&self) -> Result<UncensorRequest, String> {
+        let source = self.source.trim();
+        let trace = self.unc_trace.trim();
+        let output = self.unc_output.trim();
+        if source.is_empty() || trace.is_empty() || output.is_empty() {
             return Err("Select a source, paired activation trace, and new output path".into());
         }
-        let strength=self.unc_strength.trim().parse::<f64>()
-            .map_err(|_|"Edit strength must be a number".to_owned())?;
-        if !strength.is_finite()||strength<=0.0||strength>1.0{
+        let strength = self
+            .unc_strength
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| "Edit strength must be a number".to_owned())?;
+        if !strength.is_finite() || strength <= 0.0 || strength > 1.0 {
             return Err("Edit strength must be >0 and <=1".into());
         }
-        let block=if self.unc_block.trim().is_empty(){None}else{
-            Some(self.unc_block.trim().parse::<usize>()
-                .map_err(|_|"Control-vector block must be a nonnegative integer".to_owned())?)
+        let block = if self.unc_block.trim().is_empty() {
+            None
+        } else {
+            Some(
+                self.unc_block
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| "Control-vector block must be a nonnegative integer".to_owned())?,
+            )
         };
-        if block.is_some() && (!trace.ends_with(".gguf") || !source.ends_with(".gguf")){
+        if block.is_some() && (!trace.ends_with(".gguf") || !source.ends_with(".gguf")) {
             return Err("Control-vector mode requires GGUF source and vector paths".into());
         }
-        if block.is_none() && trace.ends_with(".gguf"){
+        if block.is_none() && trace.ends_with(".gguf") {
             return Err("Enter the zero-based block index for a control-vector GGUF".into());
         }
-        Ok(UncensorRequest{source:PathBuf::from(source),trace:PathBuf::from(trace),
-            output:PathBuf::from(output),strength,block})
+        Ok(UncensorRequest {
+            source: PathBuf::from(source),
+            trace: PathBuf::from(trace),
+            output: PathBuf::from(output),
+            strength,
+            block,
+        })
     }
-    fn start_uncensor_plan(&mut self){
-        if self.busy{return;}
-        if self.inspected_source.as_deref()!=Some(self.source.as_str()){
-            self.status="Inspect the currently selected source before planning an edit.".into();
-            self.needs_redraw=true;return;
+    fn start_uncensor_plan(&mut self) {
+        if self.busy {
+            return;
         }
-        let request=match self.uncensor_request(){
-            Ok(r)=>r,Err(e)=>{self.status=e;self.needs_redraw=true;return;}
+        if self.inspected_source.as_deref() != Some(self.source.as_str()) {
+            self.status = "Inspect the currently selected source before planning an edit.".into();
+            self.needs_redraw = true;
+            return;
+        }
+        let request = match self.uncensor_request() {
+            Ok(r) => r,
+            Err(e) => {
+                self.status = e;
+                self.needs_redraw = true;
+                return;
+            }
         };
-        let tx=self.tx.clone();
-        self.unc_planned=None;self.unc_result=None;
-        self.busy=true;self.started_at=Some(Instant::now());
-        self.status="Checking trace and model tensors without changing the source".into();
-        self.needs_redraw=true;
-        std::thread::spawn(move||{
-            let result=plan_uncensor(&request).map_err(|e|e.to_string());
-            let _=tx.send(WorkerEvent::UncensorPlan(request,result));
+        let tx = self.tx.clone();
+        self.unc_planned = None;
+        self.unc_result = None;
+        self.busy = true;
+        self.started_at = Some(Instant::now());
+        self.status = "Checking trace and model tensors without changing the source".into();
+        self.needs_redraw = true;
+        std::thread::spawn(move || {
+            let result = plan_uncensor(&request).map_err(|e| e.to_string());
+            let _ = tx.send(WorkerEvent::UncensorPlan(request, result));
         });
     }
-    fn start_uncensor_run(&mut self){
-        if self.busy{return;}
-        let request=match self.uncensor_request(){
-            Ok(r)=>r,Err(e)=>{self.status=e;self.needs_redraw=true;return;}
+    fn start_uncensor_run(&mut self) {
+        if self.busy {
+            return;
+        }
+        let request = match self.uncensor_request() {
+            Ok(r) => r,
+            Err(e) => {
+                self.status = e;
+                self.needs_redraw = true;
+                return;
+            }
         };
-        let approved=matches!(self.unc_planned.as_ref(),Some((planned,_)) if *planned==request);
-        if !approved{
-            self.status="Edit settings changed. Review a fresh plan before running.".into();
-            self.unc_planned=None;self.needs_redraw=true;return;
+        let approved = matches!(self.unc_planned.as_ref(),Some((planned,_)) if *planned==request);
+        if !approved {
+            self.status = "Edit settings changed. Review a fresh plan before running.".into();
+            self.unc_planned = None;
+            self.needs_redraw = true;
+            return;
         }
         clear_job_cancel();
-        let tx=self.tx.clone();
-        self.unc_planned=None;self.unc_result=None;self.log_tail.clear();
-        self.busy=true;self.started_at=Some(Instant::now());
-        self.current_stage="Applying norm-preserving tensor edits".into();
-        self.status="Writing a new edited checkpoint; original source remains untouched".into();
-        self.needs_redraw=true;
-        std::thread::spawn(move||{
-            let logger=tx.clone();
-            let result=execute_uncensor(&request,|line|{
-                let _=logger.send(WorkerEvent::Log(line.to_owned()));
-            }).map_err(|e|e.to_string());
-            let _=tx.send(WorkerEvent::UncensorRun(result));
+        let tx = self.tx.clone();
+        self.unc_planned = None;
+        self.unc_result = None;
+        self.log_tail.clear();
+        self.busy = true;
+        self.started_at = Some(Instant::now());
+        self.current_stage = "Applying norm-preserving tensor edits".into();
+        self.status = "Writing a new edited checkpoint; original source remains untouched".into();
+        self.needs_redraw = true;
+        std::thread::spawn(move || {
+            let logger = tx.clone();
+            let result = execute_uncensor(&request, |line| {
+                let _ = logger.send(WorkerEvent::Log(line.to_owned()));
+            })
+            .map_err(|e| e.to_string());
+            let _ = tx.send(WorkerEvent::UncensorRun(result));
         });
     }
-    fn uncensor_auto_request(&self)->Result<ojon_backend::uncensor_auto::UncensorAutoRequest,String>{
-        let source=self.source.trim();
-        if source.is_empty()||!source.ends_with(".gguf"){
-            return Err("Automatic refusal search needs an original F16/BF16/F32 GGUF source".into());
+    fn uncensor_auto_request(
+        &self,
+    ) -> Result<ojon_backend::uncensor_auto::UncensorAutoRequest, String> {
+        let source = self.source.trim();
+        if source.is_empty() || !source.ends_with(".gguf") {
+            return Err(
+                "Automatic refusal search needs an original F16/BF16/F32 GGUF source".into(),
+            );
         }
-        let paired=self.unc_paired.trim();
-        let paired=if paired.is_empty(){
+        let paired = self.unc_paired.trim();
+        let paired = if paired.is_empty() {
             ojon_backend::discovery::bundled_data_dir("paired")
-                .or_else(||ojon_backend::discovery::bundled_data_file("positive.txt").and_then(|p|p.parent().map(Path::to_path_buf)))
-                .map(|p|p.to_string_lossy().into_owned())
+                .or_else(|| {
+                    ojon_backend::discovery::bundled_data_file("positive.txt")
+                        .and_then(|p| p.parent().map(Path::to_path_buf))
+                })
+                .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default()
-        }else{paired.to_string()};
-        if paired.is_empty(){
+        } else {
+            paired.to_string()
+        };
+        if paired.is_empty() {
             return Err("Select a folder with paired positive.txt and negative.txt behaviour examples (or place them in data/paired)".into());
         }
-        let refusal_suite=self.unc_refusal_suite.trim();
-        let refusal_suite=if refusal_suite.is_empty(){
+        let refusal_suite = self.unc_refusal_suite.trim();
+        let refusal_suite = if refusal_suite.is_empty() {
             ojon_backend::discovery::bundled_data_file("refusal-probes.json")
-        }else{Some(PathBuf::from(refusal_suite))};
-        let refusal_suite=refusal_suite
-            .ok_or_else(||"No refusal probe suite found; provide a ojon.refusal_suite.v1 JSON path".to_owned())?;
-        let task_suite=self.unc_task_suite.trim();
-        let task_suite=if task_suite.is_empty(){
+        } else {
+            Some(PathBuf::from(refusal_suite))
+        };
+        let refusal_suite = refusal_suite.ok_or_else(|| {
+            "No refusal probe suite found; provide a ojon.refusal_suite.v1 JSON path".to_owned()
+        })?;
+        let task_suite = self.unc_task_suite.trim();
+        let task_suite = if task_suite.is_empty() {
             ojon_backend::discovery::bundled_data_file("sanity-tasks.json")
-        }else{Some(PathBuf::from(task_suite))};
-        let task_suite=task_suite
-            .ok_or_else(||"No capability suite found; provide a ojon.task_suite.v1 JSON path".to_owned())?;
-        let output=self.unc_output.trim();
-        let output_dir=if output.is_empty(){
-            Path::new(source).parent().ok_or_else(||"Source has no parent folder".to_owned())?
-        }else{Path::new(output)};
-        let parsed_layers=self.gpu_layers.trim().parse::<i32>()
-            .map_err(|_|"GPU offload layers must be an integer".to_owned())?;
+        } else {
+            Some(PathBuf::from(task_suite))
+        };
+        let task_suite = task_suite.ok_or_else(|| {
+            "No capability suite found; provide a ojon.task_suite.v1 JSON path".to_owned()
+        })?;
+        let output = self.unc_output.trim();
+        let output_dir = if output.is_empty() {
+            Path::new(source)
+                .parent()
+                .ok_or_else(|| "Source has no parent folder".to_owned())?
+        } else {
+            Path::new(output)
+        };
+        let parsed_layers = self
+            .gpu_layers
+            .trim()
+            .parse::<i32>()
+            .map_err(|_| "GPU offload layers must be an integer".to_owned())?;
         let gpu_layers = if parsed_layers == 0 {
             let (_, _, auto_layers) = resolve_auto_runtime_device("auto", None, 0);
             auto_layers as i32
         } else {
             parsed_layers
         };
-        let quantize=match self.unc_auto_quantize{
-            1=>Some(Precision::Q4KM),2=>Some(Precision::Q5KM),3=>Some(Precision::Q6K),
-            _=>None,
+        let quantize = match self.unc_auto_quantize {
+            1 => Some(Precision::Q4KM),
+            2 => Some(Precision::Q5KM),
+            3 => Some(Precision::Q6K),
+            _ => None,
         };
-        let cvector_generator=self.backends.iter()
-            .find(|b|b.spec.id==BackendId::LlamaCvectorGenerator)
-            .and_then(|b|b.executable.clone());
-        let mut request=ojon_backend::uncensor_auto::UncensorAutoRequest::new(
-            PathBuf::from(source),output_dir.to_path_buf());
-        request.refusal_probes=refusal_suite;
-        request.capability_suite=task_suite;
-        request.paired_prompts=PathBuf::from(paired);
-        request.cvector_generator=cvector_generator
-            .ok_or_else(||"llama-cvector-generator was not detected; install it or use the CLI path".to_owned())?;
+        let cvector_generator = self
+            .backends
+            .iter()
+            .find(|b| b.spec.id == BackendId::LlamaCvectorGenerator)
+            .and_then(|b| b.executable.clone());
+        let mut request = ojon_backend::uncensor_auto::UncensorAutoRequest::new(
+            PathBuf::from(source),
+            output_dir.to_path_buf(),
+        );
+        request.refusal_probes = refusal_suite;
+        request.capability_suite = task_suite;
+        request.paired_prompts = PathBuf::from(paired);
+        request.cvector_generator = cvector_generator.ok_or_else(|| {
+            "llama-cvector-generator was not detected; install it or use the CLI path".to_owned()
+        })?;
         let rt_str = self.runtime.trim();
         request.runtime = if rt_str.is_empty() || rt_str == "llama-cli" {
-            ojon_backend::discovered_path(BackendId::LlamaCli).unwrap_or_else(|| PathBuf::from("llama-cli"))
+            ojon_backend::discovered_path(BackendId::LlamaCli)
+                .unwrap_or_else(|| PathBuf::from("llama-cli"))
         } else {
             PathBuf::from(rt_str)
         };
-        let server=self.eval_server.trim();
-        if !server.is_empty() && server!="llama-server"{
-            request.server_runtime=Some(PathBuf::from(server));
+        let server = self.eval_server.trim();
+        if !server.is_empty() && server != "llama-server" {
+            request.server_runtime = Some(PathBuf::from(server));
         } else {
-            request.server_runtime=ojon_backend::discovered_path(BackendId::LlamaServer);
+            request.server_runtime = ojon_backend::discovered_path(BackendId::LlamaServer);
         }
-        request.gpu_layers=gpu_layers;
-        request.quantize=quantize;
+        request.gpu_layers = gpu_layers;
+        request.quantize = quantize;
         let q_str = self.quantizer.trim();
         request.quantizer = if q_str.is_empty() || q_str == "llama-quantize" {
-            ojon_backend::discovered_path(BackendId::LlamaQuantize).unwrap_or_else(|| PathBuf::from("llama-quantize"))
+            ojon_backend::discovered_path(BackendId::LlamaQuantize)
+                .unwrap_or_else(|| PathBuf::from("llama-quantize"))
         } else {
             PathBuf::from(q_str)
         };
 
         Ok(request)
-
     }
-    fn start_uncensor_auto_plan(&mut self){
-        if self.busy{return;}
-        if self.inspected_source.as_deref()!=Some(self.source.as_str()){
-            self.status="Inspect the currently selected source before planning an automatic search.".into();
-            self.needs_redraw=true;return;
+    fn start_uncensor_auto_plan(&mut self) {
+        if self.busy {
+            return;
         }
-        let request=match self.uncensor_auto_request(){
-            Ok(r)=>r,
-            Err(e)=>{self.status=e;self.needs_redraw=true;return;}
+        if self.inspected_source.as_deref() != Some(self.source.as_str()) {
+            self.status =
+                "Inspect the currently selected source before planning an automatic search.".into();
+            self.needs_redraw = true;
+            return;
+        }
+        let request = match self.uncensor_auto_request() {
+            Ok(r) => r,
+            Err(e) => {
+                self.status = e;
+                self.needs_redraw = true;
+                return;
+            }
         };
-        let tx=self.tx.clone();
-        self.unc_auto_planned=None;self.unc_auto_result=None;
-        self.busy=true;self.started_at=Some(Instant::now());
-        self.current_stage="Planning automatic refusal direction search".into();
-        self.status="Planning the automatic refusal-edit sweep (read-only)".into();
-        self.needs_redraw=true;
-        std::thread::spawn(move||{
-            let result=ojon_backend::uncensor_auto::prepare_uncensor_auto(request.clone())
-                .map(|plan|plan.as_json())
-                .map_err(|e|e.to_string());
-            let _=tx.send(WorkerEvent::UncensorAutoPlan(request,result));
+        let tx = self.tx.clone();
+        self.unc_auto_planned = None;
+        self.unc_auto_result = None;
+        self.busy = true;
+        self.started_at = Some(Instant::now());
+        self.current_stage = "Planning automatic refusal direction search".into();
+        self.status = "Planning the automatic refusal-edit sweep (read-only)".into();
+        self.needs_redraw = true;
+        std::thread::spawn(move || {
+            let result = ojon_backend::uncensor_auto::prepare_uncensor_auto(request.clone())
+                .map(|plan| plan.as_json())
+                .map_err(|e| e.to_string());
+            let _ = tx.send(WorkerEvent::UncensorAutoPlan(request, result));
         });
     }
-    fn start_uncensor_auto_run(&mut self){
-        if self.busy{return;}
-        let request=match self.uncensor_auto_request(){
-            Ok(r)=>r,
-            Err(e)=>{self.status=e;self.needs_redraw=true;return;}
+    fn start_uncensor_auto_run(&mut self) {
+        if self.busy {
+            return;
+        }
+        let request = match self.uncensor_auto_request() {
+            Ok(r) => r,
+            Err(e) => {
+                self.status = e;
+                self.needs_redraw = true;
+                return;
+            }
         };
-        let approved=matches!(self.unc_auto_planned.as_ref(),
+        let approved = matches!(self.unc_auto_planned.as_ref(),
             Some((planned,value)) if *planned==request && value["status"]=="PLAN_ONLY");
-        if !approved{
-            self.status="Automatic search settings changed. Review a fresh plan before executing.".into();
-            self.unc_auto_planned=None;self.needs_redraw=true;return;
+        if !approved {
+            self.status =
+                "Automatic search settings changed. Review a fresh plan before executing.".into();
+            self.unc_auto_planned = None;
+            self.needs_redraw = true;
+            return;
         }
         self.launch_uncensor_auto_worker(request);
     }
     fn start_one_click_uncensor(&mut self) {
-        if self.busy { return; }
+        if self.busy {
+            return;
+        }
         if self.source.trim().is_empty() {
-            self.status = "Select or drop an F16/BF16/F32 GGUF model first before clicking Uncensor Model.".into();
+            self.status =
+                "Select or drop an F16/BF16/F32 GGUF model first before clicking Uncensor Model."
+                    .into();
             self.needs_redraw = true;
             return;
         }
@@ -1141,7 +1504,10 @@ impl Workstation {
         };
         self.launch_uncensor_auto_worker(request);
     }
-    fn launch_uncensor_auto_worker(&mut self, request: ojon_backend::uncensor_auto::UncensorAutoRequest) {
+    fn launch_uncensor_auto_worker(
+        &mut self,
+        request: ojon_backend::uncensor_auto::UncensorAutoRequest,
+    ) {
         clear_job_cancel();
         let tx = self.tx.clone();
         self.unc_auto_planned = None;
@@ -1157,7 +1523,8 @@ impl Workstation {
             &request.output_dir,
             "automatic",
             "Capturing refusal directions & searching edits",
-        ).unwrap_or_else(|_| "unc_job".into());
+        )
+        .unwrap_or_else(|_| "unc_job".into());
         self.job_history = load_job_history().unwrap_or_default();
         self.status = "Automatic uncensor search running: capturing directions, testing candidate edits, verifying capabilities...".into();
         self.needs_redraw = true;
@@ -1168,28 +1535,44 @@ impl Workstation {
             let result = match plan {
                 Ok(plan) => ojon_backend::uncensor_auto::run_uncensor_auto(&plan, |line| {
                     if line.contains("Capturing") || line.contains("cvector") {
-                        let _ = logger.send(WorkerEvent::Stage("Capturing paired refusal directions".into()));
+                        let _ = logger.send(WorkerEvent::Stage(
+                            "Capturing paired refusal directions".into(),
+                        ));
                         let _ = update_job_stage(&jid, "Capturing paired refusal directions");
                     } else if line.contains("Candidate") {
                         let _ = logger.send(WorkerEvent::Stage(line.chars().take(64).collect()));
                         let _ = update_job_stage(&jid, "Searching & scoring candidate edits");
                     } else if line.contains("Quantizing") || line.contains("Verifying") {
-                        let _ = logger.send(WorkerEvent::Stage("Reloading & verifying published winner".into()));
+                        let _ = logger.send(WorkerEvent::Stage(
+                            "Reloading & verifying published winner".into(),
+                        ));
                         let _ = update_job_stage(&jid, "Reloading & verifying published winner");
                     }
                     let _ = logger.send(WorkerEvent::Log(line.to_owned()));
                 }),
                 Err(e) => Err(e),
-            }.map_err(|e| e.to_string());
+            }
+            .map_err(|e| e.to_string());
             match &result {
                 Ok(val) => {
-                    let cand = val["output_quantized"].as_str().or_else(|| val["output_edited"].as_str());
+                    let cand = val["output_quantized"]
+                        .as_str()
+                        .or_else(|| val["output_edited"].as_str());
                     let status = val["status"].as_str().unwrap_or("COMPLETED");
-                    let _ = finish_job_history(&job_id, status, cand.map(Path::new), "Automatic uncensor workflow finished");
+                    let _ = finish_job_history(
+                        &job_id,
+                        status,
+                        cand.map(Path::new),
+                        "Automatic uncensor workflow finished",
+                    );
                 }
 
                 Err(err) => {
-                    let status = if is_job_cancelled() { "CANCELLED" } else { "FAILED" };
+                    let status = if is_job_cancelled() {
+                        "CANCELLED"
+                    } else {
+                        "FAILED"
+                    };
                     let _ = finish_job_history(&job_id, status, None, err);
                 }
             }
@@ -1204,15 +1587,21 @@ impl Workstation {
             && !self.output.trim().is_empty()
     }
     fn start_quantize(&mut self) {
-        if self.busy { return; }
+        if self.busy {
+            return;
+        }
         if !self.ready_to_convert() {
             self.status = "Inspect the selected model and choose GGUF before quantizing. This source/format is not ready.".into();
             self.needs_redraw = true;
             return;
         }
         let (source, output, tool, converter, python, precision) = (
-            self.source.clone(), self.output.clone(), self.quantizer.clone(),
-            self.converter.clone(), hf_python_path(), self.precision(),
+            self.source.clone(),
+            self.output.clone(),
+            self.quantizer.clone(),
+            self.converter.clone(),
+            hf_python_path(),
+            self.precision(),
         );
         let tx = self.tx.clone();
         self.busy = true;
@@ -1223,28 +1612,48 @@ impl Workstation {
         self.status = "Running installed converter. Live subprocess messages appear below; no estimated percentage is shown.".into();
         self.needs_redraw = true;
         std::thread::spawn(move || {
-            let threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(4);
+            let threads = std::thread::available_parallelism()
+                .map(|v| v.get())
+                .unwrap_or(4);
             if Path::new(source.trim()).is_dir() {
                 let result = prepare_hf(
-                    Path::new(source.trim()), Path::new(output.trim()), Path::new(converter.trim()),
-                    &python, Path::new(tool.trim()), precision, threads,
-                ).and_then(|plan| quantize_hf_with_log(&plan, |line| {
-                    let _ = tx.send(WorkerEvent::Log(line.to_owned()));
-                })).map_err(|e| e.to_string());
+                    Path::new(source.trim()),
+                    Path::new(output.trim()),
+                    Path::new(converter.trim()),
+                    &python,
+                    Path::new(tool.trim()),
+                    precision,
+                    threads,
+                )
+                .and_then(|plan| {
+                    quantize_hf_with_log(&plan, |line| {
+                        let _ = tx.send(WorkerEvent::Log(line.to_owned()));
+                    })
+                })
+                .map_err(|e| e.to_string());
                 let _ = tx.send(WorkerEvent::HfQuantized(result));
             } else {
                 let result = prepare_gguf(
-                    Path::new(source.trim()), Path::new(output.trim()),
-                    Path::new(tool.trim()), precision, threads,
-                ).and_then(|plan| quantize_gguf_with_log(&plan, |line| {
-                    let _ = tx.send(WorkerEvent::Log(line.to_owned()));
-                })).map_err(|e| e.to_string());
+                    Path::new(source.trim()),
+                    Path::new(output.trim()),
+                    Path::new(tool.trim()),
+                    precision,
+                    threads,
+                )
+                .and_then(|plan| {
+                    quantize_gguf_with_log(&plan, |line| {
+                        let _ = tx.send(WorkerEvent::Log(line.to_owned()));
+                    })
+                })
+                .map_err(|e| e.to_string());
                 let _ = tx.send(WorkerEvent::Quantized(result));
             }
         });
     }
     fn start_smoke(&mut self) {
-        if self.busy { return; }
+        if self.busy {
+            return;
+        }
         let gpu_layers = match self.gpu_layers.trim().parse::<u32>() {
             Ok(v) if v <= 512 => v,
             _ => {
@@ -1253,8 +1662,11 @@ impl Workstation {
                 return;
             }
         };
-        let (output, runtime, prompt) =
-            (self.output.clone(), self.runtime.clone(), self.prompt.clone());
+        let (output, runtime, prompt) = (
+            self.output.clone(),
+            self.runtime.clone(),
+            self.prompt.clone(),
+        );
         let tx = self.tx.clone();
         self.busy = true;
         self.started_at = Some(Instant::now());
@@ -1264,13 +1676,21 @@ impl Workstation {
         self.status = "Running real llama-cli inference. This is not a quality benchmark.".into();
         self.needs_redraw = true;
         std::thread::spawn(move || {
-            let result = smoke_gguf_capture(Path::new(output.trim()), Path::new(runtime.trim()), &prompt, 32, gpu_layers)
-                .map_err(|e| e.to_string());
+            let result = smoke_gguf_capture(
+                Path::new(output.trim()),
+                Path::new(runtime.trim()),
+                &prompt,
+                32,
+                gpu_layers,
+            )
+            .map_err(|e| e.to_string());
             let _ = tx.send(WorkerEvent::Smoke(result));
         });
     }
     fn start_bench(&mut self) {
-        if self.busy { return; }
+        if self.busy {
+            return;
+        }
         let gpu_layers = match self.gpu_layers.trim().parse::<i32>() {
             Ok(v) if (0..=512).contains(&v) => v,
             _ => {
@@ -1280,22 +1700,31 @@ impl Workstation {
             }
         };
         let (model, benchmark) = (self.output.clone(), self.benchmark.clone());
-        let (prompt_tokens,gen_tokens,repetitions)=match (
+        let (prompt_tokens, gen_tokens, repetitions) = match (
             self.opt_bench_prompt.trim().parse::<u32>(),
             self.opt_bench_generation.trim().parse::<u32>(),
-            self.opt_bench_repetitions.trim().parse::<u32>())
-        {
-            (Ok(pp),Ok(tg),Ok(reps)) if (16..=8192).contains(&pp)
-                &&(16..=2048).contains(&tg)&&(1..=10).contains(&reps)=>(pp,tg,reps),
-            _=>{
-                self.status="Benchmark settings: prefill 16..8192, decode 16..2048, repetitions 1..10.".into();
-                self.needs_redraw=true;
+            self.opt_bench_repetitions.trim().parse::<u32>(),
+        ) {
+            (Ok(pp), Ok(tg), Ok(reps))
+                if (16..=8192).contains(&pp)
+                    && (16..=2048).contains(&tg)
+                    && (1..=10).contains(&reps) =>
+            {
+                (pp, tg, reps)
+            }
+            _ => {
+                self.status =
+                    "Benchmark settings: prefill 16..8192, decode 16..2048, repetitions 1..10."
+                        .into();
+                self.needs_redraw = true;
                 return;
             }
         };
-        let device=if matches!(self.opt_device,2|3){
-            Some(self.opt_runtime_device.trim().to_string()).filter(|v|!v.is_empty())
-        }else{None};
+        let device = if matches!(self.opt_device, 2 | 3) {
+            Some(self.opt_runtime_device.trim().to_string()).filter(|v| !v.is_empty())
+        } else {
+            None
+        };
         let tx = self.tx.clone();
         self.busy = true;
         self.started_at = Some(Instant::now());
@@ -1306,17 +1735,26 @@ impl Workstation {
         std::thread::spawn(move || {
             let result = (|| -> std::io::Result<(PathBuf, serde_json::Value)> {
                 let model = Path::new(model.trim());
-                let plan = prepare_bench(model, Path::new(benchmark.trim()),
-                    prompt_tokens,gen_tokens,repetitions,gpu_layers,device.as_deref())?;
+                let plan = prepare_bench(
+                    model,
+                    Path::new(benchmark.trim()),
+                    prompt_tokens,
+                    gen_tokens,
+                    repetitions,
+                    gpu_layers,
+                    device.as_deref(),
+                )?;
                 let stamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH).map_err(std::io::Error::other)?
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(std::io::Error::other)?
                     .as_millis();
                 let name = model.file_stem().unwrap_or_default().to_string_lossy();
                 let parent = model.parent().unwrap_or_else(|| Path::new("."));
                 let receipt = parent.join(format!("{name}-ojon-bench-{stamp}.json"));
                 let metrics = run_bench(&plan, &receipt)?;
                 Ok((receipt, metrics))
-            })().map_err(|e| e.to_string());
+            })()
+            .map_err(|e| e.to_string());
             let _ = tx.send(WorkerEvent::Bench(result));
         });
     }
@@ -1324,17 +1762,24 @@ impl Workstation {
         while let Ok(message) = self.rx.try_recv() {
             self.needs_redraw = true;
             if let WorkerEvent::Log(line) = message {
-                let truncated: String = line.chars()
+                let truncated: String = line
+                    .chars()
                     .filter(|ch| !ch.is_control() || *ch == ' ')
-                    .take(180).collect();
+                    .take(180)
+                    .collect();
                 if !truncated.trim().is_empty() {
                     self.log_tail.push_back(truncated);
-                    while self.log_tail.len() > 8 { self.log_tail.pop_front(); }
+                    while self.log_tail.len() > 8 {
+                        self.log_tail.pop_front();
+                    }
                 }
                 continue; // Log events MUST NOT set busy=false.
             }
             if let WorkerEvent::Stage(stage) = message {
-                if !self.current_stage.is_empty() && self.current_stage != "Idle" && self.current_stage != stage {
+                if !self.current_stage.is_empty()
+                    && self.current_stage != "Idle"
+                    && self.current_stage != stage
+                {
                     self.completed_stages.push(self.current_stage.clone());
                     while self.completed_stages.len() > 5 {
                         self.completed_stages.remove(0);
@@ -1348,16 +1793,25 @@ impl Workstation {
             self.job_history = load_job_history().unwrap_or_default();
             match message {
                 WorkerEvent::Inspected(Ok((model, probe, topo))) => {
-                    let topo_note = topo.as_ref().map(|t| {
-                        format!(
-                            " | {:.2}B params, {:.2} bpw, {}",
-                            t.total_parameters as f64 / 1e9,
-                            t.effective_bpw,
-                            if t.is_moe { "MoE" } else { "Dense" }
-                        )
-                    }).unwrap_or_default();
-                    self.status = format!("Read GGUF v{}: {} tensors; likely category {} ({}){}. No weights loaded.",
-                        model.version, model.tensor_count, probe.category.as_str(), probe.confidence, topo_note);
+                    let topo_note = topo
+                        .as_ref()
+                        .map(|t| {
+                            format!(
+                                " | {:.2}B params, {:.2} bpw, {}",
+                                t.total_parameters as f64 / 1e9,
+                                t.effective_bpw,
+                                if t.is_moe { "MoE" } else { "Dense" }
+                            )
+                        })
+                        .unwrap_or_default();
+                    self.status = format!(
+                        "Read GGUF v{}: {} tensors; likely category {} ({}){}. No weights loaded.",
+                        model.version,
+                        model.tensor_count,
+                        probe.category.as_str(),
+                        probe.confidence,
+                        topo_note
+                    );
                     self.model = Some(model);
                     self.model_topology = topo;
                     self.hf_folder = None;
@@ -1377,8 +1831,12 @@ impl Workstation {
                     self.current_stage = "HF folder inspected".into();
                 }
                 WorkerEvent::StandaloneProbed(Ok(probe)) => {
-                    self.status = format!("Metadata inspected: {} ({}). {}",
-                        probe.category.as_str(), probe.confidence, probe.conversion_status);
+                    self.status = format!(
+                        "Metadata inspected: {} ({}). {}",
+                        probe.category.as_str(),
+                        probe.confidence,
+                        probe.conversion_status
+                    );
                     self.model = None;
                     self.model_topology = None;
                     self.hf_folder = None;
@@ -1401,88 +1859,107 @@ impl Workstation {
                     self.current_stage = "Inspection failed".into();
                     self.status = format!("Inspection failed: {e}");
                 }
-                WorkerEvent::BackendCapabilities(value)=>{
-                    let verified=value["probes"].as_array().map_or(0,|list|
-                        list.iter().filter(|r|r["status"]=="CAPABILITY_OUTPUT_PARSED").count());
-                    self.backend_capabilities=Some(value);
+                WorkerEvent::BackendCapabilities(value) => {
+                    let verified = value["probes"].as_array().map_or(0, |list| {
+                        list.iter()
+                            .filter(|r| r["status"] == "CAPABILITY_OUTPUT_PARSED")
+                            .count()
+                    });
+                    self.backend_capabilities = Some(value);
                     self.detected_gpus = discover_runtime_gpu_devices();
                     self.current_stage = "Capabilities probed".into();
                     self.status=format!("Parsed {verified} executable capability outputs; {} discrete GPU(s) ready.", self.detected_gpus.len());
                 }
-                WorkerEvent::OptimizerPlan(request,Ok(value))=>{
-                    let route=value["route"].as_str().unwrap_or("unknown");
-                    let step=value["next_user_step"].as_str().unwrap_or("See prerequisites");
-                    let ready=value["ready_for_user_approved_execution"]==true;
+                WorkerEvent::OptimizerPlan(request, Ok(value)) => {
+                    let route = value["route"].as_str().unwrap_or("unknown");
+                    let step = value["next_user_step"]
+                        .as_str()
+                        .unwrap_or("See prerequisites");
+                    let ready = value["ready_for_user_approved_execution"] == true;
                     self.current_stage = "Plan ready".into();
-                    self.status=format!("Optimization plan [{route}]: {step}. {}",
-                        if ready {"Review settings and approve the selected backend run."}
-                        else {"Prerequisites not yet satisfied."});
-                    self.opt_planned=Some((request,value));
+                    self.status = format!(
+                        "Optimization plan [{route}]: {step}. {}",
+                        if ready {
+                            "Review settings and approve the selected backend run."
+                        } else {
+                            "Prerequisites not yet satisfied."
+                        }
+                    );
+                    self.opt_planned = Some((request, value));
                 }
-                WorkerEvent::OptimizerPlan(_,Err(e))=>{
-                    self.opt_planned=None;
+                WorkerEvent::OptimizerPlan(_, Err(e)) => {
+                    self.opt_planned = None;
                     self.current_stage = "Plan blocked".into();
-                    self.status=format!("Optimization plan blocked: {e}");
+                    self.status = format!("Optimization plan blocked: {e}");
                 }
-                WorkerEvent::OptimizerRun(Ok(value))=>{
-                    let pass=value["status"].as_str()==Some("PROVISIONAL_CANDIDATE_FOUND");
-                    self.current_stage = if pass { "Candidate verified & saved".into() } else { "Completed (no candidate passed gates)".into() };
-                    self.status=if pass{
+                WorkerEvent::OptimizerRun(Ok(value)) => {
+                    let pass = value["status"].as_str() == Some("PROVISIONAL_CANDIDATE_FOUND");
+                    self.current_stage = if pass {
+                        "Candidate verified & saved".into()
+                    } else {
+                        "Completed (no candidate passed gates)".into()
+                    };
+                    self.status = if pass {
                         "Measured candidate passed the selected gates. Open the result folder, load, or export the report below.".into()
-                    }else{
+                    } else {
                         "Experiment finished, but no candidate passed the selected quality/size gates.".into()
                     };
-                    self.opt_result=Some(value);
-                    self.optimize_review_tab=1;
+                    self.opt_result = Some(value);
+                    self.optimize_review_tab = 1;
                 }
-                WorkerEvent::OptimizerRun(Err(e))=>{
+                WorkerEvent::OptimizerRun(Err(e)) => {
                     self.current_stage = "Optimization failed".into();
-                    self.status=format!("Optimization failed: {e}");
+                    self.status = format!("Optimization failed: {e}");
                 }
-                WorkerEvent::UncensorPlan(request,Ok(value))=>{
+                WorkerEvent::UncensorPlan(request, Ok(value)) => {
                     self.current_stage = "Edit plan ready".into();
                     self.status="Edit plan ready. Review the target and run; refusal/capability tests are still required.".into();
-                    self.unc_planned=Some((request,value));
+                    self.unc_planned = Some((request, value));
                 }
-                WorkerEvent::UncensorPlan(_,Err(e))=>{
-                    self.unc_planned=None;
+                WorkerEvent::UncensorPlan(_, Err(e)) => {
+                    self.unc_planned = None;
                     self.current_stage = "Edit plan blocked".into();
-                    self.status=format!("Uncensor edit plan blocked: {e}");
+                    self.status = format!("Uncensor edit plan blocked: {e}");
                 }
-                WorkerEvent::UncensorRun(Ok(value))=>{
+                WorkerEvent::UncensorRun(Ok(value)) => {
                     self.current_stage = "Edited checkpoint saved".into();
                     self.status="Edited checkpoint written. Runtime load and refusal/capability evaluation remain to be done.".into();
-                    self.unc_result=Some(value);
+                    self.unc_result = Some(value);
                 }
-                WorkerEvent::UncensorRun(Err(e))=>{
+                WorkerEvent::UncensorRun(Err(e)) => {
                     self.current_stage = "Edit failed".into();
-                    self.status=format!("Uncensor edit failed: {e}");
+                    self.status = format!("Uncensor edit failed: {e}");
                 }
-                WorkerEvent::UncensorAutoPlan(request,Ok(value))=>{
-                    let count=value["candidate_count"].as_u64().unwrap_or(0);
+                WorkerEvent::UncensorAutoPlan(request, Ok(value)) => {
+                    let count = value["candidate_count"].as_u64().unwrap_or(0);
                     self.current_stage = "Automatic search plan ready".into();
                     self.status=format!(
                         "Automatic search plan ready: {count} candidates will be really edited and measured. Review and approve.");
-                    self.unc_auto_planned=Some((request,value));
+                    self.unc_auto_planned = Some((request, value));
                 }
-                WorkerEvent::UncensorAutoPlan(_,Err(e))=>{
-                    self.unc_auto_planned=None;
+                WorkerEvent::UncensorAutoPlan(_, Err(e)) => {
+                    self.unc_auto_planned = None;
                     self.current_stage = "Search plan blocked".into();
-                    self.status=format!("Automatic uncensor plan blocked: {e}");
+                    self.status = format!("Automatic uncensor plan blocked: {e}");
                 }
-                WorkerEvent::UncensorAutoRun(Ok(value))=>{
-                    let published=value["status"].as_str()==Some("SELECTED_FROM_MEASURED_SCORES");
-                    self.current_stage = if published { "Winner verified & published".into() } else { "Search finished (no candidate passed gates)".into() };
-                    self.status=if published{
+                WorkerEvent::UncensorAutoRun(Ok(value)) => {
+                    let published =
+                        value["status"].as_str() == Some("SELECTED_FROM_MEASURED_SCORES");
+                    self.current_stage = if published {
+                        "Winner verified & published".into()
+                    } else {
+                        "Search finished (no candidate passed gates)".into()
+                    };
+                    self.status = if published {
                         "Measured winner published and reloaded. Review refusal & capability comparison below.".into()
-                    }else{
+                    } else {
                         "Search finished: no candidate passed the configured gates; nothing was published.".into()
                     };
-                    self.unc_auto_result=Some(value);
+                    self.unc_auto_result = Some(value);
                 }
-                WorkerEvent::UncensorAutoRun(Err(e))=>{
+                WorkerEvent::UncensorAutoRun(Err(e)) => {
                     self.current_stage = "Automatic uncensor failed".into();
-                    self.status=format!("Automatic uncensor search failed: {e}");
+                    self.status = format!("Automatic uncensor search failed: {e}");
                 }
                 WorkerEvent::Planned(Ok(text)) => self.status = text,
                 WorkerEvent::Planned(Err(e)) => self.status = format!("Preflight failed: {e}"),
@@ -1503,40 +1980,62 @@ impl Workstation {
                         done.info.file_bytes, done.info.tensor_count,
                     );
                 }
-                WorkerEvent::HfQuantized(Err(e)) => self.status = format!("HF conversion failed: {e}"),
+                WorkerEvent::HfQuantized(Err(e)) => {
+                    self.status = format!("HF conversion failed: {e}")
+                }
                 WorkerEvent::Smoke(Ok(capture)) => {
                     self.last_inference = Some(capture.stdout);
                     self.current_stage = "Inference smoke check complete".into();
                     self.status = "Real llama-cli output captured. Review the generated text; quality is NOT evaluated.".into();
                 }
-                WorkerEvent::Smoke(Err(e)) => self.status = format!("Inference smoke check failed: {e}"),
+                WorkerEvent::Smoke(Err(e)) => {
+                    self.status = format!("Inference smoke check failed: {e}")
+                }
                 WorkerEvent::Bench(Ok((path, receipt))) => {
-                    let pp = receipt["prompt_processing"]["tokens_per_second"].as_f64().unwrap_or(0.0);
-                    let tg = receipt["token_generation"]["tokens_per_second"].as_f64().unwrap_or(0.0);
+                    let pp = receipt["prompt_processing"]["tokens_per_second"]
+                        .as_f64()
+                        .unwrap_or(0.0);
+                    let tg = receipt["token_generation"]["tokens_per_second"]
+                        .as_f64()
+                        .unwrap_or(0.0);
                     self.current_stage = "Benchmark complete".into();
                     self.status = format!("Real llama-bench: prefill {pp:.2} tok/s, decode {tg:.2} tok/s. Quality not tested. Receipt: {}",
                         path.file_name().unwrap_or_default().to_string_lossy());
                     self.last_benchmark = Some((path, receipt));
                 }
-                WorkerEvent::Bench(Err(e)) => self.status = format!("GGUF performance benchmark failed: {e}"),
-                WorkerEvent::Log(_) | WorkerEvent::Stage(_) => unreachable!("log/stage messages handled above"),
+                WorkerEvent::Bench(Err(e)) => {
+                    self.status = format!("GGUF performance benchmark failed: {e}")
+                }
+                WorkerEvent::Log(_) | WorkerEvent::Stage(_) => {
+                    unreachable!("log/stage messages handled above")
+                }
             }
         }
         // One render tick per second while processing, even when a backend is
         // temporarily silent. No continuous idle repaint or invented metrics.
-        if self.busy { self.needs_redraw = true; }
+        if self.busy {
+            self.needs_redraw = true;
+        }
     }
     fn edit_focused(&mut self, event: &ui_platform::winit::event::KeyEvent) {
-        if event.state != ElementState::Pressed { return; }
-        if matches!(event.logical_key, Key::Named(NamedKey::Escape)) { self.focus = None; self.select_all = false; return; }
-        let Some(focus) = self.focus else { return; };
+        if event.state != ElementState::Pressed {
+            return;
+        }
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
+            self.focus = None;
+            self.select_all = false;
+            return;
+        }
+        let Some(focus) = self.focus else {
+            return;
+        };
         let dest = match focus {
             Focus::Model => &mut self.source,
             Focus::Output => &mut self.output,
             Focus::Quantizer => &mut self.quantizer,
             Focus::Converter => &mut self.converter,
             Focus::Runtime => &mut self.runtime,
-            Focus::EvalServer=>&mut self.eval_server,
+            Focus::EvalServer => &mut self.eval_server,
             Focus::Benchmark => &mut self.benchmark,
             Focus::Prompt => &mut self.prompt,
             Focus::GpuLayers => &mut self.gpu_layers,
@@ -1573,9 +2072,13 @@ impl Workstation {
                 }
                 if key.eq_ignore_ascii_case("v") {
                     if let Some(value) = clipboard_text() {
-                        if self.select_all { dest.clear(); }
+                        if self.select_all {
+                            dest.clear();
+                        }
                         for ch in value.chars().filter(|ch| !ch.is_control()) {
-                            if dest.len() < 4096 { dest.push(ch); }
+                            if dest.len() < 4096 {
+                                dest.push(ch);
+                            }
                         }
                         self.select_all = false;
                         self.needs_redraw = true;
@@ -1585,19 +2088,26 @@ impl Workstation {
             }
             return;
         }
-        if self.select_all { dest.clear(); self.select_all = false; }
+        if self.select_all {
+            dest.clear();
+            self.select_all = false;
+        }
         if matches!(event.logical_key, Key::Named(NamedKey::Backspace)) {
             dest.pop();
         } else if let Some(value) = &event.text {
             for ch in value.chars().filter(|ch| !ch.is_control()) {
-                if dest.len() < 4096 { dest.push(ch); }
+                if dest.len() < 4096 {
+                    dest.push(ch);
+                }
             }
         }
         self.needs_redraw = true;
     }
     fn render(&mut self, width: f32, height: f32) -> CommandBuffer {
-        let optimizer_plan_current=self.opt_planned.as_ref().is_some_and(|(prior,_)|
-            self.optimize_request().is_ok_and(|now|now==*prior));
+        let optimizer_plan_current = self
+            .opt_planned
+            .as_ref()
+            .is_some_and(|(prior, _)| self.optimize_request().is_ok_and(|now| now == *prior));
         let source_is_current = self.inspected_source.as_deref() == Some(self.source.as_str());
         let previous_precision = self.precision();
         let auto_generated_output = self.output == default_output(&self.source, previous_precision);
@@ -1607,68 +2117,86 @@ impl Workstation {
         click_pointer.primary_down = self.click_pulse;
         self.click_pulse = false;
         let navigation_width = 56.0;
-        let viewport = Rect::from_min_size(Vec2::new(navigation_width, 0.0),
-            Vec2::new((width - navigation_width).max(700.0), height.max(500.0)));
+        let viewport = Rect::from_min_size(
+            Vec2::new(navigation_width, 0.0),
+            Vec2::new((width - navigation_width).max(700.0), height.max(500.0)),
+        );
         let source = &mut self.source;
         let output = &mut self.output;
         let quantizer = &mut self.quantizer;
         let converter = &mut self.converter;
         let runtime = &mut self.runtime;
-        let eval_server=&mut self.eval_server;
+        let eval_server = &mut self.eval_server;
         let benchmark = &mut self.benchmark;
         let prompt = &mut self.prompt;
         let gpu_layers = &mut self.gpu_layers;
         let recipe = &mut self.recipe;
         let format_tab = &mut self.format_tab;
-        let workspace_tab=&mut self.workspace_tab;
-        let optimize_settings_tab=&mut self.optimize_settings_tab;
-        let optimize_review_tab=&mut self.optimize_review_tab;
-        let backends_expanded=&mut self.backends_expanded;
+        let workspace_tab = &mut self.workspace_tab;
+        let optimize_settings_tab = &mut self.optimize_settings_tab;
+        let optimize_review_tab = &mut self.optimize_review_tab;
+        let backends_expanded = &mut self.backends_expanded;
         let advanced_opt_expanded = &mut self.advanced_opt_expanded;
         let advanced_unc_expanded = &mut self.advanced_unc_expanded;
         let history_expanded = &mut self.history_expanded;
-        let opt_baseline=&mut self.opt_baseline;
-        let opt_candidate=&mut self.opt_candidate;
-        let opt_suite=&mut self.opt_suite;
-        let opt_output=&mut self.opt_output;
-        let opt_imatrix=&mut self.opt_imatrix;
-        let opt_sensitivity=&mut self.opt_sensitivity;
-        let opt_ppl=&mut self.opt_ppl;
-        let opt_min_saving=&mut self.opt_min_saving;
-        let opt_max_loss=&mut self.opt_max_loss;
-        let opt_max_ppl=&mut self.opt_max_ppl;
-        let opt_goal=&mut self.opt_goal;
-        let opt_device=&mut self.opt_device;
-        let opt_runtime_device=&mut self.opt_runtime_device;
-        let opt_precisions=&mut self.opt_precisions;
-        let opt_bench_prompt=&mut self.opt_bench_prompt;
-        let opt_bench_generation=&mut self.opt_bench_generation;
-        let opt_bench_repetitions=&mut self.opt_bench_repetitions;
-        let opt_speed_ratio=&mut self.opt_speed_ratio;
-        let opt_planned=self.opt_planned.as_ref();
-        let opt_result=self.opt_result.as_ref();
-        let unc_trace=&mut self.unc_trace;
-        let unc_output=&mut self.unc_output;
-        let unc_strength=&mut self.unc_strength;
-        let unc_block=&mut self.unc_block;
-        let unc_planned=self.unc_planned.as_ref();
-        let unc_result=self.unc_result.as_ref();
-        let unc_tab=&mut self.unc_tab;
-        let unc_paired=&mut self.unc_paired;
-        let unc_refusal_suite=&mut self.unc_refusal_suite;
-        let unc_task_suite=&mut self.unc_task_suite;
-        let unc_auto_quantize=&mut self.unc_auto_quantize;
-        let unc_auto_planned=self.unc_auto_planned.as_ref();
-        let unc_auto_result=self.unc_auto_result.as_ref();
+        let opt_baseline = &mut self.opt_baseline;
+        let opt_candidate = &mut self.opt_candidate;
+        let opt_suite = &mut self.opt_suite;
+        let opt_output = &mut self.opt_output;
+        let opt_imatrix = &mut self.opt_imatrix;
+        let opt_sensitivity = &mut self.opt_sensitivity;
+        let opt_ppl = &mut self.opt_ppl;
+        let opt_min_saving = &mut self.opt_min_saving;
+        let opt_max_loss = &mut self.opt_max_loss;
+        let opt_max_ppl = &mut self.opt_max_ppl;
+        let opt_goal = &mut self.opt_goal;
+        let opt_device = &mut self.opt_device;
+        let opt_runtime_device = &mut self.opt_runtime_device;
+        let opt_precisions = &mut self.opt_precisions;
+        let opt_bench_prompt = &mut self.opt_bench_prompt;
+        let opt_bench_generation = &mut self.opt_bench_generation;
+        let opt_bench_repetitions = &mut self.opt_bench_repetitions;
+        let opt_speed_ratio = &mut self.opt_speed_ratio;
+        let opt_planned = self.opt_planned.as_ref();
+        let opt_result = self.opt_result.as_ref();
+        let unc_trace = &mut self.unc_trace;
+        let unc_output = &mut self.unc_output;
+        let unc_strength = &mut self.unc_strength;
+        let unc_block = &mut self.unc_block;
+        let unc_planned = self.unc_planned.as_ref();
+        let unc_result = self.unc_result.as_ref();
+        let unc_tab = &mut self.unc_tab;
+        let unc_paired = &mut self.unc_paired;
+        let unc_refusal_suite = &mut self.unc_refusal_suite;
+        let unc_task_suite = &mut self.unc_task_suite;
+        let unc_auto_quantize = &mut self.unc_auto_quantize;
+        let unc_auto_planned = self.unc_auto_planned.as_ref();
+        let unc_auto_result = self.unc_auto_result.as_ref();
         let learn_subtab = &mut self.learn_subtab;
         let learn_dataset_filter = &mut self.learn_dataset_filter;
         let learn_train_quant = &mut self.learn_train_quant;
         let _learn_train_rank = &mut self.learn_train_rank;
         let learn_last_action_msg = &mut self.learn_last_action_msg;
-        let model = if source_is_current { self.model.as_ref() } else { None };
-        let model_topology = if source_is_current { self.model_topology.as_ref() } else { None };
-        let hf_folder = if source_is_current { self.hf_folder.as_ref() } else { None };
-        let model_probe = if source_is_current { self.probe.as_ref() } else { None };
+        let model = if source_is_current {
+            self.model.as_ref()
+        } else {
+            None
+        };
+        let model_topology = if source_is_current {
+            self.model_topology.as_ref()
+        } else {
+            None
+        };
+        let hf_folder = if source_is_current {
+            self.hf_folder.as_ref()
+        } else {
+            None
+        };
+        let model_probe = if source_is_current {
+            self.probe.as_ref()
+        } else {
+            None
+        };
         let detected_gpus = &self.detected_gpus;
         let current_stage = &self.current_stage;
         let completed_stages = &self.completed_stages;
@@ -1678,12 +2206,16 @@ impl Workstation {
         let status = &self.status;
         let busy = self.busy;
         let backends = &self.backends;
-        let backend_capabilities=self.backend_capabilities.as_ref();
-        let last_output = if source_is_current { self.last_output.as_ref() } else { None };
+        let backend_capabilities = self.backend_capabilities.as_ref();
+        let last_output = if source_is_current {
+            self.last_output.as_ref()
+        } else {
+            None
+        };
         let log_tail = &self.log_tail;
         let job_elapsed = self.started_at.map(|t| t.elapsed()).or(self.last_elapsed);
         let mut rescan = false;
-        let mut probe_capabilities=false;
+        let mut probe_capabilities = false;
         let mut save_local_settings = false;
         let mut download: Option<BackendId> = None;
         let mut new_focus = self.focus;
@@ -1697,38 +2229,113 @@ impl Workstation {
         let mut open_folder_target: Option<PathBuf> = None;
         let mut load_candidate_target: Option<PathBuf> = None;
         let mut export_report_json: Option<(PathBuf, serde_json::Value)> = None;
-        let (mut inspect, mut plan, mut advise, mut opt_run, mut convert, mut smoke, mut bench,
-            mut unc_plan,mut unc_run,mut unc_auto_plan,mut unc_auto_run) =
-            (false, false, false, false, false, false, false,false,false,false,false);
+        let (
+            mut inspect,
+            mut plan,
+            mut advise,
+            mut opt_run,
+            mut convert,
+            mut smoke,
+            mut bench,
+            mut unc_plan,
+            mut unc_run,
+            mut unc_auto_plan,
+            mut unc_auto_run,
+        ) = (
+            false, false, false, false, false, false, false, false, false, false, false,
+        );
         {
             // New Kathamo navigation; each destination is an existing working view.
             let rail = NavigationRail::new()
-                .with_selected(if *workspace_tab == 3 { "learn" }
-                    else if *workspace_tab == 2 { "uncensor" }
-                    else if *workspace_tab == 1 { "manual" }
-                    else if *optimize_review_tab == 1 { "results" }
-                    else if *optimize_settings_tab == 2 { "hardware" }
-                    else { "optimize" })
-                .add_main(NavigationRailItem::new("optimize", StudioIcon::Sparkles, "Optimize"))
-                .add_main(NavigationRailItem::new("uncensor", StudioIcon::Sparkles, "Uncensor"))
-                .add_main(NavigationRailItem::new("hardware", StudioIcon::Cpu, "Hardware"))
-                .add_main(NavigationRailItem::new("results", StudioIcon::Check, "Results"))
-                .add_main(NavigationRailItem::new("manual", StudioIcon::Settings, "Manual Tools"))
-                .add_main(NavigationRailItem::new("learn", StudioIcon::Sparkles, "Learn"));
-            if let Some(destination) = rail.render(&mut cmds, &mut self.icons,
-                Rect::from_min_size(Vec2::ZERO, Vec2::new(navigation_width - 4.0, viewport.height())),
-                click_pointer.position, click_pointer.primary_down, &palette) {
+                .with_selected(if *workspace_tab == 3 {
+                    "learn"
+                } else if *workspace_tab == 2 {
+                    "uncensor"
+                } else if *workspace_tab == 1 {
+                    "manual"
+                } else if *optimize_review_tab == 1 {
+                    "results"
+                } else if *optimize_settings_tab == 2 {
+                    "hardware"
+                } else {
+                    "optimize"
+                })
+                .add_main(NavigationRailItem::new(
+                    "optimize",
+                    StudioIcon::Sparkles,
+                    "Optimize",
+                ))
+                .add_main(NavigationRailItem::new(
+                    "uncensor",
+                    StudioIcon::Sparkles,
+                    "Uncensor",
+                ))
+                .add_main(NavigationRailItem::new(
+                    "hardware",
+                    StudioIcon::Cpu,
+                    "Hardware",
+                ))
+                .add_main(NavigationRailItem::new(
+                    "results",
+                    StudioIcon::Check,
+                    "Results",
+                ))
+                .add_main(NavigationRailItem::new(
+                    "manual",
+                    StudioIcon::Settings,
+                    "Manual Tools",
+                ))
+                .add_main(NavigationRailItem::new(
+                    "learn",
+                    StudioIcon::Sparkles,
+                    "Learn",
+                ));
+            if let Some(destination) = rail.render(
+                &mut cmds,
+                &mut self.icons,
+                Rect::from_min_size(
+                    Vec2::ZERO,
+                    Vec2::new(navigation_width - 4.0, viewport.height()),
+                ),
+                click_pointer.position,
+                click_pointer.primary_down,
+                &palette,
+            ) {
                 match destination {
-                    "optimize" => { *workspace_tab=0; *optimize_settings_tab=0; *optimize_review_tab=0; }
-                    "hardware" => { *workspace_tab=0; *optimize_settings_tab=2; *optimize_review_tab=0; *advanced_opt_expanded=true; }
-                    "results" => { *workspace_tab=0; *optimize_review_tab=1; }
-                    "manual" => { *workspace_tab=1; }
-                    "uncensor" => { *workspace_tab=2; }
-                    "learn" => { *workspace_tab=3; }
+                    "optimize" => {
+                        *workspace_tab = 0;
+                        *optimize_settings_tab = 0;
+                        *optimize_review_tab = 0;
+                    }
+                    "hardware" => {
+                        *workspace_tab = 0;
+                        *optimize_settings_tab = 2;
+                        *optimize_review_tab = 0;
+                        *advanced_opt_expanded = true;
+                    }
+                    "results" => {
+                        *workspace_tab = 0;
+                        *optimize_review_tab = 1;
+                    }
+                    "manual" => {
+                        *workspace_tab = 1;
+                    }
+                    "uncensor" => {
+                        *workspace_tab = 2;
+                    }
+                    "learn" => {
+                        *workspace_tab = 3;
+                    }
                     _ => {}
                 }
             }
-            let mut ui = KathamoUi::new(&mut cmds, &mut self.icons, &palette, viewport, click_pointer);
+            let mut ui = KathamoUi::new(
+                &mut cmds,
+                &mut self.icons,
+                &palette,
+                viewport,
+                click_pointer,
+            );
 
             // 1. Studio Telemetry & Header Bar
             ui.horizontal(72.0, |top| {
@@ -1737,23 +2344,46 @@ impl Workstation {
                     brand.horizontal(22.0, |pills| {
                         pills.status_pill(if busy { "Processing" } else { "Idle" }, !busy);
                         let found = backends.iter().filter(|b| b.installed()).count();
-                        pills.status_pill(&format!("{found}/{} Tools Detected", backends.len()), found > 0);
+                        pills.status_pill(
+                            &format!("{found}/{} Tools Detected", backends.len()),
+                            found > 0,
+                        );
                     });
                 });
 
                 let (model_title, model_sub) = if let Some(info) = model {
                     let name = info.model_name.as_deref().unwrap_or("GGUF Container");
                     let sub = if let Some(topo) = model_topology {
-                        format!("{:.2} GiB | {:.2}B params ({:.2} bpw)", info.file_bytes as f64 / 1_073_741_824.0, topo.total_parameters as f64 / 1e9, topo.effective_bpw)
+                        format!(
+                            "{:.2} GiB | {:.2}B params ({:.2} bpw)",
+                            info.file_bytes as f64 / 1_073_741_824.0,
+                            topo.total_parameters as f64 / 1e9,
+                            topo.effective_bpw
+                        )
                     } else {
-                        format!("{:.2} GiB ({} Tensors)", info.file_bytes as f64 / 1_073_741_824.0, info.tensor_count)
+                        format!(
+                            "{:.2} GiB ({} Tensors)",
+                            info.file_bytes as f64 / 1_073_741_824.0,
+                            info.tensor_count
+                        )
                     };
                     (name, sub)
                 } else if let Some(info) = hf_folder {
-                    let sub = format!("{:.2} GiB ({} Shards)", info.source_weight_bytes as f64 / 1_073_741_824.0, info.weight_files);
+                    let sub = format!(
+                        "{:.2} GiB ({} Shards)",
+                        info.source_weight_bytes as f64 / 1_073_741_824.0,
+                        info.weight_files
+                    );
                     ("HuggingFace Folder", sub)
                 } else if let Some(p) = model_probe {
-                    (p.identification.as_str(), format!("{:.2} GiB; {} (metadata only)", p.bytes as f64 / 1_073_741_824.0, p.category.as_str()))
+                    (
+                        p.identification.as_str(),
+                        format!(
+                            "{:.2} GiB; {} (metadata only)",
+                            p.bytes as f64 / 1_073_741_824.0,
+                            p.category.as_str()
+                        ),
+                    )
                 } else if !source.trim().is_empty() {
                     ("Not Inspected", "Press Inspect Model Metadata".into())
                 } else {
@@ -1763,9 +2393,20 @@ impl Workstation {
                 let subtitle = model_sub.chars().take(42).collect::<String>();
                 top.stat_card("SOURCE CHECKPOINT", &title, &subtitle);
 
-                let (hw_title, hw_sub) = if let Some(gpu) = detected_gpus.iter().find(|g| !g.is_integrated).or_else(|| detected_gpus.first()) {
+                let (hw_title, hw_sub) = if let Some(gpu) = detected_gpus
+                    .iter()
+                    .find(|g| !g.is_integrated)
+                    .or_else(|| detected_gpus.first())
+                {
                     let free_gib = gpu.free_vram_bytes as f64 / 1_073_741_824.0;
-                    (gpu.runtime_id.as_str(), format!("{} ({:.1} GiB free)", gpu.name.chars().take(22).collect::<String>(), free_gib))
+                    (
+                        gpu.runtime_id.as_str(),
+                        format!(
+                            "{} ({:.1} GiB free)",
+                            gpu.name.chars().take(22).collect::<String>(),
+                            free_gib
+                        ),
+                    )
                 } else {
                     ("CPU Safe Mode", "Auto hardware discovery active".into())
                 };
@@ -1773,23 +2414,49 @@ impl Workstation {
 
                 let quantizer_ready = Path::new(quantizer.trim()).is_file()
                     || (quantizer.trim() == "llama-quantize"
-                        && backends.iter().any(|b| b.spec.id == BackendId::LlamaQuantize && b.installed()));
+                        && backends
+                            .iter()
+                            .any(|b| b.spec.id == BackendId::LlamaQuantize && b.installed()));
                 let smoke_ready = Path::new(runtime.trim()).is_file()
                     || (runtime.trim() == "llama-cli"
-                        && backends.iter().any(|b| b.spec.id == BackendId::LlamaCli && b.installed()));
-                top.stat_card("LOCAL TOOLS",
-                    if quantizer_ready { "Quantizer detected" } else { "Setup required" },
-                    if smoke_ready { "Inference tool found" } else { "Inference tool missing" });
+                        && backends
+                            .iter()
+                            .any(|b| b.spec.id == BackendId::LlamaCli && b.installed()));
+                top.stat_card(
+                    "LOCAL TOOLS",
+                    if quantizer_ready {
+                        "Quantizer detected"
+                    } else {
+                        "Setup required"
+                    },
+                    if smoke_ready {
+                        "Inference tool found"
+                    } else {
+                        "Inference tool missing"
+                    },
+                );
             });
 
             ui.separator();
             ui.horizontal(30.0, |steps| {
-                steps.status_pill("1  SELECT / INSPECT", source_is_current && model_probe.is_some());
-                steps.status_pill("2  OPTIMISE / EDIT", busy || opt_result.is_some() || unc_auto_result.is_some());
-                steps.status_pill("3  RELOAD & VERIFY", opt_result.is_some() || unc_auto_result.is_some());
-                steps.status_pill("4  READY / EXPORT",
+                steps.status_pill(
+                    "1  SELECT / INSPECT",
+                    source_is_current && model_probe.is_some(),
+                );
+                steps.status_pill(
+                    "2  OPTIMISE / EDIT",
+                    busy || opt_result.is_some() || unc_auto_result.is_some(),
+                );
+                steps.status_pill(
+                    "3  RELOAD & VERIFY",
+                    opt_result.is_some() || unc_auto_result.is_some(),
+                );
+                steps.status_pill(
+                    "4  READY / EXPORT",
                     opt_result.is_some_and(|r| r["status"] == "PROVISIONAL_CANDIDATE_FOUND")
-                    || unc_auto_result.is_some_and(|r| r["status"] == "SELECTED_FROM_MEASURED_SCORES"));
+                        || unc_auto_result
+                            .is_some_and(|r| r["status"] == "SELECTED_FROM_MEASURED_SCORES"),
+                );
             });
 
             // 2. Main Two-Column Workstation Layout
@@ -2593,18 +3260,27 @@ impl Workstation {
             self.output = default_output(&self.source, self.precision());
             self.last_output = None;
         }
-        if self.focus != new_focus { self.select_all = false; }
+        if self.focus != new_focus {
+            self.select_all = false;
+        }
         self.focus = new_focus;
-        if save_local_settings{self.persist_local_settings(true);}
-        if rescan { self.rescan_backends(); }
-        if probe_capabilities{self.start_capability_probe();}
+        if save_local_settings {
+            self.persist_local_settings(true);
+        }
+        if rescan {
+            self.rescan_backends();
+        }
+        if probe_capabilities {
+            self.start_capability_probe();
+        }
         if browse_model {
             if let Some(picked) = pick_model_file() {
                 self.set_source(&picked);
             }
         }
         if browse_folder {
-            if let Some(picked) = pick_folder("Select HuggingFace model folder or source directory") {
+            if let Some(picked) = pick_folder("Select HuggingFace model folder or source directory")
+            {
                 self.set_source(&picked);
             }
         }
@@ -2645,39 +3321,67 @@ impl Workstation {
         }
         if let Some(id) = download {
             if let Err(e) = open_official_download_page(id) {
-                self.status = format!("Could not open download page: {e}. See 'ojon backends' for publisher links.");
+                self.status = format!(
+                    "Could not open download page: {e}. See 'ojon backends' for publisher links."
+                );
             } else {
-                self.status = "Publisher page opened. Install the tool, then click Rescan installed tools.".into();
+                self.status =
+                    "Publisher page opened. Install the tool, then click Rescan installed tools."
+                        .into();
             }
             self.needs_redraw = true;
         }
-        if cancel_job { self.cancel_active_job(); }
+        if cancel_job {
+            self.cancel_active_job();
+        }
         // Running conversion or inference is permitted only through the backend.
         // The action runs on a worker thread; rendering never blocks on model I/O.
-        if inspect { self.start_inspect(); }
-        else if one_click_opt { self.start_one_click_optimize(); }
-        else if one_click_unc { self.start_one_click_uncensor(); }
-        else if plan { self.start_plan(); }
-        else if advise { self.start_optimizer_advice(); }
-        else if opt_run { self.start_optimizer_run(); }
-        else if unc_plan { self.start_uncensor_plan(); }
-        else if unc_run { self.start_uncensor_run(); }
-        else if unc_auto_plan { self.start_uncensor_auto_plan(); }
-        else if unc_auto_run { self.start_uncensor_auto_run(); }
-        else if convert { self.start_quantize(); }
-        else if smoke { self.start_smoke(); }
-        else if bench { self.start_bench(); }
+        if inspect {
+            self.start_inspect();
+        } else if one_click_opt {
+            self.start_one_click_optimize();
+        } else if one_click_unc {
+            self.start_one_click_uncensor();
+        } else if plan {
+            self.start_plan();
+        } else if advise {
+            self.start_optimizer_advice();
+        } else if opt_run {
+            self.start_optimizer_run();
+        } else if unc_plan {
+            self.start_uncensor_plan();
+        } else if unc_run {
+            self.start_uncensor_run();
+        } else if unc_auto_plan {
+            self.start_uncensor_auto_plan();
+        } else if unc_auto_run {
+            self.start_uncensor_auto_run();
+        } else if convert {
+            self.start_quantize();
+        } else if smoke {
+            self.start_smoke();
+        } else if bench {
+            self.start_bench();
+        }
         cmds
     }
 }
 
 fn default_output(source: &str, precision: Precision) -> String {
-    if source.trim().is_empty() { return String::new(); }
+    if source.trim().is_empty() {
+        return String::new();
+    }
     let path = Path::new(source.trim());
-    let stem = if path.is_dir() { path.file_name() } else { path.file_stem() }
-        .unwrap_or_default().to_string_lossy();
+    let stem = if path.is_dir() {
+        path.file_name()
+    } else {
+        path.file_stem()
+    }
+    .unwrap_or_default()
+    .to_string_lossy();
     path.with_file_name(format!("{stem}-{}.gguf", precision.as_str()))
-        .to_string_lossy().into_owned()
+        .to_string_lossy()
+        .into_owned()
 }
 
 struct DesktopApp {
@@ -2693,14 +3397,21 @@ struct DesktopApp {
 impl DesktopApp {
     fn new() -> Self {
         Self {
-            ui: Workstation::new(), window: None, gpu: None,
-            cpu: CpuBackend::new(), presenter: None,
-            scale: 1.0, physical: (0, 0), visible: false,
+            ui: Workstation::new(),
+            window: None,
+            gpu: None,
+            cpu: CpuBackend::new(),
+            presenter: None,
+            scale: 1.0,
+            physical: (0, 0),
+            visible: false,
         }
     }
     fn draw(&mut self, window: &Window) {
         let (w, h) = self.physical;
-        if w == 0 || h == 0 { return; }
+        if w == 0 || h == 0 {
+            return;
+        }
         let palette = ThemePalette::studio_graphite();
         let logical_width = w as f32 / self.scale;
         let logical_height = h as f32 / self.scale;
@@ -2731,12 +3442,17 @@ impl DesktopApp {
                 }
             }
         }
-        if presented && !self.visible { window.set_visible(true); self.visible = true; }
+        if presented && !self.visible {
+            window.set_visible(true);
+            self.visible = true;
+        }
     }
 }
 impl ApplicationHandler for DesktopApp {
     fn resumed(&mut self, loop_: &ActiveEventLoop) {
-        if self.window.is_some() { return; }
+        if self.window.is_some() {
+            return;
+        }
         let attrs = WindowAttributes::default()
             .with_title("Ojon (ওজন)  |  Kalponic Studio")
             .with_inner_size(LogicalSize::new(1500.0, 960.0))
@@ -2757,19 +3473,23 @@ impl ApplicationHandler for DesktopApp {
                     Err(e) => eprintln!("GPU renderer unavailable ({e}); trying CPU safe mode"),
                 }
                 self.window = Some(win.clone());
-                if !self.ui.source.is_empty() { self.ui.start_inspect(); }
+                if !self.ui.source.is_empty() {
+                    self.ui.start_inspect();
+                }
                 win.request_redraw();
             }
             Err(e) => eprintln!("Unable to open Ojon window: {e}"),
         }
     }
     fn window_event(&mut self, loop_: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let Some(win) = self.window.as_ref().cloned() else { return; };
+        let Some(win) = self.window.as_ref().cloned() else {
+            return;
+        };
         match event {
             WindowEvent::CloseRequested => {
                 self.ui.persist_local_settings(false);
                 loop_.exit();
-            },
+            }
             WindowEvent::Resized(size) => {
                 self.physical = (size.width, size.height);
                 win.request_redraw();
@@ -2781,13 +3501,21 @@ impl ApplicationHandler for DesktopApp {
                 win.request_redraw();
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.ui.pointer.position =
-                    Vec2::new(position.x as f32 / self.scale, position.y as f32 / self.scale);
+                self.ui.pointer.position = Vec2::new(
+                    position.x as f32 / self.scale,
+                    position.y as f32 / self.scale,
+                );
                 win.request_redraw();
             }
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
                 self.ui.pointer.primary_down = state == ElementState::Pressed;
-                if state == ElementState::Pressed { self.ui.click_pulse = true; }
+                if state == ElementState::Pressed {
+                    self.ui.click_pulse = true;
+                }
                 win.request_redraw();
             }
             WindowEvent::DroppedFile(path) => {
@@ -2812,10 +3540,14 @@ impl ApplicationHandler for DesktopApp {
         self.ui.poll();
         if self.ui.needs_redraw {
             self.ui.needs_redraw = false;
-            if let Some(window) = self.window.as_ref() { window.request_redraw(); }
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
+            }
         }
         if self.ui.busy {
-            loop_.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(1)));
+            loop_.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_secs(1),
+            ));
         } else {
             loop_.set_control_flow(ControlFlow::Wait);
         }
@@ -2838,11 +3570,15 @@ mod tests {
         let mut ws = Workstation::new();
         ws.busy = true;
         ws.started_at = Some(Instant::now());
-        ws.tx.send(WorkerEvent::Log("[stderr] quantizing tensor 1/200".into())).unwrap();
+        ws.tx
+            .send(WorkerEvent::Log("[stderr] quantizing tensor 1/200".into()))
+            .unwrap();
         ws.poll();
         assert!(ws.busy, "log messages must not finish the job");
         assert_eq!(ws.log_tail.len(), 1);
-        ws.tx.send(WorkerEvent::Quantized(Err("test converter failed".into()))).unwrap();
+        ws.tx
+            .send(WorkerEvent::Quantized(Err("test converter failed".into())))
+            .unwrap();
         ws.poll();
         assert!(!ws.busy);
         assert!(ws.status.contains("test converter failed"));
@@ -2856,16 +3592,30 @@ mod tests {
         ws.output = "output-Q5_K_M.gguf".into();
         ws.inspected_source = Some(ws.source.clone());
         ws.model = Some(GgufSummary {
-            version:3, tensor_count: 1, metadata_count: 0, file_bytes: 1024,
-            architecture:None, model_name:None, file_type:None,
-            data_offset:32, alignment:32, split_count:None, big_endian:false
+            version: 3,
+            tensor_count: 1,
+            metadata_count: 0,
+            file_bytes: 1024,
+            architecture: None,
+            model_name: None,
+            file_type: None,
+            data_offset: 32,
+            alignment: 32,
+            split_count: None,
+            big_endian: false,
         });
         assert!(ws.ready_to_convert());
         ws.source = "different-source.gguf".into();
-        assert!(!ws.ready_to_convert(), "editing source must invalidate earlier inspection");
+        assert!(
+            !ws.ready_to_convert(),
+            "editing source must invalidate earlier inspection"
+        );
         ws.source = "source-f16.gguf".into();
         ws.format_tab = 1;
-        assert!(!ws.ready_to_convert(), "unimplemented formats must not start GGUF conversion");
+        assert!(
+            !ws.ready_to_convert(),
+            "unimplemented formats must not start GGUF conversion"
+        );
     }
 
     #[test]
@@ -2877,12 +3627,21 @@ mod tests {
             ws.render(1500.0, 960.0);
         };
         hit(&mut ws, 70.0);
-        assert_eq!(ws.workspace_tab, 2, "Uncensor should open its model edit view");
+        assert_eq!(
+            ws.workspace_tab, 2,
+            "Uncensor should open its model edit view"
+        );
         hit(&mut ws, 114.0);
         assert_eq!(ws.workspace_tab, 0);
-        assert_eq!(ws.optimize_settings_tab, 2, "Hardware should open actual hardware controls");
+        assert_eq!(
+            ws.optimize_settings_tab, 2,
+            "Hardware should open actual hardware controls"
+        );
         hit(&mut ws, 158.0);
-        assert_eq!(ws.optimize_review_tab, 1, "Results should open real receipts");
+        assert_eq!(
+            ws.optimize_review_tab, 1,
+            "Results should open real receipts"
+        );
         hit(&mut ws, 202.0);
         assert_eq!(ws.workspace_tab, 1, "Manual Tools must remain accessible");
         hit(&mut ws, 246.0);
@@ -2891,7 +3650,10 @@ mod tests {
         assert_eq!(ws.workspace_tab, 0);
         assert_eq!(ws.optimize_settings_tab, 0);
         assert_eq!(ws.optimize_review_tab, 0);
-        assert!(!ws.busy, "navigation must not trigger a conversion or model load");
+        assert!(
+            !ws.busy,
+            "navigation must not trigger a conversion or model load"
+        );
     }
 
     #[test]
@@ -2907,8 +3669,10 @@ mod tests {
         assert!(cpu.end_frame().is_ok());
 
         // Render test artifacts are opt-in; no developer-specific paths.
-        if let Some(artifact_dir) = std::env::var_os("OJON_SCREENSHOT_DIR").map(PathBuf::from)
-            .filter(|path| path.is_dir()) {
+        if let Some(artifact_dir) = std::env::var_os("OJON_SCREENSHOT_DIR")
+            .map(PathBuf::from)
+            .filter(|path| path.is_dir())
+        {
             let ppm_path = artifact_dir.join("ojon_workstation_render.ppm");
             let pixels = cpu.pixels();
             let mut data = format!("P6\n{} {}\n255\n", 1500, 960).into_bytes();
@@ -2923,7 +3687,14 @@ mod tests {
 
     #[test]
     fn test_gui_settings_persistence_and_goals() {
-        let temp = std::env::temp_dir().join(format!("ojon_gui_test_{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let temp = std::env::temp_dir().join(format!(
+            "ojon_gui_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = std::fs::create_dir_all(&temp);
         let settings_file = temp.join("settings.json");
         std::env::set_var("OJON_SETTINGS_PATH", &settings_file);
@@ -2961,7 +3732,10 @@ mod tests {
         ojon_backend::save_settings(&settings).unwrap();
 
         let ws4 = Workstation::new();
-        assert_eq!(ws4.opt_goal, 0, "Balanced goal from CLI should reflect in GUI");
+        assert_eq!(
+            ws4.opt_goal, 0,
+            "Balanced goal from CLI should reflect in GUI"
+        );
 
         // Cleanup
         std::env::remove_var("OJON_SETTINGS_PATH");

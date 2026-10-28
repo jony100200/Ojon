@@ -15,8 +15,12 @@ const MAX_FILES: usize = 20000;
 const MAX_EDITS: usize = 256;
 const MAX_DEPTH: usize = 16;
 
-fn invalid(s: impl Into<String>) -> io::Error { io::Error::new(ErrorKind::InvalidInput, s.into()) }
-fn corrupt(s: impl Into<String>) -> io::Error { io::Error::new(ErrorKind::InvalidData, s.into()) }
+fn invalid(s: impl Into<String>) -> io::Error {
+    io::Error::new(ErrorKind::InvalidInput, s.into())
+}
+fn corrupt(s: impl Into<String>) -> io::Error {
+    io::Error::new(ErrorKind::InvalidData, s.into())
+}
 
 #[derive(Debug)]
 struct SourceFile {
@@ -68,31 +72,52 @@ impl ModelAblationPlan {
 
 fn read_json(path: &Path, max: u64) -> io::Result<Value> {
     let len = fs::metadata(path)?.len();
-    if len == 0 || len > max { return Err(invalid(format!("missing or oversized JSON: {}",path.display()))); }
+    if len == 0 || len > max {
+        return Err(invalid(format!(
+            "missing or oversized JSON: {}",
+            path.display()
+        )));
+    }
     let mut buf = Vec::with_capacity(len as usize);
     File::open(path)?.take(max + 1).read_to_end(&mut buf)?;
-    serde_json::from_slice(&buf).map_err(|e| corrupt(format!("invalid JSON {}: {e}", path.display())))
+    serde_json::from_slice(&buf)
+        .map_err(|e| corrupt(format!("invalid JSON {}: {e}", path.display())))
 }
 
 fn enumerate(root: &Path, dir: &Path, depth: usize, files: &mut Vec<SourceFile>) -> io::Result<()> {
-    if depth > MAX_DEPTH { return Err(invalid("model directory nesting too deep")); }
+    if depth > MAX_DEPTH {
+        return Err(invalid("model directory nesting too deep"));
+    }
     let mut entries = fs::read_dir(dir)?.collect::<io::Result<Vec<_>>>()?;
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let p = entry.path();
         let meta = fs::symlink_metadata(&p)?;
         if meta.file_type().is_symlink() {
-            return Err(invalid(format!("model folder contains symlink (materialize files first): {}",p.display())));
+            return Err(invalid(format!(
+                "model folder contains symlink (materialize files first): {}",
+                p.display()
+            )));
         }
-        let rel = p.strip_prefix(root).map_err(|_| invalid("file path escaped model root"))?.to_path_buf();
+        let rel = p
+            .strip_prefix(root)
+            .map_err(|_| invalid("file path escaped model root"))?
+            .to_path_buf();
         if meta.is_dir() {
             // Avoid copying Git/HF cache internals into published model checkpoints.
             let name = entry.file_name();
-            if name == ".git" || name == ".cache" { continue; }
+            if name == ".git" || name == ".cache" {
+                continue;
+            }
             enumerate(root, &p, depth + 1, files)?;
         } else if meta.is_file() {
-            if files.len() >= MAX_FILES { return Err(invalid("too many model files")); }
-            files.push(SourceFile { relative: rel, bytes: meta.len() });
+            if files.len() >= MAX_FILES {
+                return Err(invalid("too many model files"));
+            }
+            files.push(SourceFile {
+                relative: rel,
+                bytes: meta.len(),
+            });
         } else {
             return Err(invalid("model source contains non-file/directory entry"));
         }
@@ -102,142 +127,252 @@ fn enumerate(root: &Path, dir: &Path, depth: usize, files: &mut Vec<SourceFile>)
 
 fn exact_shard_name(shard: &str) -> io::Result<PathBuf> {
     let p = Path::new(shard);
-    if shard.is_empty() || shard.starts_with('.') || shard.contains('\\') ||
-        p.components().count() != 1 || p.file_name().and_then(|s|s.to_str()) != Some(shard) ||
-        !shard.ends_with(".safetensors") {
-        return Err(invalid(format!("unsafe safetensors index shard path: {shard}")));
+    if shard.is_empty()
+        || shard.starts_with('.')
+        || shard.contains('\\')
+        || p.components().count() != 1
+        || p.file_name().and_then(|s| s.to_str()) != Some(shard)
+        || !shard.ends_with(".safetensors")
+    {
+        return Err(invalid(format!(
+            "unsafe safetensors index shard path: {shard}"
+        )));
     }
     Ok(p.to_path_buf())
 }
 
 fn shard_tensors(path: &Path) -> io::Result<BTreeSet<String>> {
     let size = fs::metadata(path)?.len();
-    if size < 10 { return Err(corrupt("truncated safetensors shard")); }
-    let mut f=File::open(path)?;
-    let mut prefix=[0u8;8];f.read_exact(&mut prefix)?;
-    let hlen=u64::from_le_bytes(prefix);
-    if hlen == 0 || hlen > 32*1024*1024 || hlen > size-8 { return Err(corrupt("invalid safetensors header size")); }
-    let mut header=vec![0;hlen as usize];f.read_exact(&mut header)?;
-    let map:Value=serde_json::from_slice(&header).map_err(|e|corrupt(format!("invalid safetensors header: {e}")))?;
-    let obj=map.as_object().ok_or_else(||corrupt("invalid safetensors tensor map"))?;
-    if obj.len() > 100000 { return Err(corrupt("too many tensors in shard")); }
-    Ok(obj.keys().filter(|n|n.as_str()!="__metadata__").cloned().collect())
+    if size < 10 {
+        return Err(corrupt("truncated safetensors shard"));
+    }
+    let mut f = File::open(path)?;
+    let mut prefix = [0u8; 8];
+    f.read_exact(&mut prefix)?;
+    let hlen = u64::from_le_bytes(prefix);
+    if hlen == 0 || hlen > 32 * 1024 * 1024 || hlen > size - 8 {
+        return Err(corrupt("invalid safetensors header size"));
+    }
+    let mut header = vec![0; hlen as usize];
+    f.read_exact(&mut header)?;
+    let map: Value = serde_json::from_slice(&header)
+        .map_err(|e| corrupt(format!("invalid safetensors header: {e}")))?;
+    let obj = map
+        .as_object()
+        .ok_or_else(|| corrupt("invalid safetensors tensor map"))?;
+    if obj.len() > 100000 {
+        return Err(corrupt("too many tensors in shard"));
+    }
+    Ok(obj
+        .keys()
+        .filter(|n| n.as_str() != "__metadata__")
+        .cloned()
+        .collect())
 }
 
 /// Create a safe model-folder plan. Index coverage is verified before any edit
 /// is published; the recipe must explicitly identify tensors to change.
-pub fn prepare_model_abliteration(source: &Path, recipe_path: &Path, output: &Path) -> io::Result<ModelAblationPlan> {
-    let recipe=read_json(recipe_path,MAX_JSON_BYTES)?;
-    prepare_model_abliteration_value(source,&recipe,output)
+pub fn prepare_model_abliteration(
+    source: &Path,
+    recipe_path: &Path,
+    output: &Path,
+) -> io::Result<ModelAblationPlan> {
+    let recipe = read_json(recipe_path, MAX_JSON_BYTES)?;
+    prepare_model_abliteration_value(source, &recipe, output)
 }
 
 /// Validate an in-memory direction recipe so a trace-driven workflow can
 /// preflight a complete checkpoint without creating a temporary recipe file.
-pub fn prepare_model_abliteration_value(source: &Path, recipe: &Value, output: &Path) -> io::Result<ModelAblationPlan> {
+pub fn prepare_model_abliteration_value(
+    source: &Path,
+    recipe: &Value,
+    output: &Path,
+) -> io::Result<ModelAblationPlan> {
     let source = source.canonicalize()?;
-    if !source.is_dir() { return Err(invalid("source must be an existing HF model directory")); }
-    if !source.join("config.json").is_file() { return Err(invalid("Hugging Face config.json missing")); }
-    let parent=output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")).canonicalize()?;
-    if !parent.is_dir() { return Err(invalid("output parent must exist")); }
-    let name=output.file_name().ok_or_else(||invalid("output folder name missing"))?;
-    if name == "." || name == ".." { return Err(invalid("invalid output folder name")); }
-    let output=parent.join(name);
-    if output.symlink_metadata().is_ok() { return Err(io::Error::new(ErrorKind::AlreadyExists,"output directory already exists")); }
+    if !source.is_dir() {
+        return Err(invalid("source must be an existing HF model directory"));
+    }
+    if !source.join("config.json").is_file() {
+        return Err(invalid("Hugging Face config.json missing"));
+    }
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+        .canonicalize()?;
+    if !parent.is_dir() {
+        return Err(invalid("output parent must exist"));
+    }
+    let name = output
+        .file_name()
+        .ok_or_else(|| invalid("output folder name missing"))?;
+    if name == "." || name == ".." {
+        return Err(invalid("invalid output folder name"));
+    }
+    let output = parent.join(name);
+    if output.symlink_metadata().is_ok() {
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            "output directory already exists",
+        ));
+    }
     if output.starts_with(&source) || source.starts_with(&output) {
-        return Err(invalid("output must not contain or reside inside the source model directory"));
+        return Err(invalid(
+            "output must not contain or reside inside the source model directory",
+        ));
     }
 
-    let mut files=Vec::new();
+    let mut files = Vec::new();
     enumerate(&source, &source, 0, &mut files)?;
-    let file_names:HashSet<PathBuf>=files.iter().map(|f|f.relative.clone()).collect();
-    if file_names.contains(Path::new("ojon-edit-receipt.json")) ||
-        file_names.contains(Path::new("ojon-activation-recipe.json")) {
-        return Err(invalid("source contains a reserved Ojon receipt or activation recipe filename"));
+    let file_names: HashSet<PathBuf> = files.iter().map(|f| f.relative.clone()).collect();
+    if file_names.contains(Path::new("ojon-edit-receipt.json"))
+        || file_names.contains(Path::new("ojon-activation-recipe.json"))
+    {
+        return Err(invalid(
+            "source contains a reserved Ojon receipt or activation recipe filename",
+        ));
     }
-    let cfg=read_json(&source.join("config.json"),MAX_JSON_BYTES)?;
-    let vision_config_detected=cfg.get("vision_config").is_some() ||
-        cfg.get("text_config").is_some() && cfg.get("model_type").and_then(Value::as_str)
-            .is_some_and(|t|t.contains("vl") || t.contains("vision"));
-    let mut source_bytes=0u64;
-    for file in &files { source_bytes=source_bytes.checked_add(file.bytes).ok_or_else(||invalid("source model file size overflow"))?; }
+    let cfg = read_json(&source.join("config.json"), MAX_JSON_BYTES)?;
+    let vision_config_detected = cfg.get("vision_config").is_some()
+        || cfg.get("text_config").is_some()
+            && cfg
+                .get("model_type")
+                .and_then(Value::as_str)
+                .is_some_and(|t| t.contains("vl") || t.contains("vision"));
+    let mut source_bytes = 0u64;
+    for file in &files {
+        source_bytes = source_bytes
+            .checked_add(file.bytes)
+            .ok_or_else(|| invalid("source model file size overflow"))?;
+    }
 
-    let index_file=Path::new("model.safetensors.index.json");
-    let indexed=file_names.contains(index_file);
-    let mut weight_map=BTreeMap::<String,PathBuf>::new();
-    let mut referenced=BTreeMap::<PathBuf,BTreeSet<String>>::new();
+    let index_file = Path::new("model.safetensors.index.json");
+    let indexed = file_names.contains(index_file);
+    let mut weight_map = BTreeMap::<String, PathBuf>::new();
+    let mut referenced = BTreeMap::<PathBuf, BTreeSet<String>>::new();
     if indexed {
-        let idx=read_json(&source.join(index_file),MAX_JSON_BYTES)?;
-        let mapping=idx.get("weight_map").and_then(Value::as_object)
-            .ok_or_else(||invalid("safetensors index lacks weight_map"))?;
-        if mapping.is_empty() || mapping.len()>200000 { return Err(invalid("invalid safetensors index weight_map size")); }
-        for (tensor,file) in mapping {
-            let name=file.as_str().ok_or_else(||invalid("non-string shard in weight_map"))?;
-            let shard=exact_shard_name(name)?;
-            if !file_names.contains(&shard) { return Err(invalid(format!("missing indexed weight shard: {name}"))); }
-            referenced.entry(shard.clone()).or_default().insert(tensor.clone());
-            weight_map.insert(tensor.clone(),shard);
+        let idx = read_json(&source.join(index_file), MAX_JSON_BYTES)?;
+        let mapping = idx
+            .get("weight_map")
+            .and_then(Value::as_object)
+            .ok_or_else(|| invalid("safetensors index lacks weight_map"))?;
+        if mapping.is_empty() || mapping.len() > 200000 {
+            return Err(invalid("invalid safetensors index weight_map size"));
+        }
+        for (tensor, file) in mapping {
+            let name = file
+                .as_str()
+                .ok_or_else(|| invalid("non-string shard in weight_map"))?;
+            let shard = exact_shard_name(name)?;
+            if !file_names.contains(&shard) {
+                return Err(invalid(format!("missing indexed weight shard: {name}")));
+            }
+            referenced
+                .entry(shard.clone())
+                .or_default()
+                .insert(tensor.clone());
+            weight_map.insert(tensor.clone(), shard);
         }
         // Full coverage: an index pointing to the wrong tensor or a missing
         // named tensor is an invalid model, even if that tensor is not edited.
         for (shard, expected) in &referenced {
-            let observed=shard_tensors(&source.join(shard))?;
+            let observed = shard_tensors(&source.join(shard))?;
             if &observed != expected {
-                return Err(corrupt(format!("weight_map and shard tensor names disagree: {}",shard.display())));
+                return Err(corrupt(format!(
+                    "weight_map and shard tensor names disagree: {}",
+                    shard.display()
+                )));
             }
         }
     } else {
-        let shard=PathBuf::from("model.safetensors");
+        let shard = PathBuf::from("model.safetensors");
         if !file_names.contains(&shard) {
             return Err(invalid("need model.safetensors or model.safetensors.index.json; PyTorch .bin editing is unsupported"));
         }
         for tensor in shard_tensors(&source.join(&shard))? {
-            weight_map.insert(tensor,shard.clone());
+            weight_map.insert(tensor, shard.clone());
         }
     }
 
-    if recipe.get("schema").and_then(Value::as_str)!=Some("ojon.abliteration.v1") {
+    if recipe.get("schema").and_then(Value::as_str) != Some("ojon.abliteration.v1") {
         return Err(invalid("expected ojon.abliteration.v1 recipe"));
     }
-    let preserve=recipe.get("preserve_row_norms").and_then(Value::as_bool)
-        .ok_or_else(||invalid("preserve_row_norms must be boolean"))?;
-    let entries=recipe.get("edits").and_then(Value::as_array)
-        .ok_or_else(||invalid("recipe edits must be an array"))?;
-    if entries.is_empty() || entries.len()>MAX_EDITS { return Err(invalid("invalid number of model edits")); }
-    let mut seen=HashSet::new();
-    let mut grouped=BTreeMap::<PathBuf,Vec<Value>>::new();
+    let preserve = recipe
+        .get("preserve_row_norms")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| invalid("preserve_row_norms must be boolean"))?;
+    let entries = recipe
+        .get("edits")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("recipe edits must be an array"))?;
+    if entries.is_empty() || entries.len() > MAX_EDITS {
+        return Err(invalid("invalid number of model edits"));
+    }
+    let mut seen = HashSet::new();
+    let mut grouped = BTreeMap::<PathBuf, Vec<Value>>::new();
     for edit in entries {
-        let tensor=edit.get("tensor").and_then(Value::as_str).ok_or_else(||invalid("edit missing tensor name"))?;
-        if !seen.insert(tensor.to_owned()) { return Err(invalid("duplicate edit tensor name")); }
-        let shard=weight_map.get(tensor).ok_or_else(||invalid(format!("unknown tensor in safetensors index: {tensor}")))?;
+        let tensor = edit
+            .get("tensor")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("edit missing tensor name"))?;
+        if !seen.insert(tensor.to_owned()) {
+            return Err(invalid("duplicate edit tensor name"));
+        }
+        let shard = weight_map
+            .get(tensor)
+            .ok_or_else(|| invalid(format!("unknown tensor in safetensors index: {tensor}")))?;
         grouped.entry(shard.clone()).or_default().push(edit.clone());
     }
-    let mut shards=Vec::new();
+    let mut shards = Vec::new();
     for (relative, edits) in grouped {
-        let grouped_recipe=json!({"schema":"ojon.abliteration.v1","preserve_row_norms":preserve,"edits":edits});
+        let grouped_recipe =
+            json!({"schema":"ojon.abliteration.v1","preserve_row_norms":preserve,"edits":edits});
         // Preflight exactly the same tensor-validation logic that runs later.
         // Temporary output doesn't exist and is never created at plan time.
-        let synthetic_output=parent.join(format!(".ojon-preflight-{}",relative.display()));
-        prepare_abliteration_with_recipe(&source.join(&relative),&grouped_recipe,&synthetic_output)?;
-        shards.push(ShardEdits { relative, count: edits.len(), recipe: grouped_recipe });
+        let synthetic_output = parent.join(format!(".ojon-preflight-{}", relative.display()));
+        prepare_abliteration_with_recipe(
+            &source.join(&relative),
+            &grouped_recipe,
+            &synthetic_output,
+        )?;
+        shards.push(ShardEdits {
+            relative,
+            count: edits.len(),
+            recipe: grouped_recipe,
+        });
     }
     Ok(ModelAblationPlan {
-        source,output,files,shards,source_bytes,vision_config_detected,indexed,total_edits:seen.len()
+        source,
+        output,
+        files,
+        shards,
+        source_bytes,
+        vision_config_detected,
+        indexed,
+        total_edits: seen.len(),
     })
 }
 
 struct StagingDir(PathBuf);
 impl Drop for StagingDir {
-    fn drop(&mut self) { let _=fs::remove_dir_all(&self.0); }
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
-fn stage(parent:&Path)->io::Result<StagingDir> {
+fn stage(parent: &Path) -> io::Result<StagingDir> {
     for attempt in 0..16 {
-        let stamp=SystemTime::now().duration_since(UNIX_EPOCH)
-            .map_err(|_|invalid("invalid clock"))?.as_nanos();
-        let path=parent.join(format!(".ojon-hf-edit-{}-{stamp}-{attempt}",std::process::id()));
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| invalid("invalid clock"))?
+            .as_nanos();
+        let path = parent.join(format!(
+            ".ojon-hf-edit-{}-{stamp}-{attempt}",
+            std::process::id()
+        ));
         match fs::create_dir(&path) {
-            Ok(())=>return Ok(StagingDir(path)),
-            Err(e) if e.kind()==ErrorKind::AlreadyExists=>continue,
-            Err(e)=>return Err(e)
+            Ok(()) => return Ok(StagingDir(path)),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
         }
     }
     Err(invalid("cannot create output staging directory"))
@@ -252,7 +387,7 @@ pub struct ModelAblationResult {
     pub edited_shards: usize,
 }
 impl ModelAblationResult {
-    pub fn as_json(&self)->Value {
+    pub fn as_json(&self) -> Value {
         json!({
             "schema":"ojon.model_abliteration_result.v1",
             "output":self.output.to_string_lossy(),
@@ -271,45 +406,77 @@ impl ModelAblationResult {
 
 /// Copy every regular file and edit the selected weight shards in a staging
 /// directory. Vision/projector weights and processor metadata remain unchanged.
-pub fn run_model_abliteration(plan:&ModelAblationPlan,mut log:impl FnMut(&str))->io::Result<ModelAblationResult> {
-    run_model_abliteration_inner(plan,None,&mut log)
+pub fn run_model_abliteration(
+    plan: &ModelAblationPlan,
+    mut log: impl FnMut(&str),
+) -> io::Result<ModelAblationResult> {
+    run_model_abliteration_inner(plan, None, &mut log)
 }
 
 /// Publish the compiled direction recipe in the same staging transaction as
 /// the edited HF checkpoint, preserving the exact edit for later audit.
-pub fn run_model_abliteration_with_recipe(plan:&ModelAblationPlan,recipe:&Value,mut log:impl FnMut(&str))->io::Result<ModelAblationResult> {
-    run_model_abliteration_inner(plan,Some(recipe),&mut log)
+pub fn run_model_abliteration_with_recipe(
+    plan: &ModelAblationPlan,
+    recipe: &Value,
+    mut log: impl FnMut(&str),
+) -> io::Result<ModelAblationResult> {
+    run_model_abliteration_inner(plan, Some(recipe), &mut log)
 }
 
-fn run_model_abliteration_inner(plan:&ModelAblationPlan,recipe:Option<&Value>,log:&mut impl FnMut(&str))->io::Result<ModelAblationResult> {
+fn run_model_abliteration_inner(
+    plan: &ModelAblationPlan,
+    recipe: Option<&Value>,
+    log: &mut impl FnMut(&str),
+) -> io::Result<ModelAblationResult> {
     if plan.output.symlink_metadata().is_ok() {
-        return Err(io::Error::new(ErrorKind::AlreadyExists,"output model folder already exists"));
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            "output model folder already exists",
+        ));
     }
-    let staging=stage(plan.output.parent().ok_or_else(||invalid("output parent missing"))?)?;
-    let edited:BTreeMap<&Path,&ShardEdits>=plan.shards.iter()
-        .map(|s|(s.relative.as_path(),s)).collect();
+    let staging = stage(
+        plan.output
+            .parent()
+            .ok_or_else(|| invalid("output parent missing"))?,
+    )?;
+    let edited: BTreeMap<&Path, &ShardEdits> = plan
+        .shards
+        .iter()
+        .map(|s| (s.relative.as_path(), s))
+        .collect();
     for file in &plan.files {
-        let src=plan.source.join(&file.relative);
-        let dst=staging.0.join(&file.relative);
-        let parent=dst.parent().ok_or_else(||invalid("bad model sidecar path"))?;
+        let src = plan.source.join(&file.relative);
+        let dst = staging.0.join(&file.relative);
+        let parent = dst
+            .parent()
+            .ok_or_else(|| invalid("bad model sidecar path"))?;
         fs::create_dir_all(parent)?;
-        let current=fs::symlink_metadata(&src)?;
-        if !current.is_file() || current.file_type().is_symlink() || current.len()!=file.bytes {
-            return Err(invalid(format!("model source file changed after planning: {}",src.display())));
+        let current = fs::symlink_metadata(&src)?;
+        if !current.is_file() || current.file_type().is_symlink() || current.len() != file.bytes {
+            return Err(invalid(format!(
+                "model source file changed after planning: {}",
+                src.display()
+            )));
         }
-        if let Some(change)=edited.get(file.relative.as_path()) {
-            let patch=prepare_abliteration_with_recipe(&src,&change.recipe,&dst)?;
-            run_abliteration(&patch,|msg|log(msg))?;
+        if let Some(change) = edited.get(file.relative.as_path()) {
+            let patch = prepare_abliteration_with_recipe(&src, &change.recipe, &dst)?;
+            run_abliteration(&patch, |msg| log(msg))?;
         } else {
-            let copied=fs::copy(&src,&dst)?;
-            if copied!=file.bytes { return Err(corrupt("model sidecar copy incomplete")); }
+            let copied = fs::copy(&src, &dst)?;
+            if copied != file.bytes {
+                return Err(corrupt("model sidecar copy incomplete"));
+            }
         }
     }
     // Put an honest receipt next to the model, without changing HF's weight
     // map or other metadata. The editor does NOT claim model-load validation.
-    let receipt=staging.0.join("ojon-edit-receipt.json");
-    if receipt.exists() { return Err(invalid("source checkpoint contains reserved Ojon receipt filename")); }
-    let mut file=File::create(&receipt)?;
+    let receipt = staging.0.join("ojon-edit-receipt.json");
+    if receipt.exists() {
+        return Err(invalid(
+            "source checkpoint contains reserved Ojon receipt filename",
+        ));
+    }
+    let mut file = File::create(&receipt)?;
     file.write_all(serde_json::to_string_pretty(&json!({
         "schema":"ojon.model_edit_receipt.v1",
         "source":plan.source.to_string_lossy(),
@@ -325,142 +492,215 @@ fn run_model_abliteration_inner(plan:&ModelAblationPlan,recipe:Option<&Value>,lo
     file.sync_all()?;
     // Windows cannot rename a directory while its receipt file is still open.
     drop(file);
-    if let Some(recipe)=recipe {
-        let mut artifact=File::create(staging.0.join("ojon-activation-recipe.json"))?;
-        serde_json::to_writer_pretty(&mut artifact,recipe)
-            .map_err(|e|invalid(format!("cannot serialize activation recipe: {e}")))?;
+    if let Some(recipe) = recipe {
+        let mut artifact = File::create(staging.0.join("ojon-activation-recipe.json"))?;
+        serde_json::to_writer_pretty(&mut artifact, recipe)
+            .map_err(|e| invalid(format!("cannot serialize activation recipe: {e}")))?;
         artifact.sync_all()?;
     }
     if plan.output.symlink_metadata().is_ok() {
-        return Err(io::Error::new(ErrorKind::AlreadyExists,"output folder appeared while editing"));
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            "output folder appeared while editing",
+        ));
     }
-    fs::rename(&staging.0,&plan.output)?;
-    log(&format!("[ojon] published complete HF folder: {}",plan.output.display()));
+    fs::rename(&staging.0, &plan.output)?;
+    log(&format!(
+        "[ojon] published complete HF folder: {}",
+        plan.output.display()
+    ));
     Ok(ModelAblationResult {
-        output:plan.output.clone(),files:plan.files.len()+1+usize::from(recipe.is_some()),source_bytes:plan.source_bytes,
-        edited_tensors:plan.total_edits,edited_shards:plan.shards.len()
+        output: plan.output.clone(),
+        files: plan.files.len() + 1 + usize::from(recipe.is_some()),
+        source_bytes: plan.source_bytes,
+        edited_tensors: plan.total_edits,
+        edited_shards: plan.shards.len(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn scratch()->PathBuf {
-        let stamp=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let d=std::env::temp_dir().join(format!("ojon-hf-folder-{}-{stamp}",std::process::id()));
-        fs::create_dir(&d).unwrap();d
+    fn scratch() -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let d = std::env::temp_dir().join(format!("ojon-hf-folder-{}-{stamp}", std::process::id()));
+        fs::create_dir(&d).unwrap();
+        d
     }
-    fn shard(path:&Path, name:&str, vals:&[f32]) {
-        let mut h=serde_json::Map::new();
-        h.insert(name.to_owned(),json!({"dtype":"F32","shape":[2,2],"data_offsets":[0,16]}));
-        let header=serde_json::to_vec(&Value::Object(h)).unwrap();
-        let mut f=File::create(path).unwrap();
+    fn shard(path: &Path, name: &str, vals: &[f32]) {
+        let mut h = serde_json::Map::new();
+        h.insert(
+            name.to_owned(),
+            json!({"dtype":"F32","shape":[2,2],"data_offsets":[0,16]}),
+        );
+        let header = serde_json::to_vec(&Value::Object(h)).unwrap();
+        let mut f = File::create(path).unwrap();
         f.write_all(&(header.len() as u64).to_le_bytes()).unwrap();
         f.write_all(&header).unwrap();
-        for val in vals { f.write_all(&val.to_le_bytes()).unwrap(); }
+        for val in vals {
+            f.write_all(&val.to_le_bytes()).unwrap();
+        }
     }
-    fn setup(root:&Path)->(PathBuf,PathBuf) {
-        let src=root.join("original");fs::create_dir(&src).unwrap();
-        fs::write(src.join("config.json"),r#"{"model_type":"qwen3_vl","vision_config":{"hidden_size":8}}"#).unwrap();
-        fs::write(src.join("tokenizer.json"),r#"{"dummy":true}"#).unwrap();
+    fn setup(root: &Path) -> (PathBuf, PathBuf) {
+        let src = root.join("original");
+        fs::create_dir(&src).unwrap();
+        fs::write(
+            src.join("config.json"),
+            r#"{"model_type":"qwen3_vl","vision_config":{"hidden_size":8}}"#,
+        )
+        .unwrap();
+        fs::write(src.join("tokenizer.json"), r#"{"dummy":true}"#).unwrap();
         fs::create_dir(src.join("vision")).unwrap();
-        fs::write(src.join("vision/processor_config.json"),r#"{"image":true}"#).unwrap();
-        fs::write(src.join("vision/visual.bin"),[1u8,2,3,4]).unwrap();
-        let a="model.layers.0.self_attn.o_proj.weight";
-        let b="model.layers.1.mlp.down_proj.weight";
-        let s1="model-00001-of-00002.safetensors";
-        let s2="model-00002-of-00002.safetensors";
-        shard(&src.join(s1),a,&[2.0,0.0,0.0,2.0]);
-        shard(&src.join(s2),b,&[3.0,0.0,0.0,3.0]);
-        let mut weight_map=serde_json::Map::new();
-        weight_map.insert(a.to_owned(),json!(s1));
-        weight_map.insert(b.to_owned(),json!(s2));
-        fs::write(src.join("model.safetensors.index.json"),
-            serde_json::to_vec(&json!({"metadata":{"total_size":32},"weight_map":weight_map})).unwrap()).unwrap();
-        let recipe=root.join("directions.json");
-        fs::write(&recipe,serde_json::to_vec(&json!({
-            "schema":"ojon.abliteration.v1","preserve_row_norms":false,
-            "edits":[
-                {"tensor":a,"direction":[1.0,0.0],"strength":1.0},
-                {"tensor":b,"direction":[0.0,1.0],"strength":1.0}
-            ]
-        })).unwrap()).unwrap();
-        (src,recipe)
+        fs::write(
+            src.join("vision/processor_config.json"),
+            r#"{"image":true}"#,
+        )
+        .unwrap();
+        fs::write(src.join("vision/visual.bin"), [1u8, 2, 3, 4]).unwrap();
+        let a = "model.layers.0.self_attn.o_proj.weight";
+        let b = "model.layers.1.mlp.down_proj.weight";
+        let s1 = "model-00001-of-00002.safetensors";
+        let s2 = "model-00002-of-00002.safetensors";
+        shard(&src.join(s1), a, &[2.0, 0.0, 0.0, 2.0]);
+        shard(&src.join(s2), b, &[3.0, 0.0, 0.0, 3.0]);
+        let mut weight_map = serde_json::Map::new();
+        weight_map.insert(a.to_owned(), json!(s1));
+        weight_map.insert(b.to_owned(), json!(s2));
+        fs::write(
+            src.join("model.safetensors.index.json"),
+            serde_json::to_vec(&json!({"metadata":{"total_size":32},"weight_map":weight_map}))
+                .unwrap(),
+        )
+        .unwrap();
+        let recipe = root.join("directions.json");
+        fs::write(
+            &recipe,
+            serde_json::to_vec(&json!({
+                "schema":"ojon.abliteration.v1","preserve_row_norms":false,
+                "edits":[
+                    {"tensor":a,"direction":[1.0,0.0],"strength":1.0},
+                    {"tensor":b,"direction":[0.0,1.0],"strength":1.0}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        (src, recipe)
     }
     #[test]
     fn indexed_vlm_folder_preserves_vision_and_index_and_edits_both_shards() {
-        let root=scratch();let (src,recipe)=setup(&root);
-        let output=root.join("edited");
-        let plan=prepare_model_abliteration(&src,&recipe,&output).unwrap();
-        assert_eq!(plan.total_edits,2);
-        assert_eq!(plan.shards.len(),2);
+        let root = scratch();
+        let (src, recipe) = setup(&root);
+        let output = root.join("edited");
+        let plan = prepare_model_abliteration(&src, &recipe, &output).unwrap();
+        assert_eq!(plan.total_edits, 2);
+        assert_eq!(plan.shards.len(), 2);
         assert!(plan.as_json()["vision_config_detected"].as_bool().unwrap());
         assert!(!output.exists());
-        let result=run_model_abliteration(&plan,|_|{}).unwrap();
-        assert_eq!(result.edited_shards,2);
+        let result = run_model_abliteration(&plan, |_| {}).unwrap();
+        assert_eq!(result.edited_shards, 2);
         assert!(result.output.join("ojon-edit-receipt.json").is_file());
-        for path in ["vision/visual.bin","vision/processor_config.json","tokenizer.json",
-            "config.json","model.safetensors.index.json"] {
-            assert_eq!(fs::read(src.join(path)).unwrap(),fs::read(output.join(path)).unwrap());
-        }
-        for (name,p) in [
-            ("model-00001-of-00002.safetensors",0usize),
-            ("model-00002-of-00002.safetensors",1usize)
+        for path in [
+            "vision/visual.bin",
+            "vision/processor_config.json",
+            "tokenizer.json",
+            "config.json",
+            "model.safetensors.index.json",
         ] {
-            let old=fs::read(src.join(name)).unwrap();
-            let new=fs::read(output.join(name)).unwrap();
-            assert_ne!(old,new);
-            let n=8+u64::from_le_bytes(new[0..8].try_into().unwrap()) as usize;
-            let values=new[n..n+16].chunks_exact(4)
-                .map(|x|f32::from_le_bytes(x.try_into().unwrap())).collect::<Vec<_>>();
-            if p==0 { assert_eq!(values,[0.0,0.0,0.0,2.0]); }
-            else { assert_eq!(values,[3.0,0.0,0.0,0.0]); }
+            assert_eq!(
+                fs::read(src.join(path)).unwrap(),
+                fs::read(output.join(path)).unwrap()
+            );
         }
-        assert!(run_model_abliteration(&plan,|_|{}).is_err());
+        for (name, p) in [
+            ("model-00001-of-00002.safetensors", 0usize),
+            ("model-00002-of-00002.safetensors", 1usize),
+        ] {
+            let old = fs::read(src.join(name)).unwrap();
+            let new = fs::read(output.join(name)).unwrap();
+            assert_ne!(old, new);
+            let n = 8 + u64::from_le_bytes(new[0..8].try_into().unwrap()) as usize;
+            let values = new[n..n + 16]
+                .chunks_exact(4)
+                .map(|x| f32::from_le_bytes(x.try_into().unwrap()))
+                .collect::<Vec<_>>();
+            if p == 0 {
+                assert_eq!(values, [0.0, 0.0, 0.0, 2.0]);
+            } else {
+                assert_eq!(values, [3.0, 0.0, 0.0, 0.0]);
+            }
+        }
+        assert!(run_model_abliteration(&plan, |_| {}).is_err());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn trace_workflow_writes_reproducible_recipe_with_edited_teacher(){
-        let root=scratch();let (source,_)=setup(&root);
-        let trace=root.join("paired.jsonl");
-        let mut file=File::create(&trace).unwrap();
-        for tensor in ["model.layers.0.self_attn.o_proj.weight",
-            "model.layers.1.mlp.down_proj.weight"] {
-            for (class,values) in [("good",[0.0,0.0]),("bad",[1.0,0.0])] {
-                writeln!(file,"{}",json!({"tensor":tensor,"class":class,"values":values})).unwrap();
+    fn trace_workflow_writes_reproducible_recipe_with_edited_teacher() {
+        let root = scratch();
+        let (source, _) = setup(&root);
+        let trace = root.join("paired.jsonl");
+        let mut file = File::create(&trace).unwrap();
+        for tensor in [
+            "model.layers.0.self_attn.o_proj.weight",
+            "model.layers.1.mlp.down_proj.weight",
+        ] {
+            for (class, values) in [("good", [0.0, 0.0]), ("bad", [1.0, 0.0])] {
+                writeln!(
+                    file,
+                    "{}",
+                    json!({"tensor":tensor,"class":class,"values":values})
+                )
+                .unwrap();
             }
         }
         drop(file);
-        let output=root.join("trace-edited");
-        let plan=crate::uncensor_trace::prepare_uncensor_from_trace(&source,&trace,&output,0.5,false).unwrap();
-        let result=crate::uncensor_trace::run_uncensor_from_trace(&plan,|_|{}).unwrap();
-        assert_eq!(result["status"],"EDITED_TEACHER_NOT_VALIDATED");
+        let output = root.join("trace-edited");
+        let plan = crate::uncensor_trace::prepare_uncensor_from_trace(
+            &source, &trace, &output, 0.5, false,
+        )
+        .unwrap();
+        let result = crate::uncensor_trace::run_uncensor_from_trace(&plan, |_| {}).unwrap();
+        assert_eq!(result["status"], "EDITED_TEACHER_NOT_VALIDATED");
         assert!(output.join("ojon-activation-recipe.json").is_file());
         assert!(source.join("model-00001-of-00002.safetensors").is_file());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn missing_indexed_tensor_or_bad_source_never_creates_output() {
-        let root=scratch();let (src,recipe)=setup(&root);
-        let output=root.join("edited");
-        let idx=src.join("model.safetensors.index.json");
-        fs::write(&idx,serde_json::to_vec(&json!({"weight_map":{
-            "nonexistent.tensor":"model-00001-of-00002.safetensors"
-        }})).unwrap()).unwrap();
-        assert!(prepare_model_abliteration(&src,&recipe,&output).is_err());
+        let root = scratch();
+        let (src, recipe) = setup(&root);
+        let output = root.join("edited");
+        let idx = src.join("model.safetensors.index.json");
+        fs::write(
+            &idx,
+            serde_json::to_vec(&json!({"weight_map":{
+                "nonexistent.tensor":"model-00001-of-00002.safetensors"
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(prepare_model_abliteration(&src, &recipe, &output).is_err());
         assert!(!output.exists());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn rejects_output_nested_in_input_and_invalid_tensor() {
-        let root=scratch();let (src,recipe)=setup(&root);
-        assert!(prepare_model_abliteration(&src,&recipe,&src.join("nested")).is_err());
-        let bad=root.join("bad.json");
-        fs::write(&bad,serde_json::to_vec(&json!({
-            "schema":"ojon.abliteration.v1","preserve_row_norms":false,
-            "edits":[{"tensor":"vision_tower.weight","direction":[1.0],"strength":1.0}]
-        })).unwrap()).unwrap();
-        assert!(prepare_model_abliteration(&src,&bad,&root.join("out")).is_err());
+        let root = scratch();
+        let (src, recipe) = setup(&root);
+        assert!(prepare_model_abliteration(&src, &recipe, &src.join("nested")).is_err());
+        let bad = root.join("bad.json");
+        fs::write(
+            &bad,
+            serde_json::to_vec(&json!({
+                "schema":"ojon.abliteration.v1","preserve_row_norms":false,
+                "edits":[{"tensor":"vision_tower.weight","direction":[1.0],"strength":1.0}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(prepare_model_abliteration(&src, &bad, &root.join("out")).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -16,8 +16,6 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-
-
 /// Configuration options for the Dual-Buffer split.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DualBufferConfig {
@@ -179,7 +177,9 @@ pub fn partition_dual_buffer(
             .or_default()
             .push(ep.clone());
 
-        if ep.outcome == EpisodeOutcome::VerifiedSuccess && ep.scalar_reward >= config.min_sft_reward {
+        if ep.outcome == EpisodeOutcome::VerifiedSuccess
+            && ep.scalar_reward >= config.min_sft_reward
+        {
             verified_episodes.push(ep);
         }
     }
@@ -195,14 +195,18 @@ pub fn partition_dual_buffer(
     session_timestamps.sort_by_key(|(_, ts)| *ts);
 
     // Identify the K most recent sessions for the Recency Window
-    let recent_session_ids: HashSet<String> = if session_timestamps.len() > config.recency_window_k {
+    let recent_session_ids: HashSet<String> = if session_timestamps.len() > config.recency_window_k
+    {
         let skip_count = session_timestamps.len() - config.recency_window_k;
         session_timestamps[skip_count..]
             .iter()
             .map(|(sid, _)| sid.clone())
             .collect()
     } else {
-        session_timestamps.iter().map(|(sid, _)| sid.clone()).collect()
+        session_timestamps
+            .iter()
+            .map(|(sid, _)| sid.clone())
+            .collect()
     };
 
     // Separate into anchor and recency candidates
@@ -220,7 +224,8 @@ pub fn partition_dual_buffer(
             recency_episodes.push(ep);
         } else {
             // Older session: if anchor ratio target is not yet met, keep as anchor candidate
-            let target_anchor_count = ((recency_episodes.len() + 1) as f64 * config.anchor_ratio).ceil() as usize;
+            let target_anchor_count =
+                ((recency_episodes.len() + 1) as f64 * config.anchor_ratio).ceil() as usize;
             if anchor_episodes.len() < target_anchor_count {
                 anchor_episodes.push(ep);
             }
@@ -248,7 +253,10 @@ pub fn partition_dual_buffer(
                     dpo_pairs.push(DpoPreferencePair {
                         pair_id: format!("pair-{}-{}", succ.episode_id, ret.episode_id),
                         session_id: session_id.clone(),
-                        system_prompt: succ.system_prompt.clone().or_else(|| ret.system_prompt.clone()),
+                        system_prompt: succ
+                            .system_prompt
+                            .clone()
+                            .or_else(|| ret.system_prompt.clone()),
                         user_prompt: succ.user_prompt.clone(),
                         chosen_response: succ.assistant_response.clone(),
                         rejected_response: ret.assistant_response.clone(),
@@ -310,8 +318,12 @@ fn episode_to_messages(ep: &CollectedEpisode) -> Value {
         }));
         if let Some(results) = &ep.tool_results {
             for (call, result) in ep.tool_calls.iter().zip(results) {
-                if result.is_null() { continue; }
-                let content = result.as_str().map(str::to_owned)
+                if result.is_null() {
+                    continue;
+                }
+                let content = result
+                    .as_str()
+                    .map(str::to_owned)
                     .unwrap_or_else(|| result.to_string());
                 messages.push(json!({
                     "role": "tool",
@@ -370,7 +382,11 @@ pub fn export_to_llamafactory(
     let mut sft_count = 0;
 
     // Anchor first, then recency
-    for ep in batch.anchor_episodes.iter().chain(batch.recency_episodes.iter()) {
+    for ep in batch
+        .anchor_episodes
+        .iter()
+        .chain(batch.recency_episodes.iter())
+    {
         let msg_obj = episode_to_messages(ep);
         writeln!(sft_file, "{}", msg_obj)?;
         if eval_session_set.contains(&ep.session_id) {
@@ -447,7 +463,11 @@ pub fn export_to_llamafactory(
     });
 
     let mut info_file = File::create(&info_path)?;
-    writeln!(info_file, "{}", serde_json::to_string_pretty(&info_manifest)?)?;
+    writeln!(
+        info_file,
+        "{}",
+        serde_json::to_string_pretty(&info_manifest)?
+    )?;
     info_file.flush()?;
 
     Ok(CurationReceipt {
@@ -499,7 +519,11 @@ pub fn load_episodes_from_jsonl(path: &Path) -> io::Result<Vec<CollectedEpisode>
             match serde_json::from_str::<CollectedEpisode>(trimmed) {
                 Ok(ep) => out.push(ep),
                 Err(e) => {
-                    eprintln!("[warn] load_episodes_from_jsonl: skipping line {}: {}", line_idx + 1, e);
+                    eprintln!(
+                        "[warn] load_episodes_from_jsonl: skipping line {}: {}",
+                        line_idx + 1,
+                        e
+                    );
                 }
             }
         }
@@ -512,12 +536,22 @@ pub fn load_episodes_from_jsonl(path: &Path) -> io::Result<Vec<CollectedEpisode>
 mod tests {
     use super::*;
 
-    fn dummy_ep(id: &str, session: &str, outcome: EpisodeOutcome, ts: u64, is_anchor: bool) -> CollectedEpisode {
+    fn dummy_ep(
+        id: &str,
+        session: &str,
+        outcome: EpisodeOutcome,
+        ts: u64,
+        is_anchor: bool,
+    ) -> CollectedEpisode {
         CollectedEpisode {
             schema: "ojon.learn.v1".to_string(),
             episode_id: id.to_string(),
             session_id: session.to_string(),
-            app_id: if is_anchor { "anchor".to_string() } else { "test-app".to_string() },
+            app_id: if is_anchor {
+                "anchor".to_string()
+            } else {
+                "test-app".to_string()
+            },
             timestamp_epoch_s: ts,
             claimed_teacher: "claude-3-5-sonnet".to_string(),
             model_id: "claude-3-5-sonnet".to_string(),
@@ -539,16 +573,52 @@ mod tests {
         let mut episodes = Vec::new();
 
         // Older session 1 (failed)
-        episodes.push(dummy_ep("ep-01", "session-1", EpisodeOutcome::FailedRetry, 100, false));
+        episodes.push(dummy_ep(
+            "ep-01",
+            "session-1",
+            EpisodeOutcome::FailedRetry,
+            100,
+            false,
+        ));
         // Older session 2 (verified)
-        episodes.push(dummy_ep("ep-02", "session-2", EpisodeOutcome::VerifiedSuccess, 200, false));
+        episodes.push(dummy_ep(
+            "ep-02",
+            "session-2",
+            EpisodeOutcome::VerifiedSuccess,
+            200,
+            false,
+        ));
         // Recent session 3 (verified)
-        episodes.push(dummy_ep("ep-03", "session-3", EpisodeOutcome::VerifiedSuccess, 300, false));
+        episodes.push(dummy_ep(
+            "ep-03",
+            "session-3",
+            EpisodeOutcome::VerifiedSuccess,
+            300,
+            false,
+        ));
         // Recent session 4 (verified + failed retry)
-        episodes.push(dummy_ep("ep-04-fail", "session-4", EpisodeOutcome::FailedRetry, 400, false));
-        episodes.push(dummy_ep("ep-04-succ", "session-4", EpisodeOutcome::VerifiedSuccess, 401, false));
+        episodes.push(dummy_ep(
+            "ep-04-fail",
+            "session-4",
+            EpisodeOutcome::FailedRetry,
+            400,
+            false,
+        ));
+        episodes.push(dummy_ep(
+            "ep-04-succ",
+            "session-4",
+            EpisodeOutcome::VerifiedSuccess,
+            401,
+            false,
+        ));
         // Recent session 5 (verified)
-        episodes.push(dummy_ep("ep-05", "session-5", EpisodeOutcome::VerifiedSuccess, 500, false));
+        episodes.push(dummy_ep(
+            "ep-05",
+            "session-5",
+            EpisodeOutcome::VerifiedSuccess,
+            500,
+            false,
+        ));
 
         let config = DualBufferConfig {
             anchor_ratio: 0.10,
@@ -565,21 +635,45 @@ mod tests {
         assert_eq!(batch.recency_episodes.len(), 3);
         // DPO pairs from session 4
         assert_eq!(batch.dpo_pairs.len(), 1);
-        assert_eq!(batch.dpo_pairs[0].chosen_response, "Assistant answer for ep-04-succ");
-        assert_eq!(batch.dpo_pairs[0].rejected_response, "Assistant answer for ep-04-fail");
+        assert_eq!(
+            batch.dpo_pairs[0].chosen_response,
+            "Assistant answer for ep-04-succ"
+        );
+        assert_eq!(
+            batch.dpo_pairs[0].rejected_response,
+            "Assistant answer for ep-04-fail"
+        );
         assert_eq!(batch.dpo_pairs[0].reward_delta, 2.0); // 1.0 - (-1.0)
     }
 
     #[test]
     fn test_llamafactory_export() {
         let mut episodes = Vec::new();
-        episodes.push(dummy_ep("ep-succ", "session-dpo", EpisodeOutcome::VerifiedSuccess, 10, false));
-        episodes.push(dummy_ep("ep-fail", "session-dpo", EpisodeOutcome::FailedRetry, 11, false));
+        episodes.push(dummy_ep(
+            "ep-succ",
+            "session-dpo",
+            EpisodeOutcome::VerifiedSuccess,
+            10,
+            false,
+        ));
+        episodes.push(dummy_ep(
+            "ep-fail",
+            "session-dpo",
+            EpisodeOutcome::FailedRetry,
+            11,
+            false,
+        ));
 
         let config = DualBufferConfig::default();
         let batch = partition_dual_buffer(&episodes, &config);
 
-        let temp_dir = std::env::temp_dir().join(format!("ojon_curate_test_{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "ojon_curate_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let receipt = export_to_llamafactory(&batch, &temp_dir).expect("export should succeed");
 
         assert!(receipt.sft_file.exists());

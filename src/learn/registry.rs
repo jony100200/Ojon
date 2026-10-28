@@ -230,7 +230,9 @@ pub const CURATED_DATASETS: &[DatasetCatalogEntry] = &[
 ];
 
 /// Retrieve catalog entries by optional category filter.
-pub fn list_curated_datasets(category: Option<DatasetCategory>) -> Vec<&'static DatasetCatalogEntry> {
+pub fn list_curated_datasets(
+    category: Option<DatasetCategory>,
+) -> Vec<&'static DatasetCatalogEntry> {
     CURATED_DATASETS
         .iter()
         .filter(|e| category.map_or(true, |c| e.category == c))
@@ -264,7 +266,10 @@ pub fn import_and_sanitize_jsonl(
     max_records: Option<usize>,
 ) -> io::Result<ImportReceipt> {
     if !source_path.is_file() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "source dataset file missing"));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "source dataset file missing",
+        ));
     }
     let source_file = File::open(source_path)?;
     let reader = BufReader::new(source_file);
@@ -302,7 +307,8 @@ pub fn import_and_sanitize_jsonl(
         };
 
         // Extract prompt / user text for deduplication hash
-        let prompt_text: String = row.get("user_prompt")
+        let prompt_text: String = row
+            .get("user_prompt")
             .or_else(|| row.get("instruction"))
             .or_else(|| row.get("prompt"))
             .and_then(|v| v.as_str())
@@ -325,10 +331,17 @@ pub fn import_and_sanitize_jsonl(
                     .and_then(|arr| {
                         arr.iter()
                             .find(|msg| {
-                                let from = msg.get("from").or_else(|| msg.get("role")).and_then(|r| r.as_str());
+                                let from = msg
+                                    .get("from")
+                                    .or_else(|| msg.get("role"))
+                                    .and_then(|r| r.as_str());
                                 matches!(from, Some("human") | Some("user"))
                             })
-                            .and_then(|msg| msg.get("value").or_else(|| msg.get("content")).and_then(|c| c.as_str()))
+                            .and_then(|msg| {
+                                msg.get("value")
+                                    .or_else(|| msg.get("content"))
+                                    .and_then(|c| c.as_str())
+                            })
                             .map(|s| s.to_string())
                     })
             })
@@ -405,7 +418,7 @@ mod tests {
         let raw_lines = vec![
             r#"{"instruction": "Calculate 2+2", "response": "4 with key sk-abcdef1234567890abcdef"}"#,
             r#"{"instruction": "Calculate 2+2", "response": "Duplicate"}"#, // duplicate
-            r#"{"broken json"#, // syntax error
+            r#"{"broken json"#,                                             // syntax error
             r#"{"instruction": "Write a python func", "response": "def foo(): pass"}"#,
         ];
         fs::write(&src, raw_lines.join("\n")).unwrap();

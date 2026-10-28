@@ -80,7 +80,10 @@ impl TemporalKnowledgeEngine {
 
         let target_time = query.as_of_epoch_s.unwrap_or(now);
         let query_lower = query.query_text.to_ascii_lowercase();
-        let query_words: Vec<&str> = query_lower.split_whitespace().filter(|w| w.len() >= 3).collect();
+        let query_words: Vec<&str> = query_lower
+            .split_whitespace()
+            .filter(|w| w.len() >= 3)
+            .collect();
 
         let mut scored_results: Vec<(f64, TemporalSearchResult)> = Vec::new();
 
@@ -222,7 +225,8 @@ impl TemporalKnowledgeEngine {
             context_block.push_str(&format!("Evaluation Date: {}\n\n", date_iso));
 
             for (idx, item) in results.iter().enumerate() {
-                let (safe_snippet, _) = crate::learn::knowledge::sanitize_untrusted_knowledge(&item.snippet);
+                let (safe_snippet, _) =
+                    crate::learn::knowledge::sanitize_untrusted_knowledge(&item.snippet);
                 context_block.push_str(&format!(
                     "[{}] \"{}\" (Source: {}, Version: {}) [EXTERNAL_REFERENCE_DATA_ONLY]\n",
                     idx + 1,
@@ -237,10 +241,7 @@ impl TemporalKnowledgeEngine {
                 context_block.push('\n');
             }
 
-            format!(
-                "{}\n### USER INSTRUCTION:\n{}",
-                context_block, base_prompt
-            )
+            format!("{}\n### USER INSTRUCTION:\n{}", context_block, base_prompt)
         } else {
             base_prompt.to_string()
         };
@@ -405,7 +406,9 @@ mod tests {
         let res_present = engine.search(&query_present);
         assert!(!res_present.is_empty());
         assert_eq!(res_present[0].item_id, "doc-unity-mesh-2026");
-        assert!(res_present[0].snippet.contains("GraphicsBuffer direct GPU upload"));
+        assert!(res_present[0]
+            .snippet
+            .contains("GraphicsBuffer direct GPU upload"));
 
         // Case B: Historical query (as of 2023).
         // Must return the 2021 documentation (which was valid in 2023) and NOT the 2026 API.
@@ -438,10 +441,13 @@ mod tests {
         );
 
         let engine = TemporalKnowledgeEngine::new(vec![doc]);
-        let aug = engine.build_augmented_prompt("How do async closures work in Rust 2024?", None, 3);
+        let aug =
+            engine.build_augmented_prompt("How do async closures work in Rust 2024?", None, 3);
 
         assert!(aug.has_current_knowledge);
-        assert!(aug.augmented_prompt.contains("RETRIEVED VERIFIED KNOWLEDGE"));
+        assert!(aug
+            .augmented_prompt
+            .contains("RETRIEVED VERIFIED KNOWLEDGE"));
         assert!(aug.augmented_prompt.contains("Rust 2024 Edition"));
         assert!(aug.disclaimer.contains("Model Weights Unmodified"));
     }

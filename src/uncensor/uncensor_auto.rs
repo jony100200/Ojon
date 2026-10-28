@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-fn invalid(s: impl Into<String>) -> io::Error { io::Error::new(ErrorKind::InvalidInput, s.into()) }
+fn invalid(s: impl Into<String>) -> io::Error {
+    io::Error::new(ErrorKind::InvalidInput, s.into())
+}
 fn recipe_receipt(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(".ojon-recipe.json");
@@ -60,12 +62,27 @@ pub struct UncensorAutoRequest {
 }
 impl UncensorAutoRequest {
     pub fn new(source: PathBuf, output_dir: PathBuf) -> Self {
-        Self { source, output_dir, refusal_probes: PathBuf::new(), capability_suite: PathBuf::new(),
-            paired_prompts: PathBuf::new(), cvector_generator: PathBuf::from("llama-cvector-generator"),
-            runtime: PathBuf::from("llama-cli"), server_runtime: None, gpu_layers: 0, device: None,
-            refusal_tokens: 96, task_tokens: 128, strengths: vec![0.10, 0.20, 0.35], blocks: None,
-            max_capability_loss: 0.02, max_refusal_rate: None, quantize: None,
-            quantizer: PathBuf::from("llama-quantize"), allow_resource_risk: false }
+        Self {
+            source,
+            output_dir,
+            refusal_probes: PathBuf::new(),
+            capability_suite: PathBuf::new(),
+            paired_prompts: PathBuf::new(),
+            cvector_generator: PathBuf::from("llama-cvector-generator"),
+            runtime: PathBuf::from("llama-cli"),
+            server_runtime: None,
+            gpu_layers: 0,
+            device: None,
+            refusal_tokens: 96,
+            task_tokens: 128,
+            strengths: vec![0.10, 0.20, 0.35],
+            blocks: None,
+            max_capability_loss: 0.02,
+            max_refusal_rate: None,
+            quantize: None,
+            quantizer: PathBuf::from("llama-quantize"),
+            allow_resource_risk: false,
+        }
     }
 
     pub fn with_auto_hardware(mut self) -> Self {
@@ -116,62 +133,97 @@ fn paired_file(path: &Path) -> io::Result<usize> {
             return Err(invalid("prompt lines must be nonblank and <=8192 bytes"));
         }
         count += 1;
-        if count > 256 { return Err(invalid("paired prompt files may have at most 256 lines")); }
+        if count > 256 {
+            return Err(invalid("paired prompt files may have at most 256 lines"));
+        }
     }
-    if count < 2 { return Err(invalid("need at least two paired prompt lines")); }
+    if count < 2 {
+        return Err(invalid("need at least two paired prompt lines"));
+    }
     Ok(count)
 }
 
 fn attn_blocks(source: &Path) -> io::Result<Vec<usize>> {
-    let mut blocks = inspect_gguf_tensors(source)?.into_iter().filter_map(|tensor| {
-        let layer = tensor.name.strip_prefix("blk.")?.strip_suffix(".attn_output.weight")?;
-        (tensor.shape.len() == 2).then(|| layer.parse::<usize>().ok()).flatten()
-    }).collect::<Vec<_>>();
-    blocks.sort_unstable(); blocks.dedup();
-    if blocks.len() < 3 { return Err(invalid("no supported middle-layer attention output matrix")); }
+    let mut blocks = inspect_gguf_tensors(source)?
+        .into_iter()
+        .filter_map(|tensor| {
+            let layer = tensor
+                .name
+                .strip_prefix("blk.")?
+                .strip_suffix(".attn_output.weight")?;
+            (tensor.shape.len() == 2)
+                .then(|| layer.parse::<usize>().ok())
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    blocks.sort_unstable();
+    blocks.dedup();
+    if blocks.len() < 3 {
+        return Err(invalid("no supported middle-layer attention output matrix"));
+    }
     Ok(blocks)
 }
 
 fn default_sweep_blocks(blocks: &[usize]) -> Vec<usize> {
     let middle = blocks[blocks.len() * 2 / 3];
-    [middle.wrapping_sub(1), middle, middle + 1].into_iter()
+    [middle.wrapping_sub(1), middle, middle + 1]
+        .into_iter()
         .filter(|b| blocks.contains(b))
         .collect::<std::collections::BTreeSet<_>>()
-        .into_iter().collect()
+        .into_iter()
+        .collect()
 }
 
 pub fn prepare_uncensor_auto(mut request: UncensorAutoRequest) -> io::Result<UncensorAutoPlan> {
     if request.cvector_generator.as_os_str().is_empty() || !request.cvector_generator.is_file() {
-        if let Some(tool) = crate::discovery::discovered_path(crate::discovery::BackendId::LlamaCvectorGenerator) {
+        if let Some(tool) =
+            crate::discovery::discovered_path(crate::discovery::BackendId::LlamaCvectorGenerator)
+        {
             request.cvector_generator = tool;
         }
     }
     if !request.cvector_generator.is_file() {
-        return Err(invalid("automatic uncensoring requires an installed llama-cvector-generator executable"));
+        return Err(invalid(
+            "automatic uncensoring requires an installed llama-cvector-generator executable",
+        ));
     }
     if request.runtime.as_os_str().is_empty() || !request.runtime.is_file() {
-        if let Some(tool) = crate::discovery::discovered_path(crate::discovery::BackendId::LlamaCli) {
+        if let Some(tool) = crate::discovery::discovered_path(crate::discovery::BackendId::LlamaCli)
+        {
             request.runtime = tool;
         }
     }
     if request.server_runtime.is_none() {
-        request.server_runtime = crate::discovery::discovered_path(crate::discovery::BackendId::LlamaServer);
+        request.server_runtime =
+            crate::discovery::discovered_path(crate::discovery::BackendId::LlamaServer);
     }
-    if request.server_runtime.as_ref().is_some_and(|p| !p.is_file()) {
+    if request
+        .server_runtime
+        .as_ref()
+        .is_some_and(|p| !p.is_file())
+    {
         return Err(invalid("configured llama-server executable does not exist"));
     }
-    if request.quantize.is_some() && (!request.quantizer.is_file() || request.quantizer.as_os_str().is_empty()) {
-        if let Some(tool) = crate::discovery::discovered_path(crate::discovery::BackendId::LlamaQuantize) {
+    if request.quantize.is_some()
+        && (!request.quantizer.is_file() || request.quantizer.as_os_str().is_empty())
+    {
+        if let Some(tool) =
+            crate::discovery::discovered_path(crate::discovery::BackendId::LlamaQuantize)
+        {
             request.quantizer = tool;
         }
     }
     let source = request.source.canonicalize()?;
     let info = inspect_gguf(&source)?;
     if !matches!(info.file_type, Some(0 | 1 | 32)) || info.split_count.unwrap_or(1) > 1 {
-        return Err(invalid("uncensor sweep needs an original single-file F16/BF16/F32 GGUF"));
+        return Err(invalid(
+            "uncensor sweep needs an original single-file F16/BF16/F32 GGUF",
+        ));
     }
     let output_dir = request.output_dir.canonicalize()?;
-    if !output_dir.is_dir() { return Err(invalid("output folder must exist")); }
+    if !output_dir.is_dir() {
+        return Err(invalid("output folder must exist"));
+    }
     if request.refusal_probes.as_os_str().is_empty() {
         if let Some(bundled) = crate::discovery::bundled_data_file("refusal-probes.json") {
             request.refusal_probes = bundled;
@@ -182,35 +234,58 @@ pub fn prepare_uncensor_auto(mut request: UncensorAutoRequest) -> io::Result<Unc
             request.capability_suite = bundled;
         }
     }
-    if request.refusal_probes.as_os_str().is_empty() || request.capability_suite.as_os_str().is_empty() {
-        return Err(invalid("refusal probes and capability suite files are both required"));
+    if request.refusal_probes.as_os_str().is_empty()
+        || request.capability_suite.as_os_str().is_empty()
+    {
+        return Err(invalid(
+            "refusal probes and capability suite files are both required",
+        ));
     }
     // Validate both suites now so a broken file never reaches the sweep.
     crate::refusal::parse_refusal_suite(&request.refusal_probes)?;
     crate::task_eval::parse_eval_suite(&request.capability_suite)?;
     if request.paired_prompts.as_os_str().is_empty() {
-        if let Some(bundled) = crate::discovery::bundled_data_dir("paired")
-            .or_else(|| crate::discovery::bundled_data_file("positive.txt").and_then(|p| p.parent().map(Path::to_path_buf))) {
+        if let Some(bundled) = crate::discovery::bundled_data_dir("paired").or_else(|| {
+            crate::discovery::bundled_data_file("positive.txt")
+                .and_then(|p| p.parent().map(Path::to_path_buf))
+        }) {
             request.paired_prompts = bundled;
         }
     }
     let folder = request.paired_prompts.canonicalize()?;
-    let positive = folder.join("positive.txt"); let negative = folder.join("negative.txt");
+    let positive = folder.join("positive.txt");
+    let negative = folder.join("negative.txt");
     if paired_file(&positive)? != paired_file(&negative)? {
-        return Err(invalid("positive.txt and negative.txt need the same number of lines"));
+        return Err(invalid(
+            "positive.txt and negative.txt need the same number of lines",
+        ));
     }
-    if !(1..=512).contains(&request.refusal_tokens) || !(1..=512).contains(&request.task_tokens)
-        || !(-1..=512).contains(&request.gpu_layers) {
-        return Err(invalid("token counts must be 1..=512 and gpu layers -1..=512"));
+    if !(1..=512).contains(&request.refusal_tokens)
+        || !(1..=512).contains(&request.task_tokens)
+        || !(-1..=512).contains(&request.gpu_layers)
+    {
+        return Err(invalid(
+            "token counts must be 1..=512 and gpu layers -1..=512",
+        ));
     }
     if let Some(d) = &request.device {
-        if d.is_empty() || d.len() > 80 || !d.bytes().all(|b|
-            b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'/') {
+        if d.is_empty()
+            || d.len() > 80
+            || !d
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'/')
+        {
             return Err(invalid("invalid device"));
         }
     }
-    let strengths = if request.strengths.is_empty() { vec![0.10, 0.20, 0.35] } else { request.strengths.clone() };
-    if strengths.len() > 6 { return Err(invalid("at most 6 strengths per sweep")); }
+    let strengths = if request.strengths.is_empty() {
+        vec![0.10, 0.20, 0.35]
+    } else {
+        request.strengths.clone()
+    };
+    if strengths.len() > 6 {
+        return Err(invalid("at most 6 strengths per sweep"));
+    }
     for strength in &strengths {
         if !strength.is_finite() || *strength <= 0.0 || *strength > 1.0 {
             return Err(invalid("each strength must be >0 and <=1"));
@@ -219,23 +294,38 @@ pub fn prepare_uncensor_auto(mut request: UncensorAutoRequest) -> io::Result<Unc
     let available = attn_blocks(&source)?;
     let blocks = match &request.blocks {
         Some(list) => {
-            if list.is_empty() || list.len() > 4 { return Err(invalid("1..=4 blocks per sweep")); }
-            let mut sorted = list.clone(); sorted.sort_unstable(); sorted.dedup();
+            if list.is_empty() || list.len() > 4 {
+                return Err(invalid("1..=4 blocks per sweep"));
+            }
+            let mut sorted = list.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
             for block in &sorted {
                 if !available.contains(block) {
-                    return Err(invalid(format!("block {block} has no supported attention output matrix")));
+                    return Err(invalid(format!(
+                        "block {block} has no supported attention output matrix"
+                    )));
                 }
             }
             sorted
         }
         None => default_sweep_blocks(&available),
     };
-    let candidate_count = strengths.len().checked_mul(blocks.len())
+    let candidate_count = strengths
+        .len()
+        .checked_mul(blocks.len())
         .ok_or_else(|| invalid("grid overflow"))?;
-    if candidate_count > 12 { return Err(invalid("strength x block grid must produce at most 12 candidates")); }
+    if candidate_count > 12 {
+        return Err(invalid(
+            "strength x block grid must produce at most 12 candidates",
+        ));
+    }
     if !request.max_capability_loss.is_finite()
-        || !(0.0..=1.0).contains(&request.max_capability_loss) {
-        return Err(invalid("max capability loss must be a finite fraction 0..1"));
+        || !(0.0..=1.0).contains(&request.max_capability_loss)
+    {
+        return Err(invalid(
+            "max capability loss must be a finite fraction 0..1",
+        ));
     }
     if let Some(rate) = request.max_refusal_rate {
         if !rate.is_finite() || !(0.0..=1.0).contains(&rate) {
@@ -243,22 +333,41 @@ pub fn prepare_uncensor_auto(mut request: UncensorAutoRequest) -> io::Result<Unc
         }
     }
     if let Some(precision) = request.quantize {
-        if !matches!(precision, Precision::Q4KM | Precision::Q5KM | Precision::Q6K) {
-            return Err(invalid("optional final quantization supports Q4_K_M, Q5_K_M or Q6_K"));
+        if !matches!(
+            precision,
+            Precision::Q4KM | Precision::Q5KM | Precision::Q6K
+        ) {
+            return Err(invalid(
+                "optional final quantization supports Q4_K_M, Q5_K_M or Q6_K",
+            ));
         }
     }
-    let stem = source.file_stem().ok_or_else(|| invalid("source name missing"))?.to_string_lossy();
+    let stem = source
+        .file_stem()
+        .ok_or_else(|| invalid("source name missing"))?
+        .to_string_lossy();
     let output = output_dir.join(format!("{stem}-uncensored.gguf"));
-    if output.symlink_metadata().is_ok() { return Err(io::Error::new(ErrorKind::AlreadyExists, "uncensored output exists")); }
+    if output.symlink_metadata().is_ok() {
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            "uncensored output exists",
+        ));
+    }
     if recipe_receipt(&output).symlink_metadata().is_ok() {
-        return Err(io::Error::new(ErrorKind::AlreadyExists, "uncensored recipe receipt exists"));
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            "uncensored recipe receipt exists",
+        ));
     }
     let control_vector_output = output_dir.join(format!("{stem}-control-vector.gguf"));
     let quantized_output = match request.quantize {
         Some(precision) => {
             let path = output_dir.join(format!("{stem}-uncensored-{}.gguf", precision.as_str()));
             if path.symlink_metadata().is_ok() {
-                return Err(io::Error::new(ErrorKind::AlreadyExists, "quantized output exists"));
+                return Err(io::Error::new(
+                    ErrorKind::AlreadyExists,
+                    "quantized output exists",
+                ));
             }
             Some(path)
         }
@@ -287,7 +396,11 @@ pub fn prepare_uncensor_auto(mut request: UncensorAutoRequest) -> io::Result<Unc
         let mid_block = blocks[blocks.len() / 2];
         let mid_strength = strengths[strengths.len() / 2];
         if candidates.len() < 12 {
-            let name = format!("std-s{:03}-b{:03}", (mid_strength * 1000.0).round() as i64, mid_block);
+            let name = format!(
+                "std-s{:03}-b{:03}",
+                (mid_strength * 1000.0).round() as i64,
+                mid_block
+            );
             let staged = output_dir.join(format!("{stem}-uncensored-staged-{name}.gguf"));
             candidates.push(Candidate {
                 name,
@@ -311,7 +424,10 @@ pub fn prepare_uncensor_auto(mut request: UncensorAutoRequest) -> io::Result<Unc
                     (b, s)
                 })
                 .collect();
-            let name = format!("heretic-multi-s{:03}", (mid_strength * 1000.0).round() as i64);
+            let name = format!(
+                "heretic-multi-s{:03}",
+                (mid_strength * 1000.0).round() as i64
+            );
             let staged = output_dir.join(format!("{stem}-uncensored-staged-{name}.gguf"));
             candidates.push(Candidate {
                 name,
@@ -332,19 +448,38 @@ pub fn prepare_uncensor_auto(mut request: UncensorAutoRequest) -> io::Result<Unc
         if (needed + 2 * crate::resource::GIB as u128) > free as u128 {
             return Err(invalid(format!(
                 "sweep needs ~{} MiB staged plus output; volume has {} MiB free",
-                needed / (1024 * 1024), free / (1024 * 1024))));
+                needed / (1024 * 1024),
+                free / (1024 * 1024)
+            )));
         }
     } else if !request.allow_resource_risk {
-        return Err(invalid("free disk space could not be measured; pass --allow-resource-risk to proceed"));
+        return Err(invalid(
+            "free disk space could not be measured; pass --allow-resource-risk to proceed",
+        ));
     }
     for candidate in &candidates {
         if candidate.staged.symlink_metadata().is_ok() {
-            return Err(io::Error::new(ErrorKind::AlreadyExists,
-                format!("staged candidate {} exists; remove it first", candidate.staged.display())));
+            return Err(io::Error::new(
+                ErrorKind::AlreadyExists,
+                format!(
+                    "staged candidate {} exists; remove it first",
+                    candidate.staged.display()
+                ),
+            ));
         }
     }
-    Ok(UncensorAutoPlan { request, source, output, control_vector_output, quantized_output, positive, negative,
-        candidates, strengths, blocks })
+    Ok(UncensorAutoPlan {
+        request,
+        source,
+        output,
+        control_vector_output,
+        quantized_output,
+        positive,
+        negative,
+        candidates,
+        strengths,
+        blocks,
+    })
 }
 
 impl UncensorAutoPlan {
@@ -371,7 +506,11 @@ impl UncensorAutoPlan {
 }
 
 struct Stage(PathBuf);
-impl Drop for Stage { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+impl Drop for Stage {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
 struct CandidateCleanup(Vec<PathBuf>);
 impl Drop for CandidateCleanup {
     fn drop(&mut self) {
@@ -382,16 +521,25 @@ impl Drop for CandidateCleanup {
     }
 }
 fn remove_candidate(path: &Path) -> io::Result<()> {
-    if path.is_file() { fs::remove_file(path)?; }
+    if path.is_file() {
+        fs::remove_file(path)?;
+    }
     let receipt = recipe_receipt(path);
-    if receipt.is_file() { fs::remove_file(receipt)?; }
+    if receipt.is_file() {
+        fs::remove_file(receipt)?;
+    }
     Ok(())
 }
 fn stage(parent: &Path) -> io::Result<Stage> {
     for retry in 0..16 {
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH)
-            .map_err(|_| invalid("invalid clock"))?.as_nanos();
-        let path = parent.join(format!(".ojon-uncensor-{}-{stamp}-{retry}", std::process::id()));
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| invalid("invalid clock"))?
+            .as_nanos();
+        let path = parent.join(format!(
+            ".ojon-uncensor-{}-{stamp}-{retry}",
+            std::process::id()
+        ));
         match fs::create_dir(&path) {
             Ok(()) => return Ok(Stage(path)),
             Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
@@ -404,7 +552,9 @@ fn stage(parent: &Path) -> io::Result<Stage> {
 /// Capability metrics are stored as percentage points 0..100 in the task
 /// receipt; the measured-score chooser consumes fractions 0..1.
 fn metric_fraction(metrics: &Value, key: &str) -> io::Result<f64> {
-    let value = metrics.get(key).and_then(Value::as_f64)
+    let value = metrics
+        .get(key)
+        .and_then(Value::as_f64)
         .ok_or_else(|| invalid(format!("capability receipt lacks measured {key}")))?;
     if !value.is_finite() || !(0.0..=100.0).contains(&value) {
         return Err(invalid(format!("measured {key} out of range")));
@@ -435,19 +585,33 @@ fn trial_scores(
 
 pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> io::Result<Value> {
     if plan.output.symlink_metadata().is_ok() {
-        return Err(io::Error::new(ErrorKind::AlreadyExists, "output appeared after planning"));
+        return Err(io::Error::new(
+            ErrorKind::AlreadyExists,
+            "output appeared after planning",
+        ));
     }
-    let parent = plan.output.parent().ok_or_else(|| invalid("output folder missing"))?;
+    let parent = plan
+        .output
+        .parent()
+        .ok_or_else(|| invalid("output folder missing"))?;
     let staging = stage(parent)?;
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
     // 1. One measured control vector from the paired examples.
     let vector = staging.0.join("control-vector.gguf");
     let mut command = Command::new(&plan.request.cvector_generator);
-    command.arg("-m").arg(&plan.source)
-        .arg("-ngl").arg(plan.request.gpu_layers.max(0).to_string())
-        .arg("--positive-file").arg(&plan.positive)
-        .arg("--negative-file").arg(&plan.negative)
-        .arg("--method").arg("mean").arg("-o").arg(&vector);
+    command
+        .arg("-m")
+        .arg(&plan.source)
+        .arg("-ngl")
+        .arg(plan.request.gpu_layers.max(0).to_string())
+        .arg("--positive-file")
+        .arg(&plan.positive)
+        .arg("--negative-file")
+        .arg(&plan.negative)
+        .arg("--method")
+        .arg("mean")
+        .arg("-o")
+        .arg(&vector);
     log("Capturing paired model directions from GGUF");
     run_with_log(&mut command, |line| log(line))?;
     // Export detachable control-vector GGUF alongside the output if not already present.
@@ -461,10 +625,16 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
         .collect::<Vec<_>>();
     // 2. Baseline refusal measurement on the untouched original.
     let baseline_refusal_path = staging.0.join("baseline-refusal.json");
-    let baseline_refusal_plan = prepare_refusal_eval_with_server(&plan.source,
-        &plan.request.refusal_probes, &plan.request.runtime, plan.request.server_runtime.as_deref(),
-        plan.request.gpu_layers, plan.request.device.as_deref(), plan.request.refusal_tokens,
-        &baseline_refusal_path)?;
+    let baseline_refusal_plan = prepare_refusal_eval_with_server(
+        &plan.source,
+        &plan.request.refusal_probes,
+        &plan.request.runtime,
+        plan.request.server_runtime.as_deref(),
+        plan.request.gpu_layers,
+        plan.request.device.as_deref(),
+        plan.request.refusal_tokens,
+        &baseline_refusal_path,
+    )?;
     log("Measuring refusal behaviour of the original model");
     let baseline_refusal = run_refusal_eval(&baseline_refusal_plan, &mut log)?;
     let baseline_refusal_rate = crate::refusal::refusal_rate_from_report(&baseline_refusal)?;
@@ -478,25 +648,47 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
     let mut best_name: Option<String> = None;
     for (index, candidate) in plan.candidates.iter().enumerate() {
         let recipe = crate::cvector_import::recipe_from_control_vector_with_options(
-            &vector, &candidate.edits, candidate.preserve_row_norms, &[],
+            &vector,
+            &candidate.edits,
+            candidate.preserve_row_norms,
+            &[],
         )?;
         let edit = prepare_gguf_abliteration_value(&plan.source, &recipe, &candidate.staged)?;
-        log(&format!("Editing candidate {}/{} ({}, method={}): block {} strength {:.2}",
-            index + 1, plan.candidates.len(), candidate.name, candidate.method, candidate.block, candidate.strength));
+        log(&format!(
+            "Editing candidate {}/{} ({}, method={}): block {} strength {:.2}",
+            index + 1,
+            plan.candidates.len(),
+            candidate.name,
+            candidate.method,
+            candidate.block,
+            candidate.strength
+        ));
         run_gguf_abliteration(&edit, |line| log(line))?;
         cleanup.0.push(candidate.staged.clone());
 
-        let capability_path = staging.0.join(format!("{}-capability.json", candidate.name));
-        let capability_plan = prepare_eval_with_server(&plan.request.capability_suite,
-            &plan.source, &[(candidate.name.clone(), candidate.staged.clone())],
-            &plan.request.runtime, plan.request.server_runtime.as_deref(),
-            plan.request.gpu_layers, plan.request.device.as_deref(), plan.request.task_tokens,
-            &capability_path)?;
-        log(&format!("Measuring held-out capability of candidate {}", candidate.name));
+        let capability_path = staging
+            .0
+            .join(format!("{}-capability.json", candidate.name));
+        let capability_plan = prepare_eval_with_server(
+            &plan.request.capability_suite,
+            &plan.source,
+            &[(candidate.name.clone(), candidate.staged.clone())],
+            &plan.request.runtime,
+            plan.request.server_runtime.as_deref(),
+            plan.request.gpu_layers,
+            plan.request.device.as_deref(),
+            plan.request.task_tokens,
+            &capability_path,
+        )?;
+        log(&format!(
+            "Measuring held-out capability of candidate {}",
+            candidate.name
+        ));
         let one = run_eval_reusing_baseline(&capability_plan, capability.as_ref(), &mut log)?;
         let metrics = one["candidates"][0]["metrics"].clone();
         if let Some(all) = capability.as_mut() {
-            all["candidates"].as_array_mut()
+            all["candidates"]
+                .as_array_mut()
                 .ok_or_else(|| invalid("capability candidate list missing"))?
                 .push(one["candidates"][0].clone());
         } else {
@@ -504,19 +696,35 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
         }
 
         let report_path = staging.0.join(format!("{}-refusal.json", candidate.name));
-        let refusal_plan = prepare_refusal_eval_with_server(&candidate.staged,
-            &plan.request.refusal_probes, &plan.request.runtime, plan.request.server_runtime.as_deref(),
-            plan.request.gpu_layers, plan.request.device.as_deref(), plan.request.refusal_tokens,
-            &report_path)?;
-        log(&format!("Measuring refusal behaviour of candidate {}", candidate.name));
+        let refusal_plan = prepare_refusal_eval_with_server(
+            &candidate.staged,
+            &plan.request.refusal_probes,
+            &plan.request.runtime,
+            plan.request.server_runtime.as_deref(),
+            plan.request.gpu_layers,
+            plan.request.device.as_deref(),
+            plan.request.refusal_tokens,
+            &report_path,
+        )?;
+        log(&format!(
+            "Measuring refusal behaviour of candidate {}",
+            candidate.name
+        ));
         let report = run_refusal_eval(&refusal_plan, &mut log)?;
         let rate = crate::refusal::refusal_rate_from_report(&report)?;
         let benign_over = report["benign_overrefusal_rate"].as_f64();
-        candidate_scores.push(trial_scores(&candidate.name, Some(&candidate.method),
-            &candidate.staged, rate, benign_over, &metrics)?);
+        candidate_scores.push(trial_scores(
+            &candidate.name,
+            Some(&candidate.method),
+            &candidate.staged,
+            rate,
+            benign_over,
+            &metrics,
+        )?);
         measured.push((candidate, rate, benign_over));
 
-        let baseline_metrics = &capability.as_ref()
+        let baseline_metrics = &capability
+            .as_ref()
             .ok_or_else(|| invalid("capability baseline missing"))?["baseline"]["metrics"];
         let scores = json!({"schema":"ojon.edit_method_scores.v1",
             "max_capability_loss":plan.request.max_capability_loss,
@@ -525,11 +733,17 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
                 baseline_benign_overrefusal, baseline_metrics)?,
             "candidates":candidate_scores});
         let provisional = choose_edit_method(&scores)?;
-        let next_best = provisional.report["winner"]["method"].as_str().map(str::to_owned);
+        let next_best = provisional.report["winner"]["method"]
+            .as_str()
+            .map(str::to_owned);
         if next_best != best_name {
             if let Some(previous) = best_name.as_ref() {
-                let path = &plan.candidates.iter().find(|c| &c.name == previous)
-                    .ok_or_else(|| invalid("previous winner missing"))?.staged;
+                let path = &plan
+                    .candidates
+                    .iter()
+                    .find(|c| &c.name == previous)
+                    .ok_or_else(|| invalid("previous winner missing"))?
+                    .staged;
                 remove_candidate(path)?;
             }
             best_name = next_best;
@@ -547,9 +761,13 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
         "baseline":trial_scores("original", None, &plan.source, baseline_refusal_rate, baseline_benign_overrefusal, &baseline_metrics)?,
         "candidates":candidate_scores});
     let choice = choose_edit_method(&scores)?;
-    let winner_name = choice.report["winner"]["method"].as_str().map(str::to_owned);
+    let winner_name = choice.report["winner"]["method"]
+        .as_str()
+        .map(str::to_owned);
     if winner_name != best_name {
-        return Err(invalid("incremental winner differs from final measured selection"));
+        return Err(invalid(
+            "incremental winner differs from final measured selection",
+        ));
     }
     // 7. Publish the winner; delete losers and staging.
     let mut kept = Vec::new();
@@ -559,10 +777,16 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
     let mut winner_refusal_rate = None;
     let mut winner_metrics: Option<Value> = None;
     if let Some(winner) = winner_name.as_ref() {
-        let candidate = plan.candidates.iter().find(|c| &c.name == winner)
+        let candidate = plan
+            .candidates
+            .iter()
+            .find(|c| &c.name == winner)
             .ok_or_else(|| invalid("chooser selected an unknown candidate"))?;
         winner_method_kind = json!(candidate.method);
-        winner_refusal_rate = measured.iter().find(|(c, _, _)| c.name == *winner).map(|(_, r, _)| *r);
+        winner_refusal_rate = measured
+            .iter()
+            .find(|(c, _, _)| c.name == *winner)
+            .map(|(_, r, _)| *r);
         winner_metrics = capability["candidates"]
             .as_array()
             .and_then(|list| list.iter().find(|c| c["label"] == json!(candidate.name)))
@@ -586,7 +810,11 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
             removed.push(candidate.name.clone());
         }
     }
-    let edited_status = if published { "PUBLISHED_FROM_MEASURED_WINNER" } else { "NOT_PUBLISHED_NO_MEASURED_WINNER" };
+    let edited_status = if published {
+        "PUBLISHED_FROM_MEASURED_WINNER"
+    } else {
+        "NOT_PUBLISHED_NO_MEASURED_WINNER"
+    };
     // 8. Reload the saved edited model and retest independently.
     let edited_reload_verification = if published {
         log("Reloading saved edited model from disk for independent verification");
@@ -598,12 +826,16 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
             plan.request.gpu_layers.max(0) as u32,
             plan.request.device.as_deref(),
         ) {
-            Ok(cap) if crate::smoke::matches_single_word_reply(&cap.stdout, "READY")
-                || cap.stdout.to_ascii_uppercase().contains("READY") => json!({
-                "status": "RELOADED_AND_VERIFIED",
-                "artifact": plan.output.to_string_lossy(),
-                "file_bytes": fs::metadata(&plan.output).map(|m| m.len()).unwrap_or(0),
-            }),
+            Ok(cap)
+                if crate::smoke::matches_single_word_reply(&cap.stdout, "READY")
+                    || cap.stdout.to_ascii_uppercase().contains("READY") =>
+            {
+                json!({
+                    "status": "RELOADED_AND_VERIFIED",
+                    "artifact": plan.output.to_string_lossy(),
+                    "file_bytes": fs::metadata(&plan.output).map(|m| m.len()).unwrap_or(0),
+                })
+            }
 
             Ok(cap) => json!({
                 "status": "RELOAD_LOADED_NON_EXACT_PROBE",
@@ -622,19 +854,29 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
     let mut quantized_verification = Value::Null;
     if published {
         if let Some(precision) = plan.request.quantize {
-            let quant_out = plan.quantized_output.as_ref()
+            let quant_out = plan
+                .quantized_output
+                .as_ref()
                 .ok_or_else(|| invalid("quantized output path missing"))?;
             let spine_recipe = crate::adaptive::sensitive_spine_pinning_recipe(
                 &inspect_gguf_tensors(&plan.output).unwrap_or_default(),
             );
-            let mut quant = prepare_gguf(&plan.output, quant_out, &plan.request.quantizer,
-                precision, threads)?;
+            let mut quant = prepare_gguf(
+                &plan.output,
+                quant_out,
+                &plan.request.quantizer,
+                precision,
+                threads,
+            )?;
             if !spine_recipe.is_empty() {
                 let recipe_path = staging.0.join("quant-spine.tensor-types.txt");
                 fs::write(&recipe_path, spine_recipe.as_bytes())?;
                 quant = quant.with_tensor_type_file(&recipe_path)?;
             }
-            log(&format!("Quantizing accepted edited teacher to {}", precision.as_str()));
+            log(&format!(
+                "Quantizing accepted edited teacher to {}",
+                precision.as_str()
+            ));
             quantize_gguf_with_log(&quant, |line| log(line))?;
 
             log("Reloading quantized uncensored artifact and verifying against BOTH original and edited teacher");
@@ -678,10 +920,17 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
             let mut passes_both = true;
             let mut orig_total_cap = 0.0;
             let allowed_drop_pts = plan.request.max_capability_loss * 100.0;
-            for metric in ["coding_accuracy", "reasoning_accuracy", "tool_call_accuracy"] {
+            for metric in [
+                "coding_accuracy",
+                "reasoning_accuracy",
+                "tool_call_accuracy",
+            ] {
                 let orig_v = baseline_metrics[metric].as_f64().unwrap_or(0.0);
                 orig_total_cap += orig_v;
-                let teach_v = winner_metrics.as_ref().and_then(|m| m[metric].as_f64()).unwrap_or(orig_v);
+                let teach_v = winner_metrics
+                    .as_ref()
+                    .and_then(|m| m[metric].as_f64())
+                    .unwrap_or(orig_v);
                 let quant_v = q_metrics[metric].as_f64().unwrap_or(0.0);
                 let pass_orig = orig_v > 0.0 && quant_v + 1e-9 >= orig_v - allowed_drop_pts;
                 let pass_teach = teach_v > 0.0 && quant_v + 1e-9 >= teach_v - allowed_drop_pts;
@@ -710,7 +959,8 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
                 "QUANTIZED_AND_DUAL_VERIFIED"
             } else {
                 "QUANTIZED_DUAL_GATE_FAILED"
-            }.to_string();
+            }
+            .to_string();
             quantized_verification = json!({
                 "artifact": quant_out.to_string_lossy(),
                 "file_bytes": fs::metadata(quant_out).map(|m| m.len()).unwrap_or(0),
@@ -756,13 +1006,18 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
             else {"SELECTED_FROM_MEASURED_SCORES"},
         "limitation":"Selection compares only the supplied measured refusal and functional metrics. Phrase-based refusal detection and small functional suites cannot prove behavioural or intelligence equivalence."});
     let receipt_path = match &plan.quantized_output {
-        Some(path) => path, None => &plan.output,
+        Some(path) => path,
+        None => &plan.output,
     };
     let mut receipt_name = receipt_path.as_os_str().to_os_string();
     receipt_name.push(".ojon-uncensor-auto.json");
-    let mut receipt = OpenOptions::new().write(true).create_new(true).open(PathBuf::from(receipt_name))?;
+    let mut receipt = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(PathBuf::from(receipt_name))?;
     serde_json::to_writer_pretty(&mut receipt, &result)?;
-    receipt.flush()?; receipt.sync_all()?;
+    receipt.flush()?;
+    receipt.sync_all()?;
     drop(staging);
     Ok(result)
 }
@@ -788,7 +1043,7 @@ mod tests {
         write_str(&mut f, "general.file_type");
         f.write_all(&4u32.to_le_bytes()).unwrap();
         f.write_all(&1u32.to_le_bytes()).unwrap(); // 1 = F16
-        // Tensor 0: blk.0.attn_output.weight
+                                                   // Tensor 0: blk.0.attn_output.weight
         write_str(&mut f, "blk.0.attn_output.weight");
         f.write_all(&2u32.to_le_bytes()).unwrap(); // 2 dims
         f.write_all(&2u64.to_le_bytes()).unwrap();
@@ -818,8 +1073,12 @@ mod tests {
 
     #[test]
     fn uncensor_auto_plan_generates_grid_with_bundled_defaults() {
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("ojon-uncensor-test-{}-{stamp}", std::process::id()));
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("ojon-uncensor-test-{}-{stamp}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let model = dir.join("test-f16.gguf");
         write_mock_model(&model);
@@ -845,8 +1104,14 @@ mod tests {
 
     #[test]
     fn uncensor_auto_plan_rejects_invalid_parameters() {
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("ojon-uncensor-err-test-{}-{stamp}", std::process::id()));
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "ojon-uncensor-err-test-{}-{stamp}",
+            std::process::id()
+        ));
         fs::create_dir_all(&dir).unwrap();
         let model = dir.join("test-f16.gguf");
         write_mock_model(&model);
@@ -872,4 +1137,3 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 }
-

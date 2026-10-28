@@ -96,7 +96,10 @@ impl LearnDaemon {
 
     /// Prune oldest Unverified (and then oldest FailedRetry) episodes from collected_episodes.jsonl
     /// while preserving VerifiedSuccess and static anchor episodes when storage exceeds budget.
-    pub fn prune_unverified_episodes_to_budget(storage_dir: &Path, max_bytes: u64) -> io::Result<usize> {
+    pub fn prune_unverified_episodes_to_budget(
+        storage_dir: &Path,
+        max_bytes: u64,
+    ) -> io::Result<usize> {
         let episodes_path = storage_dir.join("collected_episodes.jsonl");
         if !episodes_path.is_file() {
             return Ok(0);
@@ -126,7 +129,9 @@ impl LearnDaemon {
                 break; // Only VerifiedSuccess or anchor episodes remain; never delete verified gold data
             };
             let removed = episodes.remove(idx);
-            let approx_line_bytes = serde_json::to_string(&removed).map(|s| s.len() as u64 + 1).unwrap_or(256);
+            let approx_line_bytes = serde_json::to_string(&removed)
+                .map(|s| s.len() as u64 + 1)
+                .unwrap_or(256);
             current_bytes = current_bytes.saturating_sub(approx_line_bytes);
         }
 
@@ -223,7 +228,10 @@ impl LearnDaemon {
                     }
                     let after_tmp = Self::calculate_disk_usage(&config.storage_dir);
                     if after_tmp > max_bytes {
-                        let _ = Self::prune_unverified_episodes_to_budget(&config.storage_dir, max_bytes);
+                        let _ = Self::prune_unverified_episodes_to_budget(
+                            &config.storage_dir,
+                            max_bytes,
+                        );
                     }
                 }
 
@@ -266,7 +274,10 @@ mod tests {
     fn test_daemon_heartbeat_and_disk_usage() {
         let temp_dir = std::env::temp_dir().join(format!(
             "ojon_daemon_test_{}",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(&temp_dir).unwrap();
 
@@ -277,7 +288,16 @@ mod tests {
         assert!(bytes >= 4096);
 
         let status_file = temp_dir.join("daemon_status.json");
-        LearnDaemon::write_heartbeat(&status_file, 8089, &temp_dir.to_string_lossy(), 10, bytes, 1024 * 1024, 5).unwrap();
+        LearnDaemon::write_heartbeat(
+            &status_file,
+            8089,
+            &temp_dir.to_string_lossy(),
+            10,
+            bytes,
+            1024 * 1024,
+            5,
+        )
+        .unwrap();
 
         assert!(status_file.is_file());
         let content = fs::read_to_string(&status_file).unwrap();
@@ -293,7 +313,10 @@ mod tests {
     fn test_prune_unverified_episodes_preserves_verified_anchors() {
         let temp_dir = std::env::temp_dir().join(format!(
             "ojon_daemon_prune_{}",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(&temp_dir).unwrap();
         let coll = LearnCollector::new(temp_dir.clone()).unwrap();

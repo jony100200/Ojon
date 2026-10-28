@@ -227,7 +227,12 @@ impl FlintHardwareFit {
 /// Assess hardware fit for Flint MoE based on dynamically probed GPU VRAM and Host RAM.
 pub fn assess_flint_hardware_fit(preferred_device: Option<&str>) -> io::Result<FlintHardwareFit> {
     let dev = preferred_device.unwrap_or("auto");
-    let res = crate::core::resource::assess_resources(1024, Path::new("."), crate::core::resource::ResourceMode::Gguf, dev)?;
+    let res = crate::core::resource::assess_resources(
+        1024,
+        Path::new("."),
+        crate::core::resource::ResourceMode::Gguf,
+        dev,
+    )?;
 
     let mut dev_name = "CPU-only Host".to_string();
     let mut vram_total = 0u64;
@@ -237,7 +242,8 @@ pub fn assess_flint_hardware_fit(preferred_device: Option<&str>) -> io::Result<F
         let name = g["device_name"].as_str().unwrap_or("Detected GPU");
         let id = g["device_id"].as_str().unwrap_or("");
         let matches = if let Some(pref) = preferred_device {
-            name.to_lowercase().contains(&pref.to_lowercase()) || id.to_lowercase().contains(&pref.to_lowercase())
+            name.to_lowercase().contains(&pref.to_lowercase())
+                || id.to_lowercase().contains(&pref.to_lowercase())
         } else {
             true
         };
@@ -405,8 +411,8 @@ pub fn parse_flint_logits_header(path: &Path) -> io::Result<(usize, usize, usize
     let vocabulary = i32::from_le_bytes(hdr[4..8].try_into().unwrap()) as usize;
     let chunks = i32::from_le_bytes(hdr[8..12].try_into().unwrap()) as usize;
     let scored = (context.saturating_sub(1).saturating_sub(context / 2)) * chunks;
-    let expected = 20 + (context * chunks * 4) as u64
-        + (scored * (2 * ((vocabulary + 1) / 2) + 4) * 2) as u64;
+    let expected =
+        20 + (context * chunks * 4) as u64 + (scored * (2 * ((vocabulary + 1) / 2) + 4) * 2) as u64;
     let actual = file.metadata()?.len();
     if actual != expected {
         return Err(invalid(format!(
@@ -476,14 +482,17 @@ pub fn compare_flint_logits_files(
     candidate_path: &Path,
 ) -> io::Result<FlintDirectLogitsComparison> {
     let (ref_ctx, ref_vocab, ref_chunks, ref_scored) = parse_flint_logits_header(reference_path)?;
-    let (cand_ctx, cand_vocab, cand_chunks, cand_scored) = parse_flint_logits_header(candidate_path)?;
+    let (cand_ctx, cand_vocab, cand_chunks, cand_scored) =
+        parse_flint_logits_header(candidate_path)?;
     if (ref_ctx, ref_vocab, ref_chunks) != (cand_ctx, cand_vocab, cand_chunks) {
         return Err(invalid(format!(
             "dumps are not comparable: ref ctx/vocab/chunks={ref_ctx}/{ref_vocab}/{ref_chunks}, cand={cand_ctx}/{cand_vocab}/{cand_chunks}"
         )));
     }
     if ref_scored == 0 || ref_scored != cand_scored {
-        return Err(invalid("logits dumps have zero or different scored positions"));
+        return Err(invalid(
+            "logits dumps have zero or different scored positions",
+        ));
     }
     let mut ref_file = File::open(reference_path)?;
     let mut cand_file = File::open(candidate_path)?;
@@ -514,7 +523,9 @@ pub fn compare_flint_logits_files(
             top1 += 1;
         }
         overlap += r5.iter().filter(|v| c5.contains(v)).count();
-        let kld: f64 = lp_ref.iter().zip(&lp_cand)
+        let kld: f64 = lp_ref
+            .iter()
+            .zip(&lp_cand)
             .map(|(&r, &c)| r.exp() * (r - c))
             .sum::<f64>()
             .max(0.0);
@@ -597,7 +608,8 @@ pub fn router_storage_type_match_pct(
 pub fn verify_moe_router_isolation(tensors_to_edit: &[String]) -> io::Result<()> {
     for name in tensors_to_edit {
         // ffn_gate_exps are expert FFN weights, not the router; exp_probs_b is the router bias.
-        if name.contains("ffn_gate_inp") || name.contains("exp_probs_b") || name.contains("router") {
+        if name.contains("ffn_gate_inp") || name.contains("exp_probs_b") || name.contains("router")
+        {
             return Err(invalid(format!(
                 "ProQuant RoCo invariant violation: router tensor '{name}' cannot be abliterated without causing expert routing drift"
             )));
@@ -661,13 +673,21 @@ pub fn plan_flint_pipeline(target_path: &Path) -> io::Result<FlintPipelinePlan> 
             }
             match found {
                 Some(pair) => pair,
-                None => return Err(invalid(format!("no Flint-BF16.gguf found in {}", target.display()))),
+                None => {
+                    return Err(invalid(format!(
+                        "no Flint-BF16.gguf found in {}",
+                        target.display()
+                    )))
+                }
             }
         } else {
             (target.clone(), bf16)
         }
     } else if target.is_file() {
-        let parent = target.parent().ok_or_else(|| invalid("target file has no parent"))?.to_path_buf();
+        let parent = target
+            .parent()
+            .ok_or_else(|| invalid("target file has no parent"))?
+            .to_path_buf();
         (parent, target)
     } else {
         return Err(invalid("target path does not exist"));
@@ -678,7 +698,11 @@ pub fn plan_flint_pipeline(target_path: &Path) -> io::Result<FlintPipelinePlan> 
 
     let imatrix_path = {
         let p = flint_dir.join("Flint-imatrix.gguf");
-        if p.is_file() { Some(p) } else { None }
+        if p.is_file() {
+            Some(p)
+        } else {
+            None
+        }
     };
 
     let baseline_logits = {
@@ -687,7 +711,11 @@ pub fn plan_flint_pipeline(target_path: &Path) -> io::Result<FlintPipelinePlan> 
             Some(p_v2)
         } else {
             let p = flint_dir.join("Flint-BF16-eval.logits");
-            if p.is_file() { Some(p) } else { None }
+            if p.is_file() {
+                Some(p)
+            } else {
+                None
+            }
         }
     };
 
@@ -756,7 +784,10 @@ pub fn plan_flint_pipeline(target_path: &Path) -> io::Result<FlintPipelinePlan> 
 }
 
 /// Promote verified `.pending` candidates to official `.gguf` deployments once verified.
-pub fn promote_flint_candidate(pending_path: &Path, receipt: &FlintParityReceipt) -> io::Result<PathBuf> {
+pub fn promote_flint_candidate(
+    pending_path: &Path,
+    receipt: &FlintParityReceipt,
+) -> io::Result<PathBuf> {
     if !receipt.certified_for_production {
         return Err(invalid(
             "candidate failed production certification gate; cannot promote to production",
@@ -773,10 +804,14 @@ pub fn promote_flint_candidate(pending_path: &Path, receipt: &FlintParityReceipt
         )));
     }
     if receipt.candidate_model_path.canonicalize().ok() != pending_path.canonicalize().ok() {
-        return Err(invalid("receipt was measured on a different candidate file"));
+        return Err(invalid(
+            "receipt was measured on a different candidate file",
+        ));
     }
     if !verify_moe_router_storage(pending_path)? {
-        return Err(invalid("candidate router tensors are not stored in high precision"));
+        return Err(invalid(
+            "candidate router tensors are not stored in high precision",
+        ));
     }
 
     let filename = pending_path
@@ -811,7 +846,12 @@ fn parse_metric_pair(line: &str, label: &str) -> Option<(f64, f64)> {
         .filter(|s| !s.is_empty() && *s != "-")
         .collect();
     if parts.len() < 2 {
-        let single = after_colon.split_whitespace().next()?.replace('%', "").parse::<f64>().ok()?;
+        let single = after_colon
+            .split_whitespace()
+            .next()?
+            .replace('%', "")
+            .parse::<f64>()
+            .ok()?;
         return Some((single, 0.0));
     }
     let mean_str = parts[0].trim().replace('%', "");
@@ -852,10 +892,14 @@ pub fn parse_detailed_kl_metrics(log_content: &str) -> Option<PerplexityKlMetric
                 metrics.mean_kld = pair;
                 has_kld = true;
             }
-        } else if line.contains("Median  KLD:") || (line.contains("Median") && line.contains("KLD")) {
+        } else if line.contains("Median  KLD:") || (line.contains("Median") && line.contains("KLD"))
+        {
             metrics.median_kld = parse_metric_pair(line, "KLD");
         } else if line.contains("Maximum KLD:") {
-            if let Some(val) = line.split_once(':').and_then(|(_, rest)| rest.trim().parse::<f64>().ok()) {
+            if let Some(val) = line
+                .split_once(':')
+                .and_then(|(_, rest)| rest.trim().parse::<f64>().ok())
+            {
                 metrics.max_kld = Some(val);
             }
         } else if line.contains("Same top p:") || line.contains("Same top p") {
@@ -929,7 +973,9 @@ pub fn evaluate_flint_candidate_logits(
     let ngl = gpu_layers.unwrap_or(0);
     // The reference dump fixes the context; any other -c makes llama-perplexity refuse it.
     let ctx = n_tokens.to_string();
-    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).to_string();
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .to_string();
     let mut cmd = Command::new(&tool);
     cmd.arg("-m")
         .arg(&candidate)
@@ -970,8 +1016,8 @@ pub fn evaluate_flint_candidate_logits(
         ))
     })?;
 
-    let passes_negligible_loss = parity_gate_passes(
-        metrics.mean_kld, metrics.same_top_p, router_verified);
+    let passes_negligible_loss =
+        parity_gate_passes(metrics.mean_kld, metrics.same_top_p, router_verified);
 
     Ok(FlintParityReceipt {
         reference_logits_path: reference,
@@ -1002,7 +1048,11 @@ pub fn evaluate_flint_candidate_logits(
 pub const MAX_KLD_UPPER_95: f64 = 0.08;
 pub const MIN_SAME_TOP1_LOWER_95: f64 = 95.0;
 
-pub fn parity_gate_passes(mean_kld: (f64, f64), same_top_p: (f64, f64), router_verified: bool) -> bool {
+pub fn parity_gate_passes(
+    mean_kld: (f64, f64),
+    same_top_p: (f64, f64),
+    router_verified: bool,
+) -> bool {
     let kl_upper_95 = mean_kld.0 + 1.96 * mean_kld.1;
     let top1_lower_95 = same_top_p.0 - 1.96 * same_top_p.1;
     router_verified && kl_upper_95 <= MAX_KLD_UPPER_95 && top1_lower_95 >= MIN_SAME_TOP1_LOWER_95
@@ -1113,7 +1163,8 @@ pub fn run_flint_functional_suite(
         let stdout = String::from_utf8_lossy(&output.stdout);
         let elapsed = start.elapsed().as_secs_f64();
 
-        let pass = stdout.contains(expected_sub) || (name == "code" && stdout.contains("def triple"));
+        let pass =
+            stdout.contains(expected_sub) || (name == "code" && stdout.contains("def triple"));
         if pass {
             total_passed += 1;
         }
@@ -1249,7 +1300,8 @@ pub fn assemble_flint_hybrid_gguf(
     ));
 
     // Open unique source files and build tensor offset/length catalogs
-    let mut unique_sources: HashMap<PathBuf, (File, u64, HashMap<String, (u32, u64, u64)>)> = HashMap::new();
+    let mut unique_sources: HashMap<PathBuf, (File, u64, HashMap<String, (u32, u64, u64)>)> =
+        HashMap::new();
 
     // Always include template file
     {
@@ -1305,10 +1357,18 @@ pub fn assemble_flint_hybrid_gguf(
         template_file.read_exact(&mut val_type_buf)?;
         let val_type = u32::from_le_bytes(val_type_buf);
         match val_type {
-            0 | 1 | 7 => { template_file.seek(SeekFrom::Current(1))?; }
-            2 | 3 => { template_file.seek(SeekFrom::Current(2))?; }
-            4 | 5 | 6 => { template_file.seek(SeekFrom::Current(4))?; }
-            10 | 11 | 12 => { template_file.seek(SeekFrom::Current(8))?; }
+            0 | 1 | 7 => {
+                template_file.seek(SeekFrom::Current(1))?;
+            }
+            2 | 3 => {
+                template_file.seek(SeekFrom::Current(2))?;
+            }
+            4 | 5 | 6 => {
+                template_file.seek(SeekFrom::Current(4))?;
+            }
+            10 | 11 | 12 => {
+                template_file.seek(SeekFrom::Current(8))?;
+            }
             8 => {
                 let mut slen_buf = [0u8; 8];
                 template_file.read_exact(&mut slen_buf)?;
@@ -1323,10 +1383,18 @@ pub fn assemble_flint_hybrid_gguf(
                 template_file.read_exact(&mut alen_buf)?;
                 let alen = u64::from_le_bytes(alen_buf);
                 match atype {
-                    0 | 1 | 7 => { template_file.seek(SeekFrom::Current(alen as i64))?; }
-                    2 | 3 => { template_file.seek(SeekFrom::Current((alen * 2) as i64))?; }
-                    4 | 5 | 6 => { template_file.seek(SeekFrom::Current((alen * 4) as i64))?; }
-                    10 | 11 | 12 => { template_file.seek(SeekFrom::Current((alen * 8) as i64))?; }
+                    0 | 1 | 7 => {
+                        template_file.seek(SeekFrom::Current(alen as i64))?;
+                    }
+                    2 | 3 => {
+                        template_file.seek(SeekFrom::Current((alen * 2) as i64))?;
+                    }
+                    4 | 5 | 6 => {
+                        template_file.seek(SeekFrom::Current((alen * 4) as i64))?;
+                    }
+                    10 | 11 | 12 => {
+                        template_file.seek(SeekFrom::Current((alen * 8) as i64))?;
+                    }
                     8 => {
                         for _ in 0..alen {
                             let mut slen_buf = [0u8; 8];
@@ -1504,7 +1572,11 @@ mod tests {
         let nv = 2 * ((vocab + 1) / 2) + 4;
         for logits in rows {
             let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let min = logits.iter().cloned().fold(f32::INFINITY, f32::min).max(max - 16.0);
+            let min = logits
+                .iter()
+                .cloned()
+                .fold(f32::INFINITY, f32::min)
+                .max(max - 16.0);
             let lse = logits.iter().map(|x| (x - max).exp()).sum::<f32>().ln();
             let scale = (max - min) / 65535.0;
             let mut rec = vec![0u16; nv];
@@ -1515,7 +1587,11 @@ mod tests {
                 rec[i] = u16::from_le_bytes([c[0], c[1]]);
             }
             for (i, &x) in logits.iter().enumerate() {
-                rec[4 + i] = if x > min { ((x - min) / scale).round() as u16 } else { 0 };
+                rec[4 + i] = if x > min {
+                    ((x - min) / scale).round() as u16
+                } else {
+                    0
+                };
             }
             for v in rec {
                 f.write_all(&v.to_le_bytes()).unwrap();
@@ -1528,10 +1604,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ojon-kld-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let ctx = 8; // scored = 8 - 1 - 4 = 3
-        let base: Vec<Vec<f32>> = (0..3).map(|t| (0..10).map(|v| ((v * 7 + t) % 10) as f32).collect()).collect();
+        let base: Vec<Vec<f32>> = (0..3)
+            .map(|t| (0..10).map(|v| ((v * 7 + t) % 10) as f32).collect())
+            .collect();
         let mut moved = base.clone();
         moved[0][0] = 30.0; // new argmax at position 0 only
-        let (a, b, c) = (dir.join("a.logits"), dir.join("b.logits"), dir.join("c.logits"));
+        let (a, b, c) = (
+            dir.join("a.logits"),
+            dir.join("b.logits"),
+            dir.join("c.logits"),
+        );
         write_kld_dump(&a, ctx, &base);
         write_kld_dump(&b, ctx, &base);
         write_kld_dump(&c, ctx, &moved);
@@ -1566,13 +1648,22 @@ mod tests {
         let receipt = FlintParityReceipt {
             reference_logits_path: PathBuf::from("ref.logits"),
             candidate_model_path: PathBuf::from("x.gguf.pending"),
-            evaluated_tokens: 1039, vocab_size: 150144,
-            top1_token_agreement_pct: 74.013, top5_token_agreement_pct: None,
-            average_cosine_similarity: None, kl_divergence: 0.7415,
-            median_kl_divergence: None, max_kl_divergence: None, rms_delta_p_pct: None,
-            ln_ppl_correlation_pct: None, mean_ppl_q: None, mean_ppl_base: None,
-            router_storage_verified: true, moe_top_k_routing_agreement_pct: None,
-            passes_negligible_loss_gate: true, certified_for_production: true,
+            evaluated_tokens: 1039,
+            vocab_size: 150144,
+            top1_token_agreement_pct: 74.013,
+            top5_token_agreement_pct: None,
+            average_cosine_similarity: None,
+            kl_divergence: 0.7415,
+            median_kl_divergence: None,
+            max_kl_divergence: None,
+            rms_delta_p_pct: None,
+            ln_ppl_correlation_pct: None,
+            mean_ppl_q: None,
+            mean_ppl_base: None,
+            router_storage_verified: true,
+            moe_top_k_routing_agreement_pct: None,
+            passes_negligible_loss_gate: true,
+            certified_for_production: true,
         };
         let err = promote_flint_candidate(Path::new("x.gguf.pending"), &receipt).unwrap_err();
         assert!(err.to_string().contains("fail the gate"));

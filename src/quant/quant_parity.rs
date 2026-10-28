@@ -18,153 +18,214 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-fn invalid(s:impl Into<String>)->io::Error {io::Error::new(ErrorKind::InvalidInput,s.into())}
-const MAX_VISION_SUITE:u64=2*1024*1024;
+fn invalid(s: impl Into<String>) -> io::Error {
+    io::Error::new(ErrorKind::InvalidInput, s.into())
+}
+const MAX_VISION_SUITE: u64 = 2 * 1024 * 1024;
 
-fn write_new_file(path:&Path,bytes:&[u8])->io::Result<()>{
-    let mut file=OpenOptions::new().write(true).create_new(true).open(path)?;
-    if let Err(e)=file.write_all(bytes).and_then(|_|file.sync_all()){
-        drop(file);let _=fs::remove_file(path);return Err(e);
+fn write_new_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    if let Err(e) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(e);
     }
     Ok(())
 }
 
 #[derive(Clone, Debug)]
 struct VisionTask {
-    id:String,
-    image:PathBuf,
-    prompt:String,
-    expected:String,
-    contains:bool,
+    id: String,
+    image: PathBuf,
+    prompt: String,
+    expected: String,
+    contains: bool,
 }
 #[derive(Clone, Debug)]
-pub(crate) struct VisionSuite {tasks:Vec<VisionTask>}
-impl VisionSuite {pub(crate) fn count(&self)->usize{self.tasks.len()}}
-pub(crate) fn vision_suite(path:&Path)->io::Result<VisionSuite>{
-    let path=path.canonicalize()?;
-    let len=fs::metadata(&path)?.len();
-    if len==0||len>MAX_VISION_SUITE{return Err(invalid("vision suite must be 1 byte..2MiB"));}
-    let data:Value=serde_json::from_slice(&fs::read(&path)?)
-        .map_err(|e|invalid(format!("invalid vision suite JSON: {e}")))?;
-    if data.get("schema").and_then(Value::as_str)!=Some("ojon.vision_suite.v1"){
+pub(crate) struct VisionSuite {
+    tasks: Vec<VisionTask>,
+}
+impl VisionSuite {
+    pub(crate) fn count(&self) -> usize {
+        self.tasks.len()
+    }
+}
+pub(crate) fn vision_suite(path: &Path) -> io::Result<VisionSuite> {
+    let path = path.canonicalize()?;
+    let len = fs::metadata(&path)?.len();
+    if len == 0 || len > MAX_VISION_SUITE {
+        return Err(invalid("vision suite must be 1 byte..2MiB"));
+    }
+    let data: Value = serde_json::from_slice(&fs::read(&path)?)
+        .map_err(|e| invalid(format!("invalid vision suite JSON: {e}")))?;
+    if data.get("schema").and_then(Value::as_str) != Some("ojon.vision_suite.v1") {
         return Err(invalid("expected ojon.vision_suite.v1"));
     }
-    let arr=data.get("tasks").and_then(Value::as_array)
-        .ok_or_else(||invalid("vision tasks missing"))?;
-    if arr.len()<3||arr.len()>128{return Err(invalid("need 3..128 real image tasks"));}
-    let parent=path.parent().ok_or_else(||invalid("vision suite has no parent"))?;
-    let mut seen=HashSet::new();
-    let mut tasks=Vec::new();
+    let arr = data
+        .get("tasks")
+        .and_then(Value::as_array)
+        .ok_or_else(|| invalid("vision tasks missing"))?;
+    if arr.len() < 3 || arr.len() > 128 {
+        return Err(invalid("need 3..128 real image tasks"));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("vision suite has no parent"))?;
+    let mut seen = HashSet::new();
+    let mut tasks = Vec::new();
     for row in arr {
-        let id=row.get("id").and_then(Value::as_str)
-            .filter(|s|!s.is_empty()&&s.len()<=128)
-            .ok_or_else(||invalid("vision task missing ID"))?.to_owned();
-        if !seen.insert(id.clone()){return Err(invalid("duplicate vision task ID"));}
-        let rel=row.get("image").and_then(Value::as_str)
-            .ok_or_else(||invalid("vision task missing image path"))?;
-        let path=Path::new(rel);
-        let candidate=if path.is_absolute(){path.to_path_buf()}else{parent.join(path)};
-        let image=candidate.canonicalize()?;
-        if !image.is_file()||fs::metadata(&image)?.len()==0{
+        let id = row
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty() && s.len() <= 128)
+            .ok_or_else(|| invalid("vision task missing ID"))?
+            .to_owned();
+        if !seen.insert(id.clone()) {
+            return Err(invalid("duplicate vision task ID"));
+        }
+        let rel = row
+            .get("image")
+            .and_then(Value::as_str)
+            .ok_or_else(|| invalid("vision task missing image path"))?;
+        let path = Path::new(rel);
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            parent.join(path)
+        };
+        let image = candidate.canonicalize()?;
+        if !image.is_file() || fs::metadata(&image)?.len() == 0 {
             return Err(invalid("image missing or empty"));
         }
-        let prompt=row.get("prompt").and_then(Value::as_str)
-            .filter(|s|!s.is_empty()&&s.len()<=8192)
-            .ok_or_else(||invalid("vision prompt missing/too long"))?.to_owned();
-        let expected=row.get("expected").and_then(Value::as_str)
-            .filter(|s|!s.is_empty()&&s.len()<=8192)
-            .ok_or_else(||invalid("vision reference answer missing"))?.to_owned();
-        let contains=match row.get("match").and_then(Value::as_str).unwrap_or("exact"){
-            "exact"=>false,"contains"=>true,
-            _=>return Err(invalid("vision match must be exact or contains"))
+        let prompt = row
+            .get("prompt")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty() && s.len() <= 8192)
+            .ok_or_else(|| invalid("vision prompt missing/too long"))?
+            .to_owned();
+        let expected = row
+            .get("expected")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty() && s.len() <= 8192)
+            .ok_or_else(|| invalid("vision reference answer missing"))?
+            .to_owned();
+        let contains = match row.get("match").and_then(Value::as_str).unwrap_or("exact") {
+            "exact" => false,
+            "contains" => true,
+            _ => return Err(invalid("vision match must be exact or contains")),
         };
-        tasks.push(VisionTask{id,image,prompt,expected,contains});
+        tasks.push(VisionTask {
+            id,
+            image,
+            prompt,
+            expected,
+            contains,
+        });
     }
-    Ok(VisionSuite{tasks})
+    Ok(VisionSuite { tasks })
 }
 
-pub(crate) fn inspect_compatible_models(source:&Path,baseline:&Path)->io::Result<(PathBuf,PathBuf,u64)>{
-    let source=source.canonicalize()?;
-    let baseline=baseline.canonicalize()?;
-    let s=inspect_gguf(&source)?;
-    let b=inspect_gguf(&baseline)?;
-    if !matches!(s.file_type,Some(0|1|32)){
+pub(crate) fn inspect_compatible_models(
+    source: &Path,
+    baseline: &Path,
+) -> io::Result<(PathBuf, PathBuf, u64)> {
+    let source = source.canonicalize()?;
+    let baseline = baseline.canonicalize()?;
+    let s = inspect_gguf(&source)?;
+    let b = inspect_gguf(&baseline)?;
+    if !matches!(s.file_type, Some(0 | 1 | 32)) {
         return Err(invalid("original source must be full-precision F32/F16/BF16 GGUF; do NOT requantize existing Q4"));
     }
-    if b.file_type.is_none() || (matches!(b.file_type,Some(0|1|32)) && source!=baseline){
-        return Err(invalid("quality reference must be the original teacher or an already quantized GGUF"));
+    if b.file_type.is_none() || (matches!(b.file_type, Some(0 | 1 | 32)) && source != baseline) {
+        return Err(invalid(
+            "quality reference must be the original teacher or an already quantized GGUF",
+        ));
     }
-    if s.tensor_count==0||s.split_count.unwrap_or(1)>1||b.split_count.unwrap_or(1)>1{
-        return Err(invalid("need single-file GGUF original and baseline with tensors"));
+    if s.tensor_count == 0 || s.split_count.unwrap_or(1) > 1 || b.split_count.unwrap_or(1) > 1 {
+        return Err(invalid(
+            "need single-file GGUF original and baseline with tensors",
+        ));
     }
-    if s.architecture.is_none()||s.architecture!=b.architecture{
+    if s.architecture.is_none() || s.architecture != b.architecture {
         return Err(invalid("original and baseline GGUF architecture mismatch"));
     }
     // Reject comparisons between different model architectures/shapes.
-    let original:BTreeMap<_,_>=inspect_gguf_tensors(&source)?.into_iter()
-        .map(|t|(t.name,t.shape)).collect();
-    let reference:BTreeMap<_,_>=inspect_gguf_tensors(&baseline)?.into_iter()
-        .map(|t|(t.name,t.shape)).collect();
-    if original!=reference || s.tensor_count!=b.tensor_count {
-        return Err(invalid("source and quantized reference tensor names/shapes disagree"));
+    let original: BTreeMap<_, _> = inspect_gguf_tensors(&source)?
+        .into_iter()
+        .map(|t| (t.name, t.shape))
+        .collect();
+    let reference: BTreeMap<_, _> = inspect_gguf_tensors(&baseline)?
+        .into_iter()
+        .map(|t| (t.name, t.shape))
+        .collect();
+    if original != reference || s.tensor_count != b.tensor_count {
+        return Err(invalid(
+            "source and quantized reference tensor names/shapes disagree",
+        ));
     }
-    Ok((source,baseline,b.file_bytes))
+    Ok((source, baseline, b.file_bytes))
 }
 
 #[derive(Clone, Debug)]
 pub struct QuantParityOptions {
-    pub precisions:Vec<Precision>,
-    pub imatrix:Option<PathBuf>,
-    pub quantizer:PathBuf,
-    pub eval_tool:PathBuf,
-    pub server_tool:Option<PathBuf>,
-    pub threads:usize,
-    pub max_buffer_mib:Option<u32>,
-    pub gpu_layers:i32,
-    pub device:Option<String>,
-    pub tokens:u32,
-    pub max_loss_points:f64,
-    pub min_saving_percent:f64,
-    pub vision_suite:Option<PathBuf>,
-    pub mmproj:Option<PathBuf>,
+    pub precisions: Vec<Precision>,
+    pub imatrix: Option<PathBuf>,
+    pub quantizer: PathBuf,
+    pub eval_tool: PathBuf,
+    pub server_tool: Option<PathBuf>,
+    pub threads: usize,
+    pub max_buffer_mib: Option<u32>,
+    pub gpu_layers: i32,
+    pub device: Option<String>,
+    pub tokens: u32,
+    pub max_loss_points: f64,
+    pub min_saving_percent: f64,
+    pub vision_suite: Option<PathBuf>,
+    pub mmproj: Option<PathBuf>,
     /// Optional same-corpus perplexity gate against the existing Q4 reference.
-    pub ppl_corpus:Option<PathBuf>,
-    pub ppl_tool:PathBuf,
-    pub ppl_context:u32,
-    pub max_ppl_regression_pct:f64,
+    pub ppl_corpus: Option<PathBuf>,
+    pub ppl_tool: PathBuf,
+    pub ppl_context: u32,
+    pub max_ppl_regression_pct: f64,
 }
 impl Default for QuantParityOptions {
-    fn default()->Self{
-        Self{
-            precisions:vec![Precision::IQ4XS,Precision::IQ3M,Precision::Q3KM],
-            imatrix:None,
-            quantizer:PathBuf::from("llama-quantize"),
-            eval_tool:PathBuf::from("llama-cli"),
-            server_tool:None,
-            threads:std::thread::available_parallelism().map(|n|n.get()).unwrap_or(4),
-            max_buffer_mib:Some(512),
-            gpu_layers:0,
-            device:None,
-            tokens:128,
-            max_loss_points:0.0,
-            min_saving_percent:5.0,
-            vision_suite:None,
-            mmproj:None,
-            ppl_corpus:None,
-            ppl_tool:PathBuf::from("llama-perplexity"),
-            ppl_context:2048,
-            max_ppl_regression_pct:0.0,
+    fn default() -> Self {
+        Self {
+            precisions: vec![Precision::IQ4XS, Precision::IQ3M, Precision::Q3KM],
+            imatrix: None,
+            quantizer: PathBuf::from("llama-quantize"),
+            eval_tool: PathBuf::from("llama-cli"),
+            server_tool: None,
+            threads: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4),
+            max_buffer_mib: Some(512),
+            gpu_layers: 0,
+            device: None,
+            tokens: 128,
+            max_loss_points: 0.0,
+            min_saving_percent: 5.0,
+            vision_suite: None,
+            mmproj: None,
+            ppl_corpus: None,
+            ppl_tool: PathBuf::from("llama-perplexity"),
+            ppl_context: 2048,
+            max_ppl_regression_pct: 0.0,
         }
     }
 }
 #[derive(Clone, Debug)]
 pub struct QuantParityPlan {
-    source:PathBuf,baseline:PathBuf,baseline_bytes:u64,
-    suite:PathBuf,output_dir:PathBuf,options:QuantParityOptions,
-    vision:Option<VisionSuite>,
+    source: PathBuf,
+    baseline: PathBuf,
+    baseline_bytes: u64,
+    suite: PathBuf,
+    output_dir: PathBuf,
+    options: QuantParityOptions,
+    vision: Option<VisionSuite>,
 }
-impl QuantParityPlan{
-    pub fn as_json(&self)->Value{
+impl QuantParityPlan {
+    pub fn as_json(&self) -> Value {
         json!({
             "schema":"ojon.quant_parity_plan.v1",
             "high_precision_source":self.source.to_string_lossy(),
@@ -198,129 +259,214 @@ impl QuantParityPlan{
 }
 /// Precision eligibility for an existing compressed Q4 quality reference.
 /// Backends must still actually accept each format at conversion time.
-pub fn allowed_parity_precision(precision:Precision)->bool{
-    matches!(precision,
-        Precision::IQ4XS|Precision::IQ3M|Precision::Q3KM|Precision::Q3KL|
-        Precision::IQ3S|Precision::IQ3XS)
+pub fn allowed_parity_precision(precision: Precision) -> bool {
+    matches!(
+        precision,
+        Precision::IQ4XS
+            | Precision::IQ3M
+            | Precision::Q3KM
+            | Precision::Q3KL
+            | Precision::IQ3S
+            | Precision::IQ3XS
+    )
 }
-pub fn allowed_teacher_precision(precision:Precision)->bool{
-    allowed_parity_precision(precision) || matches!(precision,
-        Precision::Q4KM|Precision::Q4KS|Precision::Q5KM|Precision::Q5KS)
+pub fn allowed_teacher_precision(precision: Precision) -> bool {
+    allowed_parity_precision(precision)
+        || matches!(
+            precision,
+            Precision::Q4KM | Precision::Q4KS | Precision::Q5KM | Precision::Q5KS
+        )
 }
 
 pub fn prepare_quant_parity(
-    original:&Path,baseline:&Path,suite:&Path,output_dir:&Path,
-    mut options:QuantParityOptions,
-)->io::Result<QuantParityPlan>{
-    let(source,baseline,baseline_bytes)=inspect_compatible_models(original,baseline)?;
-    let teacher_reference=source==baseline;
-    let suite=suite.canonicalize()?;
+    original: &Path,
+    baseline: &Path,
+    suite: &Path,
+    output_dir: &Path,
+    mut options: QuantParityOptions,
+) -> io::Result<QuantParityPlan> {
+    let (source, baseline, baseline_bytes) = inspect_compatible_models(original, baseline)?;
+    let teacher_reference = source == baseline;
+    let suite = suite.canonicalize()?;
     parse_eval_suite(&suite)?;
-    let output_dir=output_dir.canonicalize()?;
-    if !output_dir.is_dir(){return Err(invalid("output directory must already exist"));}
-    if options.threads==0||options.threads>512{return Err(invalid("threads must be 1..512"));}
-    if options.precisions.is_empty()||options.precisions.len()>6{
+    let output_dir = output_dir.canonicalize()?;
+    if !output_dir.is_dir() {
+        return Err(invalid("output directory must already exist"));
+    }
+    if options.threads == 0 || options.threads > 512 {
+        return Err(invalid("threads must be 1..512"));
+    }
+    if options.precisions.is_empty() || options.precisions.len() > 6 {
         return Err(invalid("use 1..6 distinct lower-bit candidate types"));
     }
-    let mut seen=HashSet::new();
-    for precision in &options.precisions{
-        if !seen.insert(precision.as_str()){return Err(invalid("duplicate candidate quantization")); }
-        if !(if teacher_reference{allowed_teacher_precision(*precision)}else{allowed_parity_precision(*precision)}) {
-            return Err(invalid("candidate precision is incompatible with the selected quality reference"));
+    let mut seen = HashSet::new();
+    for precision in &options.precisions {
+        if !seen.insert(precision.as_str()) {
+            return Err(invalid("duplicate candidate quantization"));
+        }
+        if !(if teacher_reference {
+            allowed_teacher_precision(*precision)
+        } else {
+            allowed_parity_precision(*precision)
+        }) {
+            return Err(invalid(
+                "candidate precision is incompatible with the selected quality reference",
+            ));
         }
     }
-    if !options.max_loss_points.is_finite() || !(0.0..=100.0).contains(&options.max_loss_points){
-        return Err(invalid("max capability loss must be 0..100 percentage points"));
+    if !options.max_loss_points.is_finite() || !(0.0..=100.0).contains(&options.max_loss_points) {
+        return Err(invalid(
+            "max capability loss must be 0..100 percentage points",
+        ));
     }
-    if !options.min_saving_percent.is_finite()||!(0.0..=95.0).contains(&options.min_saving_percent){
+    if !options.min_saving_percent.is_finite()
+        || !(0.0..=95.0).contains(&options.min_saving_percent)
+    {
         return Err(invalid("minimum saving percent must be 0..95"));
     }
-    if !(1..=1024).contains(&options.tokens)||!(-1..=512).contains(&options.gpu_layers){
+    if !(1..=1024).contains(&options.tokens) || !(-1..=512).contains(&options.gpu_layers) {
         return Err(invalid("invalid tokens or gpu-layers"));
     }
-    if let Some(v)=options.max_buffer_mib{
-        if !(32..=8192).contains(&v){return Err(invalid("slab buffer must be 32..8192 MiB"));}
+    if let Some(v) = options.max_buffer_mib {
+        if !(32..=8192).contains(&v) {
+            return Err(invalid("slab buffer must be 32..8192 MiB"));
+        }
     }
-    if let Some(d)=options.device.as_deref(){
-        if d.is_empty()||d.len()>80||!d.bytes().all(|b|
-            b.is_ascii_alphanumeric()||matches!(b,b'_'|b'-'|b'/'|b','|b':')){
+    if let Some(d) = options.device.as_deref() {
+        if d.is_empty()
+            || d.len() > 80
+            || !d
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'/' | b',' | b':'))
+        {
             return Err(invalid("invalid device"));
         }
     }
-    if let Some(p)=options.imatrix.take(){
-        let p=p.canonicalize()?;
-        if !p.is_file()||fs::metadata(&p)?.len()==0{
+    if let Some(p) = options.imatrix.take() {
+        let p = p.canonicalize()?;
+        if !p.is_file() || fs::metadata(&p)?.len() == 0 {
             return Err(invalid("importance-matrix file missing"));
         }
-        options.imatrix=Some(p);
+        options.imatrix = Some(p);
     }
-    let vision=if let Some(path)=options.vision_suite.as_ref(){
-        let mm=options.mmproj.as_ref()
-            .ok_or_else(||invalid("vision suite requires matching --mmproj GGUF"))?;
-        let mm=mm.canonicalize()?;
-        if inspect_gguf(&mm)?.tensor_count==0{return Err(invalid("mmproj GGUF empty"));}
-        options.mmproj=Some(mm);
+    let vision = if let Some(path) = options.vision_suite.as_ref() {
+        let mm = options
+            .mmproj
+            .as_ref()
+            .ok_or_else(|| invalid("vision suite requires matching --mmproj GGUF"))?;
+        let mm = mm.canonicalize()?;
+        if inspect_gguf(&mm)?.tensor_count == 0 {
+            return Err(invalid("mmproj GGUF empty"));
+        }
+        options.mmproj = Some(mm);
         Some(vision_suite(path)?)
-    }else{
-        if options.mmproj.is_some(){
-            return Err(invalid("mmproj without vision suite cannot prove visual parity"));
+    } else {
+        if options.mmproj.is_some() {
+            return Err(invalid(
+                "mmproj without vision suite cannot prove visual parity",
+            ));
         }
         None
     };
-    if let Some(p)=options.ppl_corpus.take(){
-        let p=p.canonicalize()?;
-        let cfg=PplSettings{
-            tool:options.ppl_tool.clone(),corpus:p.clone(),
-            gpu_layers:options.gpu_layers.max(0) as u32,
-            context:options.ppl_context,
-            max_relative_degradation_pct:options.max_ppl_regression_pct,
+    if let Some(p) = options.ppl_corpus.take() {
+        let p = p.canonicalize()?;
+        let cfg = PplSettings {
+            tool: options.ppl_tool.clone(),
+            corpus: p.clone(),
+            gpu_layers: options.gpu_layers.max(0) as u32,
+            context: options.ppl_context,
+            max_relative_degradation_pct: options.max_ppl_regression_pct,
         };
         cfg.validate()?;
-        options.ppl_corpus=Some(p);
+        options.ppl_corpus = Some(p);
     }
-    if options.quantizer.as_os_str().is_empty()||options.eval_tool.as_os_str().is_empty(){
-        return Err(invalid("quantizer and evaluation CLI paths must be nonempty"));
+    if options.quantizer.as_os_str().is_empty() || options.eval_tool.as_os_str().is_empty() {
+        return Err(invalid(
+            "quantizer and evaluation CLI paths must be nonempty",
+        ));
     }
-    Ok(QuantParityPlan{source,baseline,baseline_bytes,suite,output_dir,options,vision})
+    Ok(QuantParityPlan {
+        source,
+        baseline,
+        baseline_bytes,
+        suite,
+        output_dir,
+        options,
+        vision,
+    })
 }
-fn matches_vision(task:&VisionTask,answer:&str)->bool {
+fn matches_vision(task: &VisionTask, answer: &str) -> bool {
     if task.contains {
-        answer.to_lowercase().contains(&task.expected.to_lowercase())
-    }else{
-        answer.trim().replace("\r\n","\n")==task.expected.trim().replace("\r\n","\n")
+        answer
+            .to_lowercase()
+            .contains(&task.expected.to_lowercase())
+    } else {
+        answer.trim().replace("\r\n", "\n") == task.expected.trim().replace("\r\n", "\n")
     }
 }
-pub(crate) fn vision_score(options:&QuantParityOptions,vision:&VisionSuite,model:&Path,log:&mut impl FnMut(&str))->io::Result<Value>{
-    let mm=options.mmproj.as_ref().ok_or_else(||invalid("mmproj missing"))?;
-    let mut passed=0usize;
-    let mut details=Vec::new();
+pub(crate) fn vision_score(
+    options: &QuantParityOptions,
+    vision: &VisionSuite,
+    model: &Path,
+    log: &mut impl FnMut(&str),
+) -> io::Result<Value> {
+    let mm = options
+        .mmproj
+        .as_ref()
+        .ok_or_else(|| invalid("mmproj missing"))?;
+    let mut passed = 0usize;
+    let mut details = Vec::new();
     for task in &vision.tasks {
-        log(&format!("[ojon] vision test {} using {}",task.id,model.display()));
-        let mut cmd=Command::new(&options.eval_tool);
-        cmd.arg("-m").arg(model)
-            .arg("--mmproj").arg(mm)
-            .arg("--image").arg(&task.image)
-            .arg("-p").arg(&task.prompt)
-            .arg("-n").arg(options.tokens.to_string())
-            .arg("-ngl").arg(options.gpu_layers.to_string())
-            .arg("--temp").arg("0").arg("-s").arg("42")
-            .arg("--no-display-prompt").arg("--simple-io")
-            .arg("--offline").stdin(Stdio::null());
-        if let Some(d)=&options.device{cmd.arg("-dev").arg(d);}
-        let start=Instant::now();
-        let output=cmd.output()?;
-        if !output.status.success(){
-            return Err(io::Error::other(format!(
-                "vision test {} failed: {}",task.id,
-                String::from_utf8_lossy(&output.stderr).chars().take(300).collect::<String>())));
+        log(&format!(
+            "[ojon] vision test {} using {}",
+            task.id,
+            model.display()
+        ));
+        let mut cmd = Command::new(&options.eval_tool);
+        cmd.arg("-m")
+            .arg(model)
+            .arg("--mmproj")
+            .arg(mm)
+            .arg("--image")
+            .arg(&task.image)
+            .arg("-p")
+            .arg(&task.prompt)
+            .arg("-n")
+            .arg(options.tokens.to_string())
+            .arg("-ngl")
+            .arg(options.gpu_layers.to_string())
+            .arg("--temp")
+            .arg("0")
+            .arg("-s")
+            .arg("42")
+            .arg("--no-display-prompt")
+            .arg("--simple-io")
+            .arg("--offline")
+            .stdin(Stdio::null());
+        if let Some(d) = &options.device {
+            cmd.arg("-dev").arg(d);
         }
-        if output.stdout.len()>2*1024*1024||output.stderr.len()>2*1024*1024{
+        let start = Instant::now();
+        let output = cmd.output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "vision test {} failed: {}",
+                task.id,
+                String::from_utf8_lossy(&output.stderr)
+                    .chars()
+                    .take(300)
+                    .collect::<String>()
+            )));
+        }
+        if output.stdout.len() > 2 * 1024 * 1024 || output.stderr.len() > 2 * 1024 * 1024 {
             return Err(invalid("vision model output exceeded 2 MiB"));
         }
-        let answer=String::from_utf8(output.stdout)
-            .map_err(|_|invalid("vision stdout is not UTF-8"))?;
-        let pass=matches_vision(task,&answer);
-        if pass{passed+=1;}
+        let answer =
+            String::from_utf8(output.stdout).map_err(|_| invalid("vision stdout is not UTF-8"))?;
+        let pass = matches_vision(task, &answer);
+        if pass {
+            passed += 1;
+        }
         details.push(json!({"id":task.id,"pass":pass,
             "elapsed_seconds":start.elapsed().as_secs_f64(),
             "answer":answer.chars().take(8192).collect::<String>()}));
@@ -328,47 +474,68 @@ pub(crate) fn vision_score(options:&QuantParityOptions,vision:&VisionSuite,model
     Ok(json!({"passed":passed,"total":vision.tasks.len(),
         "accuracy_pct":100.0*passed as f64/vision.tasks.len() as f64,"tests":details}))
 }
-pub(crate) fn task_parity(report:&Value,max_loss:f64)->(bool,Value){
-    let base=&report["baseline"]["metrics"];
-    let current=&report["candidates"][0]["metrics"];
-    let mut pass=true;
-    let mut out=Vec::new();
-    for key in ["coding_accuracy","reasoning_accuracy","tool_call_accuracy"]{
-        let b=base[key].as_f64();
-        let c=current[key].as_f64();
-        let okay=matches!((b,c),(Some(b),Some(c))if b>0.0&&c+max_loss+1e-10>=b);
-        pass&=okay;
+pub(crate) fn task_parity(report: &Value, max_loss: f64) -> (bool, Value) {
+    let base = &report["baseline"]["metrics"];
+    let current = &report["candidates"][0]["metrics"];
+    let mut pass = true;
+    let mut out = Vec::new();
+    for key in [
+        "coding_accuracy",
+        "reasoning_accuracy",
+        "tool_call_accuracy",
+    ] {
+        let b = base[key].as_f64();
+        let c = current[key].as_f64();
+        let okay = matches!((b,c),(Some(b),Some(c))if b>0.0&&c+max_loss+1e-10>=b);
+        pass &= okay;
         out.push(json!({"metric":key,"reference_pct":b,
             "candidate_pct":c,"max_loss_points":max_loss,"pass":okay}));
     }
-    (pass,Value::Array(out))
+    (pass, Value::Array(out))
 }
 
-fn task_reference_informative(metrics:&Value)->bool {
-    metrics.as_array().is_some_and(|rows|rows.len()==3 && rows.iter().all(|row|
-        row["reference_pct"].as_f64().is_some_and(|score|score>0.0)))
+fn task_reference_informative(metrics: &Value) -> bool {
+    metrics.as_array().is_some_and(|rows| {
+        rows.len() == 3
+            && rows.iter().all(|row| {
+                row["reference_pct"]
+                    .as_f64()
+                    .is_some_and(|score| score > 0.0)
+            })
+    })
 }
 /// Resume support: an already existing candidate GGUF may be reused ONLY when
 /// it is a single file with the same tensor catalog as the full-precision
 /// source. Anything else fails closed; Ojon never overwrites.
-pub(crate) fn verify_reusable_candidate(source:&Path,output:&Path)->io::Result<Option<u64>>{
-    if output.symlink_metadata().is_err(){return Ok(None);}
-    let info=inspect_gguf(output)?;
-    if info.split_count.unwrap_or(1)>1||info.tensor_count==0{
+pub(crate) fn verify_reusable_candidate(source: &Path, output: &Path) -> io::Result<Option<u64>> {
+    if output.symlink_metadata().is_err() {
+        return Ok(None);
+    }
+    let info = inspect_gguf(output)?;
+    if info.split_count.unwrap_or(1) > 1 || info.tensor_count == 0 {
         return Err(invalid(format!(
             "existing candidate {} is not a usable single-file GGUF; remove it manually",
-            output.display())));
+            output.display()
+        )));
     }
-    let src=inspect_gguf(source)?;
-    if info.architecture.is_none()||info.architecture!=src.architecture{
-        return Err(invalid("existing candidate architecture differs from the full-precision source"));
+    let src = inspect_gguf(source)?;
+    if info.architecture.is_none() || info.architecture != src.architecture {
+        return Err(invalid(
+            "existing candidate architecture differs from the full-precision source",
+        ));
     }
-    let original:BTreeMap<_,_>=inspect_gguf_tensors(source)?.into_iter()
-        .map(|t|(t.name,t.shape)).collect();
-    let existing:BTreeMap<_,_>=inspect_gguf_tensors(output)?.into_iter()
-        .map(|t|(t.name,t.shape)).collect();
-    if original!=existing{
-        return Err(invalid("existing candidate tensor names/shapes disagree with the source"));
+    let original: BTreeMap<_, _> = inspect_gguf_tensors(source)?
+        .into_iter()
+        .map(|t| (t.name, t.shape))
+        .collect();
+    let existing: BTreeMap<_, _> = inspect_gguf_tensors(output)?
+        .into_iter()
+        .map(|t| (t.name, t.shape))
+        .collect();
+    if original != existing {
+        return Err(invalid(
+            "existing candidate tensor names/shapes disagree with the source",
+        ));
     }
     Ok(Some(info.file_bytes))
 }
@@ -377,199 +544,281 @@ pub(crate) fn verify_reusable_candidate(source:&Path,output:&Path)->io::Result<O
 /// baseline model, suite identity, and candidate artifact all still match.
 /// Anything else fails closed; existing evidence is never overwritten.
 pub(crate) fn verify_prior_evidence(
-    evidence:&Path,baseline:&Path,suite_id:&str,candidate_label:&str,candidate:&Path,
-)->io::Result<Option<Value>>{
-    if evidence.symlink_metadata().is_err(){return Ok(None);}
-    let size=fs::metadata(evidence)?.len();
-    if size==0||size>2*1024*1024{return Err(invalid("existing evidence exceeds 2 MiB"));}
-    let value:Value=serde_json::from_slice(&fs::read(evidence)?)
-        .map_err(|e|invalid(format!("existing evidence is not valid JSON: {e}")))?;
-    if value.get("schema").and_then(Value::as_str)!=Some("ojon.quality_evidence.v1"){
+    evidence: &Path,
+    baseline: &Path,
+    suite_id: &str,
+    candidate_label: &str,
+    candidate: &Path,
+) -> io::Result<Option<Value>> {
+    if evidence.symlink_metadata().is_err() {
+        return Ok(None);
+    }
+    let size = fs::metadata(evidence)?.len();
+    if size == 0 || size > 2 * 1024 * 1024 {
+        return Err(invalid("existing evidence exceeds 2 MiB"));
+    }
+    let value: Value = serde_json::from_slice(&fs::read(evidence)?)
+        .map_err(|e| invalid(format!("existing evidence is not valid JSON: {e}")))?;
+    if value.get("schema").and_then(Value::as_str) != Some("ojon.quality_evidence.v1") {
         return Err(invalid("existing evidence has an unexpected schema"));
     }
-    if value["evaluation_suite"]!=json!(suite_id){
-        return Err(invalid("existing evidence used a different task suite"));}
-    let baseline_canonical=baseline.canonicalize()?;
-    if value["baseline"]["model"]!=json!(baseline_canonical.to_string_lossy().to_string()){
+    if value["evaluation_suite"] != json!(suite_id) {
+        return Err(invalid("existing evidence used a different task suite"));
+    }
+    let baseline_canonical = baseline.canonicalize()?;
+    if value["baseline"]["model"] != json!(baseline_canonical.to_string_lossy().to_string()) {
         return Err(invalid("existing evidence used a different baseline model"));
     }
-    if value["evaluation_config"]["baseline_file_bytes"]!=json!(fs::metadata(baseline)?.len()){
-        return Err(invalid("existing evidence baseline size differs from the current baseline"));
+    if value["evaluation_config"]["baseline_file_bytes"] != json!(fs::metadata(baseline)?.len()) {
+        return Err(invalid(
+            "existing evidence baseline size differs from the current baseline",
+        ));
     }
-    let candidates=value["candidates"].as_array()
-        .ok_or_else(||invalid("existing evidence lacks candidates"))?;
-    let found=candidates.iter().find(|c|c["label"]==json!(candidate_label))
-        .ok_or_else(||invalid("existing evidence lacks this candidate"))?;
-    if found["bytes"]!=json!(fs::metadata(candidate)?.len()){
-        return Err(invalid("existing evidence candidate size differs from the current candidate"));
+    let candidates = value["candidates"]
+        .as_array()
+        .ok_or_else(|| invalid("existing evidence lacks candidates"))?;
+    let found = candidates
+        .iter()
+        .find(|c| c["label"] == json!(candidate_label))
+        .ok_or_else(|| invalid("existing evidence lacks this candidate"))?;
+    if found["bytes"] != json!(fs::metadata(candidate)?.len()) {
+        return Err(invalid(
+            "existing evidence candidate size differs from the current candidate",
+        ));
     }
-    let detailed=value["detailed_candidate_results"].as_array()
-        .ok_or_else(||invalid("existing evidence lacks detailed results"))?;
-    let candidate_canonical=candidate.canonicalize()?;
-    if !detailed.iter().any(|d|d["model"]==json!(candidate_canonical.to_string_lossy().to_string())){
-        return Err(invalid("existing evidence detailed result is a different artifact"));
+    let detailed = value["detailed_candidate_results"]
+        .as_array()
+        .ok_or_else(|| invalid("existing evidence lacks detailed results"))?;
+    let candidate_canonical = candidate.canonicalize()?;
+    if !detailed
+        .iter()
+        .any(|d| d["model"] == json!(candidate_canonical.to_string_lossy().to_string()))
+    {
+        return Err(invalid(
+            "existing evidence detailed result is a different artifact",
+        ));
     }
     Ok(Some(value))
 }
 
-pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Result<Value>{
-    let timestamp=SystemTime::now().duration_since(UNIX_EPOCH)
-        .map_err(|_|invalid("system clock invalid"))?.as_nanos();
-    let prefix=format!("ojon-parity-{}-{timestamp}",std::process::id());
-    let suite_id=parse_eval_suite(&plan.suite)?.id;
+pub fn run_quant_parity(plan: &QuantParityPlan, mut log: impl FnMut(&str)) -> io::Result<Value> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| invalid("system clock invalid"))?
+        .as_nanos();
+    let prefix = format!("ojon-parity-{}-{timestamp}", std::process::id());
+    let suite_id = parse_eval_suite(&plan.suite)?.id;
     // MoE router preservation: routing tensors are pinned to Q6_K for every
     // candidate in this run; dense models get no override.
-    let router_recipe=crate::llama::moe_router_pinning_recipe(&inspect_gguf_tensors(&plan.source)?);
-    let mut rows=Vec::new();
-    let mut best:Option<(PathBuf,u64)>=None;
-    let mut base_vision:Option<Value>=None;
-    let mut baseline_ppl:Option<f64>=None;
-    let mut baseline_tasks:Option<Value>=None;
-    for(ordinal,precision)in plan.options.precisions.iter().enumerate(){
-        let key=format!("{prefix}-{:02}-{}",ordinal,precision.as_str());
-        let output=plan.output_dir.join(format!("{key}.gguf"));
-        let evidence=plan.output_dir.join(format!("{key}.task-evidence.json"));
-        log(&format!("[ojon] candidate {} from full-precision source (NOT from Q4 reference)",precision));
+    let router_recipe =
+        crate::llama::moe_router_pinning_recipe(&inspect_gguf_tensors(&plan.source)?);
+    let mut rows = Vec::new();
+    let mut best: Option<(PathBuf, u64)> = None;
+    let mut base_vision: Option<Value> = None;
+    let mut baseline_ppl: Option<f64> = None;
+    let mut baseline_tasks: Option<Value> = None;
+    for (ordinal, precision) in plan.options.precisions.iter().enumerate() {
+        let key = format!("{prefix}-{:02}-{}", ordinal, precision.as_str());
+        let output = plan.output_dir.join(format!("{key}.gguf"));
+        let evidence = plan.output_dir.join(format!("{key}.task-evidence.json"));
+        log(&format!(
+            "[ojon] candidate {} from full-precision source (NOT from Q4 reference)",
+            precision
+        ));
         // Resume: reuse an existing verified candidate instead of re-quantizing.
-        let reusable=match verify_reusable_candidate(&plan.source,&output){
-            Ok(reusable)=>reusable,
-            Err(e)=>{
-                rows.push(json!({"type":precision.as_str(),"status":"RESUME_VERIFICATION_FAILED",
-                    "error":e.to_string(),"output":output.to_string_lossy()}));
+        let reusable = match verify_reusable_candidate(&plan.source, &output) {
+            Ok(reusable) => reusable,
+            Err(e) => {
+                rows.push(
+                    json!({"type":precision.as_str(),"status":"RESUME_VERIFICATION_FAILED",
+                    "error":e.to_string(),"output":output.to_string_lossy()}),
+                );
                 continue;
             }
         };
-        let size=match reusable{
-            Some(bytes)=>{
-                log(&format!("[ojon] resume: reusing existing quantized candidate {}",output.display()));
+        let size = match reusable {
+            Some(bytes) => {
+                log(&format!(
+                    "[ojon] resume: reusing existing quantized candidate {}",
+                    output.display()
+                ));
                 bytes
             }
-            None=>{
-                let converted=(||{
-                    let mut quant=prepare_gguf(&plan.source,&output,&plan.options.quantizer,*precision,plan.options.threads)?;
-                    if let Some(text)=&router_recipe{
-                        let path=plan.output_dir.join(format!("{key}.router-types.txt"));
-                        write_new_file(&path,text.as_bytes())?;
-                        quant=quant.with_tensor_type_file(&path)?;
+            None => {
+                let converted = (|| {
+                    let mut quant = prepare_gguf(
+                        &plan.source,
+                        &output,
+                        &plan.options.quantizer,
+                        *precision,
+                        plan.options.threads,
+                    )?;
+                    if let Some(text) = &router_recipe {
+                        let path = plan.output_dir.join(format!("{key}.router-types.txt"));
+                        write_new_file(&path, text.as_bytes())?;
+                        quant = quant.with_tensor_type_file(&path)?;
                     }
-                    if let Some(path)=&plan.options.imatrix{quant=quant.with_imatrix(path)?;}
-                    if let Some(mib)=plan.options.max_buffer_mib{quant=quant.with_max_buffer_mib(mib)?;}
-                    quantize_gguf_with_log(&quant,|line|log(line))
+                    if let Some(path) = &plan.options.imatrix {
+                        quant = quant.with_imatrix(path)?;
+                    }
+                    if let Some(mib) = plan.options.max_buffer_mib {
+                        quant = quant.with_max_buffer_mib(mib)?;
+                    }
+                    quantize_gguf_with_log(&quant, |line| log(line))
                 })();
-                match converted{
-                    Ok(done)=>done.output_info.file_bytes,
-                    Err(e)=>{
-                        rows.push(json!({"type":precision.as_str(),"status":"QUANTIZATION_FAILED",
-                            "error":e.to_string()}));
+                match converted {
+                    Ok(done) => done.output_info.file_bytes,
+                    Err(e) => {
+                        rows.push(
+                            json!({"type":precision.as_str(),"status":"QUANTIZATION_FAILED",
+                            "error":e.to_string()}),
+                        );
                         continue;
                     }
                 }
             }
         };
-        let savings=100.0*(1.0-size as f64/plan.baseline_bytes as f64);
-        if !(size<plan.baseline_bytes && savings+1e-10>=plan.options.min_saving_percent){
-            rows.push(json!({"type":precision.as_str(),"status":"NOT_SMALL_ENOUGH",
+        let savings = 100.0 * (1.0 - size as f64 / plan.baseline_bytes as f64);
+        if !(size < plan.baseline_bytes && savings + 1e-10 >= plan.options.min_saving_percent) {
+            rows.push(
+                json!({"type":precision.as_str(),"status":"NOT_SMALL_ENOUGH",
                 "bytes":size,"savings_pct":savings,"output":output.to_string_lossy(),
-                "reference_bytes":plan.baseline_bytes}));
+                "reference_bytes":plan.baseline_bytes}),
+            );
             continue;
         }
-        let prior=match verify_prior_evidence(&evidence,&plan.baseline,&suite_id,
-            &format!("smaller_{ordinal}"),&output){
-            Ok(prior)=>prior,
-            Err(e)=>{
-                rows.push(json!({"type":precision.as_str(),"status":"EXISTING_EVIDENCE_NOT_REUSABLE",
-                    "error":e.to_string(),"bytes":size,"output":output.to_string_lossy()}));
+        let prior = match verify_prior_evidence(
+            &evidence,
+            &plan.baseline,
+            &suite_id,
+            &format!("smaller_{ordinal}"),
+            &output,
+        ) {
+            Ok(prior) => prior,
+            Err(e) => {
+                rows.push(
+                    json!({"type":precision.as_str(),"status":"EXISTING_EVIDENCE_NOT_REUSABLE",
+                    "error":e.to_string(),"bytes":size,"output":output.to_string_lossy()}),
+                );
                 continue;
             }
         };
-        let mut prior_used=false;
-        let task_report=if let Some(report)=prior{
+        let mut prior_used = false;
+        let task_report = if let Some(report) = prior {
             log("[ojon] resume: reusing verified held-out task evidence (baseline unchanged)");
-            prior_used=true;
+            prior_used = true;
             report
-        }else{
-            let results=(||{
-                let candidates=vec![(format!("smaller_{ordinal}"),output.clone())];
-                let eval=prepare_eval_with_server(&plan.suite,&plan.baseline,&candidates,
-                    &plan.options.eval_tool,plan.options.server_tool.as_deref(),plan.options.gpu_layers,
-                    plan.options.device.as_deref(),plan.options.tokens,&evidence)?;
-                run_eval_reusing_baseline(&eval,baseline_tasks.as_ref(),|line|log(line))
+        } else {
+            let results = (|| {
+                let candidates = vec![(format!("smaller_{ordinal}"), output.clone())];
+                let eval = prepare_eval_with_server(
+                    &plan.suite,
+                    &plan.baseline,
+                    &candidates,
+                    &plan.options.eval_tool,
+                    plan.options.server_tool.as_deref(),
+                    plan.options.gpu_layers,
+                    plan.options.device.as_deref(),
+                    plan.options.tokens,
+                    &evidence,
+                )?;
+                run_eval_reusing_baseline(&eval, baseline_tasks.as_ref(), |line| log(line))
             })();
-            match results{
-                Ok(r)=>r,
-                Err(e)=>{
-                    rows.push(json!({"type":precision.as_str(),"status":"TASK_EVALUATION_FAILED",
-                        "error":e.to_string(),"bytes":size,"output":output.to_string_lossy()}));
+            match results {
+                Ok(r) => r,
+                Err(e) => {
+                    rows.push(
+                        json!({"type":precision.as_str(),"status":"TASK_EVALUATION_FAILED",
+                        "error":e.to_string(),"bytes":size,"output":output.to_string_lossy()}),
+                    );
                     continue;
                 }
             }
         };
-        if baseline_tasks.is_none(){baseline_tasks=Some(task_report.clone());}
-        let(task_pass,task_metrics)=task_parity(&task_report,plan.options.max_loss_points);
-        let baseline_informative=task_reference_informative(&task_metrics);
-        let mut vision_pass=true;
-        let mut vision_evidence=Value::Null;
-        if task_pass && plan.vision.is_some(){
-            let test=(||{
-                if base_vision.is_none(){
-                    base_vision=Some(vision_score(&plan.options,plan.vision.as_ref().unwrap(),&plan.baseline,&mut log)?);
+        if baseline_tasks.is_none() {
+            baseline_tasks = Some(task_report.clone());
+        }
+        let (task_pass, task_metrics) = task_parity(&task_report, plan.options.max_loss_points);
+        let baseline_informative = task_reference_informative(&task_metrics);
+        let mut vision_pass = true;
+        let mut vision_evidence = Value::Null;
+        if task_pass && plan.vision.is_some() {
+            let test = (|| {
+                if base_vision.is_none() {
+                    base_vision = Some(vision_score(
+                        &plan.options,
+                        plan.vision.as_ref().unwrap(),
+                        &plan.baseline,
+                        &mut log,
+                    )?);
                 }
-                vision_score(&plan.options,plan.vision.as_ref().unwrap(),&output,&mut log)
+                vision_score(
+                    &plan.options,
+                    plan.vision.as_ref().unwrap(),
+                    &output,
+                    &mut log,
+                )
             })();
-            match test{
-                Ok(candidate)=>{
-                    let reference=base_vision.as_ref().unwrap();
-                    let b=reference["accuracy_pct"].as_f64().unwrap_or(0.0);
-                    let c=candidate["accuracy_pct"].as_f64().unwrap_or(-1.0);
-                    vision_pass=b>0.0 && c+plan.options.max_loss_points+1e-10>=b;
-                    vision_evidence=json!({"reference":reference,"candidate":candidate,
+            match test {
+                Ok(candidate) => {
+                    let reference = base_vision.as_ref().unwrap();
+                    let b = reference["accuracy_pct"].as_f64().unwrap_or(0.0);
+                    let c = candidate["accuracy_pct"].as_f64().unwrap_or(-1.0);
+                    vision_pass = b > 0.0 && c + plan.options.max_loss_points + 1e-10 >= b;
+                    vision_evidence = json!({"reference":reference,"candidate":candidate,
                         "pass":vision_pass});
                 }
-                Err(e)=>{
-                    vision_pass=false;
-                    vision_evidence=json!({"status":"VISION_EVALUATION_FAILED","error":e.to_string()});
+                Err(e) => {
+                    vision_pass = false;
+                    vision_evidence =
+                        json!({"status":"VISION_EVALUATION_FAILED","error":e.to_string()});
                 }
             }
         }
-        let mut ppl_pass=true;
-        let mut ppl_evidence=Value::Null;
-        if task_pass&&vision_pass {
-            if let Some(corpus)=&plan.options.ppl_corpus {
-                let settings=PplSettings{
-                    tool:plan.options.ppl_tool.clone(),corpus:corpus.clone(),
-                    gpu_layers:plan.options.gpu_layers.max(0) as u32,
-                    context:plan.options.ppl_context,
-                    max_relative_degradation_pct:plan.options.max_ppl_regression_pct,
+        let mut ppl_pass = true;
+        let mut ppl_evidence = Value::Null;
+        if task_pass && vision_pass {
+            if let Some(corpus) = &plan.options.ppl_corpus {
+                let settings = PplSettings {
+                    tool: plan.options.ppl_tool.clone(),
+                    corpus: corpus.clone(),
+                    gpu_layers: plan.options.gpu_layers.max(0) as u32,
+                    context: plan.options.ppl_context,
+                    max_relative_degradation_pct: plan.options.max_ppl_regression_pct,
                 };
-                let measured=(||{
-                    if baseline_ppl.is_none(){
-                        baseline_ppl=Some(measure_perplexity(&plan.baseline,&settings,&mut log)?.0);
+                let measured = (|| {
+                    if baseline_ppl.is_none() {
+                        baseline_ppl =
+                            Some(measure_perplexity(&plan.baseline, &settings, &mut log)?.0);
                     }
-                    measure_perplexity(&output,&settings,&mut log)
+                    measure_perplexity(&output, &settings, &mut log)
                 })();
-                match measured{
-                    Ok((candidate,seconds))=>{
-                        let reference=baseline_ppl.unwrap();
-                        let regression_pct=100.0*(candidate/reference-1.0);
-                        ppl_pass=regression_pct<=plan.options.max_ppl_regression_pct+1e-10;
-                        ppl_evidence=json!({"baseline_perplexity":reference,
+                match measured {
+                    Ok((candidate, seconds)) => {
+                        let reference = baseline_ppl.unwrap();
+                        let regression_pct = 100.0 * (candidate / reference - 1.0);
+                        ppl_pass = regression_pct <= plan.options.max_ppl_regression_pct + 1e-10;
+                        ppl_evidence = json!({"baseline_perplexity":reference,
                             "candidate_perplexity":candidate,
                             "relative_regression_pct":regression_pct,
                             "elapsed_seconds":seconds,"pass":ppl_pass});
                     }
-                    Err(e)=>{
-                        ppl_pass=false;
-                        ppl_evidence=json!({"status":"PPL_EVALUATION_FAILED","error":e.to_string()});
+                    Err(e) => {
+                        ppl_pass = false;
+                        ppl_evidence =
+                            json!({"status":"PPL_EVALUATION_FAILED","error":e.to_string()});
                     }
                 }
             }
         }
-        let measured_pass=task_pass&&vision_pass&&ppl_pass;
-        let scope=if plan.vision.is_some(){
+        let measured_pass = task_pass && vision_pass && ppl_pass;
+        let scope = if plan.vision.is_some() {
             "TEXT_AND_VISION_TASK_SUITE_ONLY"
-        }else{"TEXT_TASK_SUITE_ONLY_VISION_NOT_VERIFIED"};
-        if measured_pass&&best.as_ref().is_none_or(|(_,n)|size<*n){
-            best=Some((output.clone(),size));
+        } else {
+            "TEXT_TASK_SUITE_ONLY_VISION_NOT_VERIFIED"
+        };
+        if measured_pass && best.as_ref().is_none_or(|(_, n)| size < *n) {
+            best = Some((output.clone(), size));
         }
         rows.push(json!({"type":precision.as_str(),
             "status":if measured_pass {"NO_DETECTED_TASK_REGRESSION"}
@@ -585,7 +834,7 @@ pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Res
             "evidence_scope":scope,"task_report":evidence.to_string_lossy(),
             "candidate_verified_lossless":false}));
     }
-    let report=json!({
+    let report = json!({
         "schema":"ojon.quant_parity_result.v1",
         "baseline":plan.baseline.to_string_lossy(),
         "high_precision_source":plan.source.to_string_lossy(),
@@ -603,43 +852,58 @@ pub fn run_quant_parity(plan:&QuantParityPlan,mut log:impl FnMut(&str))->io::Res
         "hardware_runtime_fit_proven":false,
         "warning":"Pass means no detected regression on these specific tasks ONLY. Check perplexity, diverse prompts, real VLM use, coding agents and performance before accepting model."
     });
-    let result_file=plan.output_dir.join(format!("{prefix}.report.json"));
-    let mut f=OpenOptions::new().write(true).create_new(true).open(&result_file)?;
-    f.write_all(serde_json::to_string_pretty(&report).map_err(io::Error::other)?.as_bytes())?;
+    let result_file = plan.output_dir.join(format!("{prefix}.report.json"));
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&result_file)?;
+    f.write_all(
+        serde_json::to_string_pretty(&report)
+            .map_err(io::Error::other)?
+            .as_bytes(),
+    )?;
     f.sync_all()?;
     Ok(report)
 }
 
 #[cfg(test)]
-mod tests{
+mod tests {
     use super::*;
     #[test]
-    fn numerical_parity_checks_baseline_not_full_precision(){
-        let identical=json!({"baseline":{"metrics":{"coding_accuracy":90.0,
+    fn numerical_parity_checks_baseline_not_full_precision() {
+        let identical = json!({"baseline":{"metrics":{"coding_accuracy":90.0,
             "reasoning_accuracy":85.0,"tool_call_accuracy":80.0}},
             "candidates":[{"metrics":{"coding_accuracy":90.0,
                 "reasoning_accuracy":85.0,"tool_call_accuracy":80.0}}]});
-        assert!(task_parity(&identical,0.0).0);
-        let losing=json!({"baseline":{"metrics":{"coding_accuracy":90.0,
+        assert!(task_parity(&identical, 0.0).0);
+        let losing = json!({"baseline":{"metrics":{"coding_accuracy":90.0,
             "reasoning_accuracy":85.0,"tool_call_accuracy":80.0}},
             "candidates":[{"metrics":{"coding_accuracy":89.0,
                 "reasoning_accuracy":85.0,"tool_call_accuracy":80.0}}]});
-        assert!(!task_parity(&losing,0.0).0);
-        let uninformative=json!({"baseline":{"metrics":{"coding_accuracy":0.0,
+        assert!(!task_parity(&losing, 0.0).0);
+        let uninformative = json!({"baseline":{"metrics":{"coding_accuracy":0.0,
             "reasoning_accuracy":0.0,"tool_call_accuracy":0.0}},
             "candidates":[{"metrics":{"coding_accuracy":0.0,
                 "reasoning_accuracy":0.0,"tool_call_accuracy":0.0}}]});
-        let(pass,metrics)=task_parity(&uninformative,0.0);
+        let (pass, metrics) = task_parity(&uninformative, 0.0);
         assert!(!pass);
         assert!(!task_reference_informative(&metrics));
-        assert!(task_parity(&losing,1.0).0);
+        assert!(task_parity(&losing, 1.0).0);
     }
     #[test]
-    fn vision_exact_and_contains_are_separate(){
-        let t=VisionTask{id:"a".into(),image:PathBuf::new(),
-            prompt:"test".into(),expected:"BLUE".into(),contains:true};
-        assert!(matches_vision(&t,"the item is blue"));
-        let e=VisionTask{contains:false,..t};
-        assert!(!matches_vision(&e,"the item is blue"));
+    fn vision_exact_and_contains_are_separate() {
+        let t = VisionTask {
+            id: "a".into(),
+            image: PathBuf::new(),
+            prompt: "test".into(),
+            expected: "BLUE".into(),
+            contains: true,
+        };
+        assert!(matches_vision(&t, "the item is blue"));
+        let e = VisionTask {
+            contains: false,
+            ..t
+        };
+        assert!(!matches_vision(&e, "the item is blue"));
     }
 }

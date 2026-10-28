@@ -6,8 +6,8 @@
 //! the resulting artifact only if the converter succeeds.
 
 use crate::gguf::{inspect_gguf, GgufSummary};
-use crate::resource::{assess_resources, ResourceMode};
 use crate::jobs::run_with_log;
+use crate::resource::{assess_resources, ResourceMode};
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, OpenOptions};
@@ -42,7 +42,9 @@ pub enum Precision {
     IQ2XXS,
 }
 impl Default for Precision {
-    fn default() -> Self { Self::Q5KM }
+    fn default() -> Self {
+        Self::Q5KM
+    }
 }
 impl Precision {
     pub fn as_str(self) -> &'static str {
@@ -68,7 +70,9 @@ impl Precision {
     }
 }
 impl fmt::Display for Precision {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(self.as_str()) }
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 impl FromStr for Precision {
     type Err = String;
@@ -132,31 +136,57 @@ pub fn prepare_gguf(
     precision: Precision,
     threads: usize,
 ) -> io::Result<QuantizePlan> {
-    if threads == 0 { return Err(bad("thread count must be greater than zero")); }
-    if output.extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("gguf")) != Some(true) {
+    if threads == 0 {
+        return Err(bad("thread count must be greater than zero"));
+    }
+    if output
+        .extension()
+        .and_then(|x| x.to_str())
+        .map(|x| x.eq_ignore_ascii_case("gguf"))
+        != Some(true)
+    {
         return Err(bad("output filename must end in .gguf"));
     }
-    if source.extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("gguf")) != Some(true) {
+    if source
+        .extension()
+        .and_then(|x| x.to_str())
+        .map(|x| x.eq_ignore_ascii_case("gguf"))
+        != Some(true)
+    {
         return Err(bad("this adapter only supports a GGUF source; first use a compatible upstream model converter"));
     }
     let canonical_source = source.canonicalize()?;
-    if !canonical_source.is_file() { return Err(bad("source must be a regular GGUF file")); }
+    if !canonical_source.is_file() {
+        return Err(bad("source must be a regular GGUF file"));
+    }
     let source_info = inspect_gguf(&canonical_source)?;
-    if source_info.tensor_count == 0 { return Err(bad("source GGUF has no tensors")); }
+    if source_info.tensor_count == 0 {
+        return Err(bad("source GGUF has no tensors"));
+    }
     validate_original_precision(source_info.file_type)?;
     if source_info.split_count.unwrap_or(1) > 1 {
         return Err(bad("this first adapter supports single-file GGUF only; multi-shard GGUF needs a dedicated recipe"));
     }
-    let output_filename = output.file_name().ok_or_else(|| bad("missing output filename"))?;
-    let parent = output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let output_filename = output
+        .file_name()
+        .ok_or_else(|| bad("missing output filename"))?;
+    let parent = output
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     let canonical_parent = parent.canonicalize()?;
-    if !canonical_parent.is_dir() { return Err(bad("output parent is not a directory")); }
+    if !canonical_parent.is_dir() {
+        return Err(bad("output parent is not a directory"));
+    }
     let canonical_output = canonical_parent.join(output_filename);
     if canonical_output == canonical_source {
         return Err(bad("cannot overwrite source weights"));
     }
     if canonical_output.symlink_metadata().is_ok() {
-        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "output already exists; choose another path"));
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "output already exists; choose another path",
+        ));
     }
     Ok(QuantizePlan {
         source: canonical_source,
@@ -188,12 +218,16 @@ pub(crate) fn validate_original_precision(file_type: Option<u32>) -> io::Result<
 /// source, so guided searches never reduce them below Q6_K. Returns None for
 /// dense models (no router tensors present).
 pub fn moe_router_pinning_recipe(tensors: &[crate::gguf::GgufTensor]) -> Option<String> {
-    let is_moe = tensors.iter().any(|t|
-        t.name.ends_with("ffn_gate_inp.weight") || t.name.ends_with("exp_probs_b.weight"));
-    if !is_moe { return None; }
+    let is_moe = tensors
+        .iter()
+        .any(|t| t.name.ends_with("ffn_gate_inp.weight") || t.name.ends_with("exp_probs_b.weight"));
+    if !is_moe {
+        return None;
+    }
     Some(String::from(
         "^blk\\.[0-9]+\\.ffn_gate_inp\\.weight$=Q6_K\n\
-         ^blk\\.[0-9]+\\.exp_probs_b\\.weight$=Q6_K\n"))
+         ^blk\\.[0-9]+\\.exp_probs_b\\.weight$=Q6_K\n",
+    ))
 }
 
 impl QuantizePlan {
@@ -204,7 +238,7 @@ impl QuantizePlan {
     /// Must be a preexisting nonempty text file produced by a trusted planner.
     pub fn with_tensor_type_file(mut self, path: &Path) -> io::Result<Self> {
         let resolved = path.canonicalize()?;
-        if !resolved.is_file() || !(1..=1024*1024).contains(&resolved.metadata()?.len()) {
+        if !resolved.is_file() || !(1..=1024 * 1024).contains(&resolved.metadata()?.len()) {
             return Err(bad("tensor-type file must be 1 byte..1 MiB"));
         }
         self.tensor_type_file = Some(resolved);
@@ -213,7 +247,12 @@ impl QuantizePlan {
     /// Selective override for output.weight (e.g. Q6_K, Q8_0, F16).
     pub fn with_output_tensor_type(mut self, t: &str) -> io::Result<Self> {
         let trimmed = t.trim();
-        if trimmed.is_empty() || trimmed.len() > 32 || !trimmed.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        if trimmed.is_empty()
+            || trimmed.len() > 32
+            || !trimmed
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
             return Err(bad("invalid output tensor type format"));
         }
         self.output_tensor_type = Some(trimmed.to_owned());
@@ -222,7 +261,12 @@ impl QuantizePlan {
     /// Selective override for token embeddings (e.g. Q4_K, Q5_K, Q6_K).
     pub fn with_token_embedding_type(mut self, t: &str) -> io::Result<Self> {
         let trimmed = t.trim();
-        if trimmed.is_empty() || trimmed.len() > 32 || !trimmed.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        if trimmed.is_empty()
+            || trimmed.len() > 32
+            || !trimmed
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
             return Err(bad("invalid token embedding type format"));
         }
         self.token_embedding_type = Some(trimmed.to_owned());
@@ -239,7 +283,7 @@ impl QuantizePlan {
     }
     pub fn with_imatrix(mut self, path: &Path) -> io::Result<Self> {
         let real = path.canonicalize()?;
-        if !real.is_file() || real.metadata()?.len()==0 {
+        if !real.is_file() || real.metadata()?.len() == 0 {
             return Err(bad("importance matrix file must exist and be nonempty"));
         }
         self.imatrix = Some(real);
@@ -249,16 +293,25 @@ impl QuantizePlan {
 
 struct StagingDirectory(PathBuf);
 impl Drop for StagingDirectory {
-    fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 fn make_staging_directory(output: &Path) -> io::Result<StagingDirectory> {
-    let parent = output.parent().ok_or_else(|| bad("missing output directory"))?;
+    let parent = output
+        .parent()
+        .ok_or_else(|| bad("missing output directory"))?;
     let stem = output.file_name().unwrap_or_default().to_string_lossy();
     for attempt in 0..8 {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)
-            .map_err(|_| bad("system time before Unix epoch"))?.as_nanos();
-        let path = parent.join(format!(".{stem}.ojon-work-{}-{now}-{attempt}", std::process::id()));
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| bad("system time before Unix epoch"))?
+            .as_nanos();
+        let path = parent.join(format!(
+            ".{stem}.ojon-work-{}-{now}-{attempt}",
+            std::process::id()
+        ));
         match fs::create_dir(&path) {
             Ok(()) => return Ok(StagingDirectory(path)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
@@ -277,14 +330,27 @@ pub fn quantize_gguf(plan: &QuantizePlan) -> io::Result<QuantizeResult> {
 /// Same safe conversion operation, forwarding actual converter log lines.
 /// No progress percentages or VRAM values are inferred.
 pub fn quantize_gguf_with_log<F>(plan: &QuantizePlan, mut on_log: F) -> io::Result<QuantizeResult>
-where F: FnMut(&str) {
+where
+    F: FnMut(&str),
+{
     // Recheck because output could have appeared between preflight and execution.
     if plan.output.symlink_metadata().is_ok() {
-        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "output already exists"));
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "output already exists",
+        ));
     }
     validate_original_precision(inspect_gguf(&plan.source)?.file_type)?;
-    let parent = plan.output.parent().ok_or_else(|| bad("missing output directory"))?;
-    let resources = assess_resources(plan.source_info.file_bytes, parent, ResourceMode::Gguf, "cpu")?;
+    let parent = plan
+        .output
+        .parent()
+        .ok_or_else(|| bad("missing output directory"))?;
+    let resources = assess_resources(
+        plan.source_info.file_bytes,
+        parent,
+        ResourceMode::Gguf,
+        "cpu",
+    )?;
     resources.enforce(false)?;
     let staging = make_staging_directory(&plan.output)?;
     let stage_file = staging.0.join("quantized.gguf");
@@ -315,11 +381,17 @@ where F: FnMut(&str) {
     if info.tensor_count == 0 {
         return Err(bad("converter output contains no tensors"));
     }
-    if info.architecture != plan.source_info.architecture || info.tensor_count != plan.source_info.tensor_count {
-        return Err(bad("quantized output changed architecture or tensor count; refusing publication"));
+    if info.architecture != plan.source_info.architecture
+        || info.tensor_count != plan.source_info.tensor_count
+    {
+        return Err(bad(
+            "quantized output changed architecture or tensor count; refusing publication",
+        ));
     }
     if !matches!(info.file_type, Some(v) if !matches!(v, 0 | 1 | 32)) {
-        return Err(bad("converter did not produce an identifiable quantized GGUF; refusing publication"));
+        return Err(bad(
+            "converter did not produce an identifiable quantized GGUF; refusing publication",
+        ));
     }
     if info.split_count.unwrap_or(1) > 1 {
         return Err(bad("converter emitted a multi-shard model; this adapter cannot publish all shards safely yet"));
@@ -340,13 +412,25 @@ fn write_receipt(plan: &QuantizePlan, info: &GgufSummary) -> io::Result<PathBuf>
     let mut receipt_os: OsString = plan.output.as_os_str().to_os_string();
     receipt_os.push(".ojon-receipt.txt");
     let path = PathBuf::from(receipt_os);
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&path)?;
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)
-        .map_err(|_| bad("system time before Unix epoch"))?.as_secs();
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| bad("system time before Unix epoch"))?
+        .as_secs();
     writeln!(file, "Ojon GGUF conversion receipt v1")?;
     writeln!(file, "created_utc_unix={timestamp}")?;
     writeln!(file, "adapter=llama.cpp-quantize")?;
-    writeln!(file, "tensor_type_file={}", plan.tensor_type_file.as_ref().map(|p|p.display().to_string()).unwrap_or_else(||"none".into()))?;
+    writeln!(
+        file,
+        "tensor_type_file={}",
+        plan.tensor_type_file
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "none".into())
+    )?;
     writeln!(file, "tool={}", plan.executable.display())?;
     writeln!(file, "source={}", plan.source.display())?;
     writeln!(file, "source_bytes={}", plan.source_info.file_bytes)?;
@@ -360,7 +444,14 @@ fn write_receipt(plan: &QuantizePlan, info: &GgufSummary) -> io::Result<PathBuf>
         writeln!(file, "token_embedding_type={et}")?;
     }
     writeln!(file, "threads={}", plan.threads)?;
-    writeln!(file, "imatrix={}", plan.imatrix.as_ref().map(|p|p.display().to_string()).unwrap_or_else(||"none".into()))?;
+    writeln!(
+        file,
+        "imatrix={}",
+        plan.imatrix
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "none".into())
+    )?;
     writeln!(file, "output_tensors={}", info.tensor_count)?;
     writeln!(file, "verification=GGUF_METADATA_AND_TENSOR_CATALOG_ONLY")?;
     writeln!(file, "runtime_load_test=NOT_RUN")?;
@@ -375,12 +466,23 @@ mod precision_tests {
     #[test]
     fn iq_and_k_precisions_round_trip() {
         for variant in [
-            Precision::Q3KL, Precision::Q3KM, Precision::Q3KS,
-            Precision::Q4KM, Precision::Q4KS,
-            Precision::Q5KM, Precision::Q5KS, Precision::Q6K,
-            Precision::IQ4NL, Precision::IQ4XS,
-            Precision::IQ3M, Precision::IQ3S, Precision::IQ3XS,
-            Precision::IQ2M, Precision::IQ2S, Precision::IQ2XS, Precision::IQ2XXS,
+            Precision::Q3KL,
+            Precision::Q3KM,
+            Precision::Q3KS,
+            Precision::Q4KM,
+            Precision::Q4KS,
+            Precision::Q5KM,
+            Precision::Q5KS,
+            Precision::Q6K,
+            Precision::IQ4NL,
+            Precision::IQ4XS,
+            Precision::IQ3M,
+            Precision::IQ3S,
+            Precision::IQ3XS,
+            Precision::IQ2M,
+            Precision::IQ2S,
+            Precision::IQ2XS,
+            Precision::IQ2XXS,
         ] {
             assert_eq!(Precision::from_str(variant.as_str()).unwrap(), variant);
         }

@@ -71,72 +71,124 @@ impl Exl3Plan {
 
 /// Normalize a destination without creating it. Only an existing parent is allowed.
 fn destination(path: &Path) -> io::Result<PathBuf> {
-    if !path.is_absolute() { return Err(invalid("output and work paths must be absolute")); }
-    let parent=path.parent().ok_or_else(||invalid("path has no parent"))?.canonicalize()?;
-    if !parent.is_dir() { return Err(invalid("destination parent must be an existing directory")); }
-    let name=path.file_name().ok_or_else(||invalid("destination needs a filename"))?;
+    if !path.is_absolute() {
+        return Err(invalid("output and work paths must be absolute"));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid("path has no parent"))?
+        .canonicalize()?;
+    if !parent.is_dir() {
+        return Err(invalid("destination parent must be an existing directory"));
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| invalid("destination needs a filename"))?;
     Ok(parent.join(name))
 }
 
 /// Plans only. Verify input is a local unquantized Hugging Face checkpoint.
 pub fn prepare_exl3(
-    source: &Path, output: &Path, work_dir: &Path,
-    checkout: &Path, python: &Path, bits: f64, high_quality: bool, resume: bool,
+    source: &Path,
+    output: &Path,
+    work_dir: &Path,
+    checkout: &Path,
+    python: &Path,
+    bits: f64,
+    high_quality: bool,
+    resume: bool,
 ) -> io::Result<Exl3Plan> {
     if !bits.is_finite() || !(2.0..=8.0).contains(&bits) {
-        return Err(invalid("EXL3 target bitrate must be finite and between 2.0 and 8.0"));
+        return Err(invalid(
+            "EXL3 target bitrate must be finite and between 2.0 and 8.0",
+        ));
     }
-    let source=inspect_hf_folder(source)?;
+    let source = inspect_hf_folder(source)?;
     if !source.directory.join("tokenizer.json").is_file() {
         return Err(invalid("EXL3 source needs tokenizer.json"));
     }
-    let config_file=source.directory.join("config.json");
-    if fs::metadata(&config_file)?.len()>2_000_000 {
+    let config_file = source.directory.join("config.json");
+    if fs::metadata(&config_file)?.len() > 2_000_000 {
         return Err(invalid("config.json exceeds 2 MiB"));
     }
-    let config:Value=serde_json::from_slice(&fs::read(config_file)?)
-        .map_err(|_|invalid("source config.json is not valid JSON"))?;
+    let config: Value = serde_json::from_slice(&fs::read(config_file)?)
+        .map_err(|_| invalid("source config.json is not valid JSON"))?;
     if config.get("quantization_config").is_some() {
         return Err(invalid("EXL3 requires original unquantized HF weights"));
     }
-    let safetensors=fs::read_dir(&source.directory)?.filter_map(Result::ok)
-        .any(|item| item.file_name().to_string_lossy().ends_with(".safetensors")
-            && item.metadata().is_ok_and(|meta|meta.is_file() && meta.len()>0));
-    if !safetensors { return Err(invalid("EXL3 requires nonempty safetensors weights")); }
-    let converter=if checkout.is_dir() {checkout.join("convert.py")} else {checkout.to_path_buf()};
-    let converter=converter.canonicalize()?;
-    if converter.file_name().and_then(|s|s.to_str())!=Some("convert.py") || !converter.is_file() {
-        return Err(invalid("supply an installed ExLlamaV3 checkout containing convert.py"));
+    let safetensors = fs::read_dir(&source.directory)?
+        .filter_map(Result::ok)
+        .any(|item| {
+            item.file_name().to_string_lossy().ends_with(".safetensors")
+                && item
+                    .metadata()
+                    .is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+        });
+    if !safetensors {
+        return Err(invalid("EXL3 requires nonempty safetensors weights"));
+    }
+    let converter = if checkout.is_dir() {
+        checkout.join("convert.py")
+    } else {
+        checkout.to_path_buf()
+    };
+    let converter = converter.canonicalize()?;
+    if converter.file_name().and_then(|s| s.to_str()) != Some("convert.py") || !converter.is_file()
+    {
+        return Err(invalid(
+            "supply an installed ExLlamaV3 checkout containing convert.py",
+        ));
     }
     if python.as_os_str().is_empty() || (python.is_absolute() && !python.is_file()) {
-        return Err(invalid("Python executable must exist when passed as an absolute path"));
+        return Err(invalid(
+            "Python executable must exist when passed as an absolute path",
+        ));
     }
-    let output=destination(output)?;
-    let work_dir=destination(work_dir)?;
-    if output==work_dir || output.starts_with(&work_dir) || work_dir.starts_with(&output) {
+    let output = destination(output)?;
+    let work_dir = destination(work_dir)?;
+    if output == work_dir || output.starts_with(&work_dir) || work_dir.starts_with(&output) {
         return Err(invalid("output and work directories must be separate"));
     }
     if output.starts_with(&source.directory) || work_dir.starts_with(&source.directory) {
-        return Err(invalid("output/work directories must not be inside original source"));
+        return Err(invalid(
+            "output/work directories must not be inside original source",
+        ));
     }
     if resume {
-        if !work_dir.is_dir() { return Err(invalid("resume requires an existing Ojon work directory")); }
+        if !work_dir.is_dir() {
+            return Err(invalid("resume requires an existing Ojon work directory"));
+        }
     } else {
         if output.symlink_metadata().is_ok() || work_dir.symlink_metadata().is_ok() {
-            return Err(io::Error::new(ErrorKind::AlreadyExists, "new EXL3 output and work paths must not exist"));
+            return Err(io::Error::new(
+                ErrorKind::AlreadyExists,
+                "new EXL3 output and work paths must not exist",
+            ));
         }
     }
-    Ok(Exl3Plan {source,output,work_dir,converter,python:python.to_path_buf(),
-        bits,high_quality,resume})
+    Ok(Exl3Plan {
+        source,
+        output,
+        work_dir,
+        converter,
+        python: python.to_path_buf(),
+        bits,
+        high_quality,
+        resume,
+    })
 }
 
 fn existing_job_matches(plan: &Exl3Plan) -> io::Result<()> {
-    let marker=plan.work_dir.join(STATE_NAME);
-    if fs::metadata(&marker)?.len()>65536 {return Err(invalid("EXL3 work marker exceeds limit")); }
-    let stored:Value=serde_json::from_slice(&fs::read(marker)?)
-        .map_err(|_|invalid("EXL3 resume marker is malformed"))?;
-    if stored!=plan.job_record() {
-        return Err(invalid("EXL3 resume does not match original source, output, converter or recipe"));
+    let marker = plan.work_dir.join(STATE_NAME);
+    if fs::metadata(&marker)?.len() > 65536 {
+        return Err(invalid("EXL3 work marker exceeds limit"));
+    }
+    let stored: Value = serde_json::from_slice(&fs::read(marker)?)
+        .map_err(|_| invalid("EXL3 resume marker is malformed"))?;
+    if stored != plan.job_record() {
+        return Err(invalid(
+            "EXL3 resume does not match original source, output, converter or recipe",
+        ));
     }
     Ok(())
 }
@@ -145,59 +197,90 @@ fn verify_bundle(out: &Path) -> io::Result<u64> {
     if !out.join("config.json").is_file() {
         return Err(io::Error::other("EXL3 result is missing config.json"));
     }
-    let mut weight_bytes=0u64;
+    let mut weight_bytes = 0u64;
     for entry in fs::read_dir(out)?.take(4096) {
-        let entry=entry?;
-        if entry.file_name().to_string_lossy().ends_with(".safetensors") {
-            let metadata=entry.metadata()?;
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".safetensors")
+        {
+            let metadata = entry.metadata()?;
             if metadata.is_file() {
-                weight_bytes=weight_bytes.checked_add(metadata.len())
-                    .ok_or_else(||io::Error::other("output size overflow"))?;
+                weight_bytes = weight_bytes
+                    .checked_add(metadata.len())
+                    .ok_or_else(|| io::Error::other("output size overflow"))?;
             }
         }
     }
-    if weight_bytes==0 {return Err(io::Error::other("EXL3 output missing nonempty safetensors")); }
+    if weight_bytes == 0 {
+        return Err(io::Error::other("EXL3 output missing nonempty safetensors"));
+    }
     Ok(weight_bytes)
 }
 
 /// Launch installed upstream converter. A failed/interrupted job retains partial
 /// output and its separate work directory so the upstream -r mechanism can resume.
 pub fn run_exl3(plan: &Exl3Plan, allow_resource_risk: bool) -> io::Result<Value> {
-    let parent=plan.output.parent().ok_or_else(||invalid("missing output parent"))?;
-    let preflight=assess_resources(plan.source.source_weight_bytes,parent,ResourceMode::Exl3,"cuda")?;
-    eprintln!("Ojon EXL3 resource preflight: {}",preflight.as_json());
+    let parent = plan
+        .output
+        .parent()
+        .ok_or_else(|| invalid("missing output parent"))?;
+    let preflight = assess_resources(
+        plan.source.source_weight_bytes,
+        parent,
+        ResourceMode::Exl3,
+        "cuda",
+    )?;
+    eprintln!("Ojon EXL3 resource preflight: {}", preflight.as_json());
     preflight.enforce(allow_resource_risk)?;
 
     if plan.resume {
         existing_job_matches(plan)?;
     } else {
         if plan.output.symlink_metadata().is_ok() || plan.work_dir.symlink_metadata().is_ok() {
-            return Err(io::Error::new(ErrorKind::AlreadyExists,"EXL3 job destination already exists"));
+            return Err(io::Error::new(
+                ErrorKind::AlreadyExists,
+                "EXL3 job destination already exists",
+            ));
         }
         fs::create_dir(&plan.work_dir)?;
-        let mut marker=OpenOptions::new().write(true).create_new(true)
+        let mut marker = OpenOptions::new()
+            .write(true)
+            .create_new(true)
             .open(plan.work_dir.join(STATE_NAME))?;
-        marker.write_all(serde_json::to_string_pretty(&plan.job_record())
-            .map_err(io::Error::other)?.as_bytes())?;
+        marker.write_all(
+            serde_json::to_string_pretty(&plan.job_record())
+                .map_err(io::Error::other)?
+                .as_bytes(),
+        )?;
         marker.flush()?;
     }
-    let mut command=Command::new(&plan.python);
+    let mut command = Command::new(&plan.python);
     command.arg(&plan.converter);
     if plan.resume {
         command.arg("-w").arg(&plan.work_dir).arg("-r");
     } else {
-        command.arg("-i").arg(&plan.source.directory)
-            .arg("-o").arg(&plan.output)
-            .arg("-w").arg(&plan.work_dir)
-            .arg("-b").arg(plan.bits.to_string());
-        if plan.high_quality { command.arg("-hq"); }
+        command
+            .arg("-i")
+            .arg(&plan.source.directory)
+            .arg("-o")
+            .arg(&plan.output)
+            .arg("-w")
+            .arg(&plan.work_dir)
+            .arg("-b")
+            .arg(plan.bits.to_string());
+        if plan.high_quality {
+            command.arg("-hq");
+        }
     }
-    command.env("HF_HUB_OFFLINE","1")
-        .env("HF_DATASETS_OFFLINE","1")
-        .env("TRANSFORMERS_OFFLINE","1")
-        .env("HF_HUB_DISABLE_TELEMETRY","1");
+    command
+        .env("HF_HUB_OFFLINE", "1")
+        .env("HF_DATASETS_OFFLINE", "1")
+        .env("TRANSFORMERS_OFFLINE", "1")
+        .env("HF_HUB_DISABLE_TELEMETRY", "1");
     run_with_log(&mut command, |line| println!("{line}"))?;
-    let output_weight_bytes=verify_bundle(&plan.output)?;
+    let output_weight_bytes = verify_bundle(&plan.output)?;
     Ok(json!({
         "schema":"ojon.exl3_result.v1",
         "status":"EXPORTED_FORMAT_ONLY",
@@ -214,56 +297,147 @@ pub fn run_exl3(plan: &Exl3Plan, allow_resource_risk: bool) -> io::Result<Value>
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
-    fn fixture() -> (PathBuf,PathBuf,PathBuf) {
-        let stamp=SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let root=std::env::temp_dir().join(format!("ojon-exl3-{}-{stamp}",std::process::id()));
-        let source=root.join("original");
-        let checkout=root.join("checkout");
+    fn fixture() -> (PathBuf, PathBuf, PathBuf) {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("ojon-exl3-{}-{stamp}", std::process::id()));
+        let source = root.join("original");
+        let checkout = root.join("checkout");
         fs::create_dir_all(&source).unwrap();
         fs::create_dir_all(&checkout).unwrap();
-        fs::write(source.join("config.json"),r#"{"model_type":"llama"}"#).unwrap();
-        fs::write(source.join("tokenizer.json"),b"{}").unwrap();
-        fs::write(source.join("model.safetensors"),b"full-precision-fixture").unwrap();
-        fs::write(checkout.join("convert.py"),b"# fixture").unwrap();
-        (root,source,checkout)
+        fs::write(source.join("config.json"), r#"{"model_type":"llama"}"#).unwrap();
+        fs::write(source.join("tokenizer.json"), b"{}").unwrap();
+        fs::write(source.join("model.safetensors"), b"full-precision-fixture").unwrap();
+        fs::write(checkout.join("convert.py"), b"# fixture").unwrap();
+        (root, source, checkout)
     }
     #[test]
     fn plan_checks_unquantized_input_and_safe_paths() {
-        let (root,source,checkout)=fixture();
-        let out=root.join("exl3");
-        let work=root.join("work");
-        let p=prepare_exl3(&source,&out,&work,&checkout,Path::new("python"),3.5,true,false).unwrap();
-        assert_eq!(p.as_json()["output_format"],"EXL3 (NOT GGUF)");
-        assert_eq!(p.as_json()["runtime_load_verified"],false);
-        assert!(prepare_exl3(&source,&out,&work,&checkout,Path::new("python"),0.5,false,false).is_err());
-        assert!(prepare_exl3(&source,&source.join("out"),&work,&checkout,Path::new("python"),3.0,false,false).is_err());
-        assert!(prepare_exl3(&source,&out,&out,&checkout,Path::new("python"),3.0,false,false).is_err());
-        fs::write(source.join("config.json"),r#"{"quantization_config":{"bits":4}}"#).unwrap();
-        assert!(prepare_exl3(&source,&out,&work,&checkout,Path::new("python"),3.0,false,false).is_err());
+        let (root, source, checkout) = fixture();
+        let out = root.join("exl3");
+        let work = root.join("work");
+        let p = prepare_exl3(
+            &source,
+            &out,
+            &work,
+            &checkout,
+            Path::new("python"),
+            3.5,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(p.as_json()["output_format"], "EXL3 (NOT GGUF)");
+        assert_eq!(p.as_json()["runtime_load_verified"], false);
+        assert!(prepare_exl3(
+            &source,
+            &out,
+            &work,
+            &checkout,
+            Path::new("python"),
+            0.5,
+            false,
+            false
+        )
+        .is_err());
+        assert!(prepare_exl3(
+            &source,
+            &source.join("out"),
+            &work,
+            &checkout,
+            Path::new("python"),
+            3.0,
+            false,
+            false
+        )
+        .is_err());
+        assert!(prepare_exl3(
+            &source,
+            &out,
+            &out,
+            &checkout,
+            Path::new("python"),
+            3.0,
+            false,
+            false
+        )
+        .is_err());
+        fs::write(
+            source.join("config.json"),
+            r#"{"quantization_config":{"bits":4}}"#,
+        )
+        .unwrap();
+        assert!(prepare_exl3(
+            &source,
+            &out,
+            &work,
+            &checkout,
+            Path::new("python"),
+            3.0,
+            false,
+            false
+        )
+        .is_err());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn resume_refuses_unknown_work_directory_or_changed_recipe() {
-        let (root,source,checkout)=fixture();
-        let out=root.join("exl3");
-        let work=root.join("work");
-        let plan=prepare_exl3(&source,&out,&work,&checkout,Path::new("python"),3.0,false,false).unwrap();
+        let (root, source, checkout) = fixture();
+        let out = root.join("exl3");
+        let work = root.join("work");
+        let plan = prepare_exl3(
+            &source,
+            &out,
+            &work,
+            &checkout,
+            Path::new("python"),
+            3.0,
+            false,
+            false,
+        )
+        .unwrap();
         fs::create_dir_all(&work).unwrap();
-        fs::write(work.join(STATE_NAME),serde_json::to_vec(&plan.job_record()).unwrap()).unwrap();
-        let resumed=prepare_exl3(&source,&out,&work,&checkout,Path::new("python"),3.0,false,true).unwrap();
+        fs::write(
+            work.join(STATE_NAME),
+            serde_json::to_vec(&plan.job_record()).unwrap(),
+        )
+        .unwrap();
+        let resumed = prepare_exl3(
+            &source,
+            &out,
+            &work,
+            &checkout,
+            Path::new("python"),
+            3.0,
+            false,
+            true,
+        )
+        .unwrap();
         assert!(existing_job_matches(&resumed).is_ok());
-        let changed=prepare_exl3(&source,&out,&work,&checkout,Path::new("python"),4.0,false,true).unwrap();
+        let changed = prepare_exl3(
+            &source,
+            &out,
+            &work,
+            &checkout,
+            Path::new("python"),
+            4.0,
+            false,
+            true,
+        )
+        .unwrap();
         assert!(existing_job_matches(&changed).is_err());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn incomplete_bundle_not_reported_as_verified() {
-        let (root,_,_)=fixture();
+        let (root, _, _) = fixture();
         assert!(verify_bundle(&root).is_err());
-        fs::write(root.join("config.json"),b"{}").unwrap();
+        fs::write(root.join("config.json"), b"{}").unwrap();
         assert!(verify_bundle(&root).is_err());
-        fs::write(root.join("quant.safetensors"),b"abc").unwrap();
-        assert_eq!(verify_bundle(&root).unwrap(),3);
+        fs::write(root.join("quant.safetensors"), b"abc").unwrap();
+        assert_eq!(verify_bundle(&root).unwrap(), 3);
         fs::remove_dir_all(root).unwrap();
     }
 }
