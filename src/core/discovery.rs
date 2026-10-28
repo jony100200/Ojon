@@ -234,6 +234,8 @@ fn search_dirs() -> Vec<(PathBuf, &'static str)> {
             "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-cuda/bin/Release",
             "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl/bin/Release",
             "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl",
+            "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/build-vulkan/bin",
+            "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/build-cpu/bin",
             "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/vulkan",
             "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/cuda",
             "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/sycl",
