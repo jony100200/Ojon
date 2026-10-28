@@ -31,6 +31,7 @@ fn invalid(s:impl Into<String>)->io::Error{io::Error::new(ErrorKind::InvalidInpu
 pub enum OptimizeGoal {
     Smallest,
     Balanced,
+    MaximumQuality,
     Fastest,
 }
 impl OptimizeGoal {
@@ -38,12 +39,18 @@ impl OptimizeGoal {
         match s{
             "smallest"=>Ok(Self::Smallest),
             "balanced"=>Ok(Self::Balanced),
+            "maximum_quality"|"max_quality"|"quality"=>Ok(Self::MaximumQuality),
             "fastest"=>Ok(Self::Fastest),
-            _=>Err(invalid("goal must be smallest, balanced or fastest"))
+            _=>Err(invalid("goal must be smallest, balanced, maximum_quality or fastest"))
         }
     }
     pub fn label(self)->&'static str{
-        match self{Self::Smallest=>"smallest",Self::Balanced=>"balanced",Self::Fastest=>"fastest"}
+        match self{
+            Self::Smallest=>"smallest",
+            Self::Balanced=>"balanced",
+            Self::MaximumQuality=>"maximum_quality",
+            Self::Fastest=>"fastest",
+        }
     }
 }
 #[derive(Debug,Clone,PartialEq)]
@@ -89,6 +96,19 @@ impl OptimizeWorkflowRequest{
             bench_repetitions:3,balanced_min_speed_ratio:0.85,server_tool:None,auto_imatrix:false
         }
     }
+
+    /// Resolve automatic hardware discovery when no compulsory manual GPU ID was supplied.
+    pub fn with_auto_hardware(mut self) -> Self {
+        if self.device == "auto" && self.runtime_device.is_none() && self.gpu_layers == 0 {
+            let (family, rt, layers) = crate::resource::resolve_auto_runtime_device("auto", None, 0);
+            if let Some(rt_id) = rt {
+                self.device = family;
+                self.runtime_device = Some(rt_id);
+                self.gpu_layers = layers as i32;
+            }
+        }
+        self
+    }
 }
 fn path_text(p:&Path)->String{p.to_string_lossy().into_owned()}
 fn executable(backends:&[FoundBackend],id:BackendId)->Option<PathBuf>{
@@ -119,11 +139,13 @@ fn precisions_for(input:&OptimizeWorkflowRequest)->Vec<Precision>{
             match input.goal{
                 OptimizeGoal::Smallest=>vec![Precision::IQ3M,Precision::Q3KM,Precision::Q4KM,Precision::Q5KM],
                 OptimizeGoal::Balanced=>vec![Precision::Q4KM,Precision::Q5KM,Precision::IQ4XS,Precision::Q3KL],
+                OptimizeGoal::MaximumQuality=>vec![Precision::Q5KM,Precision::Q4KM,Precision::IQ4XS],
                 OptimizeGoal::Fastest=>vec![Precision::Q4KM,Precision::Q5KM,Precision::Q3KM],
             }
         }else{match input.goal{
             OptimizeGoal::Smallest=>vec![Precision::IQ3M,Precision::Q3KM,Precision::Q3KL,Precision::IQ4XS],
             OptimizeGoal::Balanced=>vec![Precision::IQ4XS,Precision::Q3KL,Precision::IQ3M,Precision::Q3KM],
+            OptimizeGoal::MaximumQuality=>vec![Precision::IQ4XS,Precision::Q3KL,Precision::Q3KM],
             OptimizeGoal::Fastest=>vec![Precision::Q3KM,Precision::Q3KL,Precision::IQ4XS,Precision::IQ3M],
         }}
     })
@@ -153,10 +175,10 @@ fn configured_options(input:&OptimizeWorkflowRequest,backends:&[FoundBackend])->
 pub fn plan_optimize_workflow(
     input:&OptimizeWorkflowRequest,backends:&[FoundBackend],
 )->io::Result<Value>{
-    if !matches!(input.device.as_str(),"auto"|"cpu"|"cuda"|"xpu"){
-        return Err(invalid("device must be auto, cpu, cuda or xpu"));
+    if !matches!(input.device.as_str(),"auto"|"cpu"|"cuda"|"xpu"|"vulkan"){
+        return Err(invalid("device must be auto, cpu, cuda, xpu or vulkan"));
     }
-    let gpu_target=matches!(input.device.as_str(),"cuda"|"xpu");
+    let gpu_target=matches!(input.device.as_str(),"cuda"|"xpu"|"vulkan");
     if gpu_target{
         if !(1..=512).contains(&input.gpu_layers){
             return Err(invalid("GPU optimization requires explicit --gpu-layers 1..512"));
@@ -489,9 +511,13 @@ pub fn plan_optimize_workflow(
     }
     // NOTE: .ojonq, EXL3, OpenVINO, and VLM are excluded until
     // an exact tested model-family+runtime recipe exists.
+    let model_topology=if probe.format=="gguf"{
+        crate::gguf::inspect_model_topology(&source).map(|t|t.as_json()).unwrap_or(Value::Null)
+    }else{Value::Null};
     Ok(json!({
         "schema":"ojon.optimize_workflow.v1",
         "model":probe.as_json(),
+        "model_topology":model_topology,
         "current_baseline":base_text,
         "heldout_suite":suite.map(|p|path_text(&p)),
         "calibration_imatrix":input.imatrix.as_ref().map(|p|path_text(p)),
@@ -565,7 +591,7 @@ pub fn run_optimize_workflow(
         .or(default_out.as_ref())
         .ok_or_else(|| invalid("an existing output directory is mandatory"))?;
     let mut options=configured_options(request,backends);
-    let gpu_target=matches!(request.device.as_str(),"cuda"|"xpu");
+    let gpu_target=matches!(request.device.as_str(),"cuda"|"xpu"|"vulkan");
     // Metadata-only planning never runs local binaries. Once approved, query
     // the EXACT executable we will call; no vendor-to-device-ID guessing.
     let runtime_device_evidence=if gpu_target{
@@ -757,12 +783,18 @@ pub fn run_optimize_workflow(
         benchmark_results.iter().find(|b|b["path"]==path).cloned()
             .unwrap_or(json!({"status":"NOT_RUN_LLAMA_BENCH_UNAVAILABLE"}))
     }else{json!({"status":"NO_SELECTED_CANDIDATE"})};
+    let selected_candidate_topology=candidate["path"].as_str()
+        .and_then(|p|crate::gguf::inspect_model_topology(Path::new(p)).ok())
+        .map(|t|t.as_json())
+        .unwrap_or(Value::Null);
     Ok(json!({
         "schema":"ojon.optimize_workflow_result.v1",
         "mode":if gpu_target{"user_confirmed_explicit_gpu"}else{"user_confirmed_cpu_only"},
         "route":kind,
         "status":if candidate.is_null(){"NO_CANDIDATE_PASSED"}else{"PROVISIONAL_CANDIDATE_FOUND"},
         "model_source":request.model.to_string_lossy(),
+        "model_topology":decision["model_topology"],
+        "selected_candidate_topology":selected_candidate_topology,
         "goal":request.goal.label(),
         "quality_reference":decision["current_baseline"],
         "evaluation_engine":if options.server_tool.is_some(){"persistent_llama_server"}else{"llama_cli_per_task"},

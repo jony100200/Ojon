@@ -248,6 +248,9 @@ pub fn select_workflow_goal_with_ratio(
     }
     if loadable.is_empty(){return (Value::Null,"no_loadable_quality_passing_candidate");}
     if goal=="smallest"{return (loadable[0].clone(),"smallest_quality_passing_loadable");}
+    if goal=="maximum_quality"||goal=="max_quality"||goal=="quality"{
+        return (loadable.last().cloned().unwrap_or(Value::Null),"highest_precision_quality_passing_loadable");
+    }
     let measured:Vec<(&Value,f64)>=benchmarks.iter().filter_map(|bench|{
         if bench["status"]!="MEASURED"{return None;}
         let speed=bench["metrics"]["token_generation"]["tokens_per_second"].as_f64()?;

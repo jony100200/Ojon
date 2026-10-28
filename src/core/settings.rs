@@ -185,11 +185,11 @@ impl LocalSettings{
         Ok(result)
     }
     pub fn validate(&self)->io::Result<()>{
-        if !matches!(self.optimization_goal.as_str(),"smallest"|"balanced"|"fastest"){
-            return Err(invalid("goal must be smallest/balanced/fastest"));
+        if !matches!(self.optimization_goal.as_str(),"smallest"|"balanced"|"fastest"|"maximum_quality"){
+            return Err(invalid("goal must be smallest/balanced/maximum_quality/fastest"));
         }
-        if !matches!(self.preferred_device.as_str(),"auto"|"cpu"|"cuda"|"xpu"){
-            return Err(invalid("device must be auto/cpu/cuda/xpu"));
+        if !matches!(self.preferred_device.as_str(),"auto"|"cpu"|"cuda"|"xpu"|"vulkan"){
+            return Err(invalid("device must be auto/cpu/cuda/xpu/vulkan"));
         }
         if !self.min_saving_percent.is_finite()||!(0.0..=95.0).contains(&self.min_saving_percent)
             ||!self.max_loss_points.is_finite()||!(0.0..=100.0).contains(&self.max_loss_points)
@@ -383,10 +383,13 @@ pub fn save_to_path(path:&Path,settings:&LocalSettings)->io::Result<()>{
 #[cfg(test)]
 mod tests{
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TEST_SEQ: AtomicU64 = AtomicU64::new(0);
     fn fixture()->PathBuf{
-        std::env::temp_dir().join(format!("ojon-settings-test-{}-{}",
+        let seq = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("ojon-settings-test-{}-{}-{}",
             std::process::id(),SystemTime::now().duration_since(UNIX_EPOCH)
-                .unwrap().as_nanos())).join("settings.json")
+                .unwrap().as_nanos(), seq)).join("settings.json")
     }
     #[test]
     fn first_launch_and_atomic_roundtrip(){

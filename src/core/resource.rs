@@ -233,20 +233,47 @@ fn nvidia_devices() -> Vec<Value> {
     result
 }
 
-fn llama_device_telemetry(vendor_filter: &str) -> Vec<Value> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeGpuDevice {
+    pub runtime_id: String,
+    pub vendor: String,
+    pub name: String,
+    pub total_vram_bytes: u64,
+    pub free_vram_bytes: u64,
+    pub is_integrated: bool,
+    pub telemetry_source: String,
+}
+
+pub fn is_integrated_gpu_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("radeon(tm) graphics")
+        || lower.contains("uhd graphics")
+        || lower.contains("iris(r) xe")
+        || lower.contains("microsoft basic render")
+        || lower.contains("llvmpipe")
+}
+
+pub fn discover_runtime_gpu_devices() -> Vec<RuntimeGpuDevice> {
     let mut out = Vec::new();
     let candidates = [
-        crate::discovery::discovered_path(crate::discovery::BackendId::IntelSyclCli),
         crate::discovery::discovered_path(crate::discovery::BackendId::LlamaCli),
+        crate::discovery::discovered_path(crate::discovery::BackendId::IntelSyclCli),
     ];
     for path in candidates.into_iter().flatten() {
         if let Ok(output) = Command::new(&path).arg("--list-devices").output() {
             if output.status.success() {
                 if let Ok(text) = String::from_utf8(output.stdout) {
+                    let source = format!(
+                        "{} --list-devices",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    );
                     for line in text.lines() {
                         let line = line.trim();
                         let Some((id_part, desc_part)) = line.split_once(':') else { continue; };
                         let id = id_part.trim();
+                        if !(id.starts_with("Vulkan") || id.starts_with("CUDA") || id.starts_with("SYCL") || id.starts_with("Metal") || id.starts_with("ROCm")) {
+                            continue;
+                        }
                         let desc = desc_part.trim();
                         let Some((name, mem_part)) = desc.split_once('(') else { continue; };
                         let name = name.trim();
@@ -263,18 +290,21 @@ fn llama_device_telemetry(vendor_filter: &str) -> Vec<Value> {
                                     "intel"
                                 } else if lower.contains("nvidia") || lower.contains("geforce") || lower.contains("rtx") || id.starts_with("CUDA") {
                                     "nvidia"
+                                } else if lower.contains("amd") || lower.contains("radeon") {
+                                    "amd"
                                 } else {
                                     "other"
                                 };
-                                if vendor == vendor_filter && !out.iter().any(|v: &Value| v["device_name"] == name) {
-                                    out.push(json!({
-                                        "vendor": vendor,
-                                        "device_id": id,
-                                        "device_name": name,
-                                        "total_vram_bytes": total_bytes,
-                                        "free_vram_bytes": free_bytes,
-                                        "telemetry_source": format!("{} --list-devices", path.file_name().unwrap_or_default().to_string_lossy()),
-                                    }));
+                                if !out.iter().any(|d: &RuntimeGpuDevice| d.runtime_id == id) {
+                                    out.push(RuntimeGpuDevice {
+                                        runtime_id: id.to_string(),
+                                        vendor: vendor.to_string(),
+                                        name: name.to_string(),
+                                        total_vram_bytes: total_bytes,
+                                        free_vram_bytes: free_bytes,
+                                        is_integrated: is_integrated_gpu_name(name),
+                                        telemetry_source: source.clone(),
+                                    });
                                 }
                             }
                         }
@@ -284,6 +314,80 @@ fn llama_device_telemetry(vendor_filter: &str) -> Vec<Value> {
         }
         if !out.is_empty() {
             break;
+        }
+    }
+    out
+}
+
+/// Automatically resolves the best discrete runtime device when `preferred_device`
+/// is `"auto"` (or a vendor/backend family without a manual `runtime_device` ID).
+/// Never selects shared-RAM integrated GPUs automatically.
+pub fn resolve_auto_runtime_device(
+    preferred_device: &str,
+    explicit_runtime_device: Option<&str>,
+    explicit_gpu_layers: u32,
+) -> (String, Option<String>, u32) {
+    if preferred_device.eq_ignore_ascii_case("cpu") {
+        return ("cpu".to_string(), None, 0);
+    }
+    if let Some(rt) = explicit_runtime_device.map(str::trim).filter(|s| !s.is_empty()) {
+        let dev_family = if preferred_device == "auto" {
+            if rt.starts_with("Vulkan") {
+                "vulkan"
+            } else if rt.starts_with("SYCL") {
+                "xpu"
+            } else if rt.starts_with("CUDA") {
+                "cuda"
+            } else {
+                "vulkan"
+            }
+        } else {
+            preferred_device
+        };
+        let layers = if explicit_gpu_layers == 0 { 99 } else { explicit_gpu_layers };
+        return (dev_family.to_string(), Some(rt.to_string()), layers);
+    }
+    let devices = discover_runtime_gpu_devices();
+    let best = devices
+        .into_iter()
+        .filter(|d| !d.is_integrated)
+        .filter(|d| match preferred_device {
+            "cuda" => d.vendor == "nvidia" || d.runtime_id.starts_with("CUDA"),
+            "xpu" => d.vendor == "intel" || d.runtime_id.starts_with("SYCL"),
+            "vulkan" => d.runtime_id.starts_with("Vulkan"),
+            _ => true,
+        })
+        .max_by_key(|d| d.free_vram_bytes);
+    if let Some(chosen) = best {
+        let family = if chosen.runtime_id.starts_with("Vulkan") {
+            if preferred_device == "auto" { "vulkan" } else { preferred_device }
+        } else if chosen.vendor == "intel" {
+            "xpu"
+        } else if chosen.vendor == "nvidia" {
+            "cuda"
+        } else {
+            "vulkan"
+        };
+        let layers = if explicit_gpu_layers == 0 { 99 } else { explicit_gpu_layers };
+        (family.to_string(), Some(chosen.runtime_id), layers)
+    } else {
+        ("cpu".to_string(), None, 0)
+    }
+}
+
+fn llama_device_telemetry(vendor_filter: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for dev in discover_runtime_gpu_devices() {
+        if dev.vendor == vendor_filter && !out.iter().any(|v: &Value| v["device_name"] == dev.name) {
+            out.push(json!({
+                "vendor": dev.vendor,
+                "device_id": dev.runtime_id,
+                "device_name": dev.name,
+                "total_vram_bytes": dev.total_vram_bytes,
+                "free_vram_bytes": dev.free_vram_bytes,
+                "is_integrated": dev.is_integrated,
+                "telemetry_source": dev.telemetry_source,
+            }));
         }
     }
     out
@@ -359,8 +463,8 @@ fn budget(source_bytes: u64, mode: ResourceMode) -> io::Result<(Option<u64>, u64
 pub fn assess_resources(
     source_bytes: u64, output_parent: &Path, mode: ResourceMode, device: &str
 ) -> io::Result<ResourceAssessment> {
-    if !matches!(device, "cpu" | "cuda" | "xpu" | "auto") {
-        return Err(invalid("device must be cpu, cuda, xpu, auto"));
+    if !matches!(device, "cpu" | "cuda" | "xpu" | "vulkan" | "auto") {
+        return Err(invalid("device must be cpu, cuda, xpu, vulkan, auto"));
     }
     let parent = output_parent.canonicalize()?;
     if !parent.is_dir() { return Err(invalid("output parent is not a directory")); }
@@ -369,10 +473,32 @@ pub fn assess_resources(
     let free_volume = free_disk(&parent);
     let mut gpu_devices = nvidia_devices();
     gpu_devices.extend(xpu_devices());
+    for rt_dev in discover_runtime_gpu_devices() {
+        if !gpu_devices.iter().any(|d| d["device_name"] == rt_dev.name) {
+            gpu_devices.push(json!({
+                "vendor": rt_dev.vendor,
+                "device_id": rt_dev.runtime_id,
+                "device_name": rt_dev.name,
+                "total_vram_bytes": rt_dev.total_vram_bytes,
+                "free_vram_bytes": rt_dev.free_vram_bytes,
+                "is_integrated": rt_dev.is_integrated,
+                "telemetry_source": rt_dev.telemetry_source,
+            }));
+        } else if let Some(existing) = gpu_devices.iter_mut().find(|d| d["device_name"] == rt_dev.name) {
+            if existing.get("device_id").is_none() {
+                existing["device_id"] = json!(rt_dev.runtime_id);
+            }
+            existing["is_integrated"] = json!(rt_dev.is_integrated);
+        }
+    }
     let device_measured = match device {
         "cpu" => true,
         "cuda" => gpu_devices.iter().any(|d| d["vendor"] == "nvidia" && d["free_vram_bytes"].as_u64().is_some()),
         "xpu" => gpu_devices.iter().any(|d| d["vendor"] == "intel" && d["free_vram_bytes"].as_u64().is_some()),
+        "vulkan" => gpu_devices.iter().any(|d| {
+            d["device_id"].as_str().is_some_and(|id| id.starts_with("Vulkan"))
+                && d["free_vram_bytes"].as_u64().is_some()
+        }),
         // Auto-routing requires a selected physical device; enumeration alone is insufficient.
         "auto" => false,
         _ => false,

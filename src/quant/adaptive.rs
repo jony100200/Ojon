@@ -119,46 +119,337 @@ pub fn parse_tensor_sensitivity(source:&Path, file:&Path)->io::Result<Vec<Tensor
     Ok(scores)
 }
 
-/// Greedy measured-importance allocation under a weighted bits-per-weight
-/// budget for the selected tensors; NOT total model BPW or predicted output size.
-pub fn allocate_bits(scores:&[TensorScore],target:f64)->io::Result<Value>{
-    if scores.is_empty()||!target.is_finite()||!(BPW[0]..=BPW[4]).contains(&target){
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AllocationStrategy {
+    GreedySensitivity,
+    RcoLagrangian,
+    LearnedRoleAware,
+}
+
+impl AllocationStrategy {
+    pub fn parse(s: &str) -> io::Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "greedy" | "greedy_sensitivity" => Ok(Self::GreedySensitivity),
+            "rco" | "rco_lagrangian" | "lagrangian" => Ok(Self::RcoLagrangian),
+            "learned" | "learned_role_aware" | "shapelearn" => Ok(Self::LearnedRoleAware),
+            _ => Err(invalid("strategy must be greedy, rco, or learned")),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::GreedySensitivity => "greedy_sensitivity",
+            Self::RcoLagrangian => "rco_lagrangian",
+            Self::LearnedRoleAware => "learned_role_aware",
+        }
+    }
+}
+
+fn tensor_role_multiplier(name: &str, max_block: usize) -> (f64, usize) {
+    let mut mult = 1.0;
+    let mut min_level = 0usize; // 0 = q2_k, 1 = q3_k, 2 = q4_k, 3 = q5_k, 4 = q6_k
+    if name.contains("_shexp") || name.contains("shared_expert") {
+        mult *= 2.4;
+        min_level = 2; // at least q4_k when budget allows
+    } else if name.contains("attn_v") || name.contains("attn_output") || name.contains("ssm_out") {
+        mult *= 1.85;
+        min_level = 1;
+    } else if name.contains("attn_q") || name.contains("attn_k") {
+        mult *= 1.45;
+        min_level = 1;
+    } else if name.contains("ffn_down") && !name.contains("_exps") {
+        mult *= 1.35;
+    } else if name.contains("_exps") {
+        mult *= 0.85;
+    }
+    if let Some(rest) = name.strip_prefix("blk.") {
+        if let Some(dot) = rest.find('.') {
+            if let Ok(blk) = rest[..dot].parse::<usize>() {
+                // Boundary blocks (first 2 and last 2) carry higher representation sensitivity
+                if blk < 2 || (max_block > 4 && blk + 2 >= max_block) {
+                    mult *= 1.35;
+                    min_level = min_level.max(1);
+                }
+            }
+        }
+    }
+    (mult, min_level)
+}
+
+pub fn allocate_bits_with_strategy(
+    scores: &[TensorScore],
+    target: f64,
+    strategy: AllocationStrategy,
+) -> io::Result<Value> {
+    if scores.is_empty() || !target.is_finite() || !(BPW[0]..=BPW[4]).contains(&target) {
         return Err(invalid("target must be in 2.5625..=6.5625 BPW with nonempty scores"));
     }
-    let total=scores.iter().try_fold(0u64,|a,v|a.checked_add(v.elements))
-        .ok_or_else(||invalid("total tensor elements overflow"))?;
-    if total==0{return Err(invalid("empty tensors"));}
-    let mut levels=vec![0usize;scores.len()];
-    let budget=total as f64*target;
-    let mut current=total as f64*BPW[0];
-    for _ in 0..(4*scores.len()){
-        let mut best:Option<(usize,f64)>=None;
-        for (i,t) in scores.iter().enumerate(){
-            let level=levels[i];if level+1>=BPW.len(){continue;}
-            let incremental=t.elements as f64*(BPW[level+1]-BPW[level]);
-            if current+incremental>budget+0.0001 {continue;}
-            // Diminishing quality gains for each successive precision upgrade.
-            let prev_error=(-BPW[level]).exp();
-            let next_error=(-BPW[level+1]).exp();
-            let gain=t.sensitivity*(prev_error-next_error)/(BPW[level+1]-BPW[level]);
-            if best.as_ref().is_none_or(|(_,s)|gain>*s){best=Some((i,gain));}
-        }
-        let Some((index,_))=best else{break;};
-        let level=levels[index];
-        current+=scores[index].elements as f64*(BPW[level+1]-BPW[level]);
-        levels[index]+=1;
+    let total = scores
+        .iter()
+        .try_fold(0u64, |a, v| a.checked_add(v.elements))
+        .ok_or_else(|| invalid("total tensor elements overflow"))?;
+    if total == 0 {
+        return Err(invalid("empty tensors"));
     }
-    let assignments=scores.iter().enumerate().map(|(i,t)|json!({
-        "name":t.name,"elements":t.elements,"sensitivity":t.sensitivity,
-        "type":TYPES[levels[i]],"nominal_bpw":BPW[levels[i]]
-    })).collect::<Vec<_>>();
+    let max_block = scores
+        .iter()
+        .filter_map(|t| {
+            t.name
+                .strip_prefix("blk.")
+                .and_then(|r| r.split('.').next())
+                .and_then(|s| s.parse::<usize>().ok())
+        })
+        .max()
+        .map_or(0, |m| m + 1);
+
+    let budget = total as f64 * target;
+    let mut levels = vec![0usize; scores.len()];
+    let mut current = total as f64 * BPW[0];
+
+    match strategy {
+        AllocationStrategy::GreedySensitivity => {
+            for _ in 0..(4 * scores.len()) {
+                let mut best: Option<(usize, f64)> = None;
+                for (i, t) in scores.iter().enumerate() {
+                    let level = levels[i];
+                    if level + 1 >= BPW.len() {
+                        continue;
+                    }
+                    let incremental = t.elements as f64 * (BPW[level + 1] - BPW[level]);
+                    if current + incremental > budget + 0.0001 {
+                        continue;
+                    }
+                    let prev_error = (-BPW[level]).exp();
+                    let next_error = (-BPW[level + 1]).exp();
+                    let gain = t.sensitivity * (prev_error - next_error) / (BPW[level + 1] - BPW[level]);
+                    if best.as_ref().is_none_or(|(_, s)| gain > *s) {
+                        best = Some((i, gain));
+                    }
+                }
+                let Some((index, _)) = best else { break };
+                let level = levels[index];
+                current += scores[index].elements as f64 * (BPW[level + 1] - BPW[level]);
+                levels[index] += 1;
+            }
+        }
+        AllocationStrategy::RcoLagrangian => {
+            // RCO rate-distortion model: D_i(b) = Omega_i * 2^(-2*b)
+            // First solve Lagrangian relaxation via bisection on lambda > 0:
+            // argmin_l [ Omega_i * 2^(-2 * BPW[l]) + lambda * BPW[l] ]
+            let omegas: Vec<(f64, usize)> = scores
+                .iter()
+                .map(|t| {
+                    let (mult, min_lvl) = tensor_role_multiplier(&t.name, max_block);
+                    ((t.sensitivity.max(1e-4)).powf(1.25) * mult, min_lvl)
+                })
+                .collect();
+
+            let mut lo = 1e-9f64;
+            let mut hi = 10.0f64;
+            for _ in 0..48 {
+                let mid = 0.5 * (lo + hi);
+                let mut trial_bits = 0.0f64;
+                for (i, t) in scores.iter().enumerate() {
+                    let (omega, min_lvl) = omegas[i];
+                    let floor = if target >= 3.8 { min_lvl } else { 0 };
+                    let mut best_l = floor;
+                    let mut best_obj = f64::INFINITY;
+                    for l in floor..BPW.len() {
+                        let b = BPW[l];
+                        let obj = omega * (-2.0 * std::f64::consts::LN_2 * b).exp() + mid * b;
+                        if obj < best_obj {
+                            best_obj = obj;
+                            best_l = l;
+                        }
+                    }
+                    trial_bits += t.elements as f64 * BPW[best_l];
+                }
+                if trial_bits > budget {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            // Assign at conservative `hi` so total bits <= budget
+            current = 0.0;
+            for (i, t) in scores.iter().enumerate() {
+                let (omega, min_lvl) = omegas[i];
+                let floor = if target >= 3.8 { min_lvl } else { 0 };
+                let mut best_l = floor;
+                let mut best_obj = f64::INFINITY;
+                for l in floor..BPW.len() {
+                    let b = BPW[l];
+                    let obj = omega * (-2.0 * std::f64::consts::LN_2 * b).exp() + hi * b;
+                    if obj < best_obj {
+                        best_obj = obj;
+                        best_l = l;
+                    }
+                }
+                levels[i] = best_l;
+                current += t.elements as f64 * BPW[best_l];
+            }
+            // If floors pushed current above budget, step down least sensitive first
+            while current > budget + 0.0001 {
+                let mut worst: Option<(usize, f64)> = None;
+                for (i, _t) in scores.iter().enumerate() {
+                    let l = levels[i];
+                    if l == 0 {
+                        continue;
+                    }
+                    let (omega, _) = omegas[i];
+                    let d_cur = omega * (-2.0 * std::f64::consts::LN_2 * BPW[l]).exp();
+                    let d_prev = omega * (-2.0 * std::f64::consts::LN_2 * BPW[l - 1]).exp();
+                    let penalty_per_bit = (d_prev - d_cur) / (BPW[l] - BPW[l - 1]);
+                    if worst.as_ref().is_none_or(|(_, p)| penalty_per_bit < *p) {
+                        worst = Some((i, penalty_per_bit));
+                    }
+                }
+                let Some((idx, _)) = worst else { break };
+                let l = levels[idx];
+                current -= scores[idx].elements as f64 * (BPW[l] - BPW[l - 1]);
+                levels[idx] -= 1;
+            }
+            // Polish remaining slack with marginal RCO distortion reduction
+            for _ in 0..(4 * scores.len()) {
+                let mut best: Option<(usize, f64)> = None;
+                for (i, t) in scores.iter().enumerate() {
+                    let l = levels[i];
+                    if l + 1 >= BPW.len() {
+                        continue;
+                    }
+                    let inc = t.elements as f64 * (BPW[l + 1] - BPW[l]);
+                    if current + inc > budget + 0.0001 {
+                        continue;
+                    }
+                    let (omega, _) = omegas[i];
+                    let d_cur = omega * (-2.0 * std::f64::consts::LN_2 * BPW[l]).exp();
+                    let d_next = omega * (-2.0 * std::f64::consts::LN_2 * BPW[l + 1]).exp();
+                    let gain = (d_cur - d_next) / (BPW[l + 1] - BPW[l]);
+                    if best.as_ref().is_none_or(|(_, g)| gain > *g) {
+                        best = Some((i, gain));
+                    }
+                }
+                let Some((idx, _)) = best else { break };
+                let l = levels[idx];
+                current += scores[idx].elements as f64 * (BPW[l + 1] - BPW[l]);
+                levels[idx] += 1;
+            }
+        }
+        AllocationStrategy::LearnedRoleAware => {
+            // ShapeLearn / AutoScheme-inspired role & position-aware coordinate optimization
+            let weights: Vec<f64> = scores
+                .iter()
+                .map(|t| {
+                    let (mult, _) = tensor_role_multiplier(&t.name, max_block);
+                    (0.35 + 0.65 * t.sensitivity) * mult
+                })
+                .collect();
+            for _ in 0..(4 * scores.len()) {
+                let mut best: Option<(usize, f64)> = None;
+                for (i, t) in scores.iter().enumerate() {
+                    let l = levels[i];
+                    if l + 1 >= BPW.len() {
+                        continue;
+                    }
+                    let inc = t.elements as f64 * (BPW[l + 1] - BPW[l]);
+                    if current + inc > budget + 0.0001 {
+                        continue;
+                    }
+                    let prev_err = (-1.6 * BPW[l]).exp();
+                    let next_err = (-1.6 * BPW[l + 1]).exp();
+                    let gain = weights[i] * (prev_err - next_err) / (BPW[l + 1] - BPW[l]);
+                    if best.as_ref().is_none_or(|(_, g)| gain > *g) {
+                        best = Some((i, gain));
+                    }
+                }
+                let Some((idx, _)) = best else { break };
+                let l = levels[idx];
+                current += scores[idx].elements as f64 * (BPW[l + 1] - BPW[l]);
+                levels[idx] += 1;
+            }
+        }
+    }
+
+    let mut distortion_proxy = 0.0f64;
+    for (i, t) in scores.iter().enumerate() {
+        let (mult, _) = tensor_role_multiplier(&t.name, max_block);
+        let w = t.elements as f64 / total as f64;
+        distortion_proxy += w * t.sensitivity * mult * (-2.0 * std::f64::consts::LN_2 * BPW[levels[i]]).exp();
+    }
+
+    let assignments = scores
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            json!({
+                "name": t.name,
+                "elements": t.elements,
+                "sensitivity": t.sensitivity,
+                "type": TYPES[levels[i]],
+                "nominal_bpw": BPW[levels[i]]
+            })
+        })
+        .collect::<Vec<_>>();
     Ok(json!({
-        "schema":"ojon.tensor_allocation.v1","target_measured_tensor_bpw":target,
-        "estimated_measured_tensor_bpw":current/total as f64,
-        "scored_tensor_count":scores.len(),"scored_weight_elements":total,
-        "assignments":assignments,
-        "warning":"Size estimate covers only listed tensors; actual GGUF size, group overhead, fallback types and runtime must be measured."
+        "schema": "ojon.tensor_allocation.v1",
+        "strategy": strategy.name(),
+        "target_measured_tensor_bpw": target,
+        "estimated_measured_tensor_bpw": current / total as f64,
+        "rate_distortion_proxy": distortion_proxy,
+        "scored_tensor_count": scores.len(),
+        "scored_weight_elements": total,
+        "assignments": assignments,
+        "warning": "Size estimate covers only listed tensors; actual GGUF size, group overhead, fallback types and runtime must be measured."
     }))
+}
+
+/// Greedy measured-importance allocation under a weighted bits-per-weight
+/// budget for the selected tensors; NOT total model BPW or predicted output size.
+pub fn allocate_bits(scores: &[TensorScore], target: f64) -> io::Result<Value> {
+    allocate_bits_with_strategy(scores, target, AllocationStrategy::GreedySensitivity)
+}
+
+/// Compare greedy, RCO-style Lagrangian, and learned role-aware allocation strategies
+/// under the same target bit budget.
+pub fn compare_allocation_strategies(scores: &[TensorScore], target: f64) -> io::Result<Value> {
+    let greedy = allocate_bits_with_strategy(scores, target, AllocationStrategy::GreedySensitivity)?;
+    let rco = allocate_bits_with_strategy(scores, target, AllocationStrategy::RcoLagrangian)?;
+    let learned = allocate_bits_with_strategy(scores, target, AllocationStrategy::LearnedRoleAware)?;
+    let strategies = vec![greedy, rco, learned];
+    let best_strategy = strategies
+        .iter()
+        .min_by(|a, b| {
+            let da = a["rate_distortion_proxy"].as_f64().unwrap_or(f64::INFINITY);
+            let db = b["rate_distortion_proxy"].as_f64().unwrap_or(f64::INFINITY);
+            da.total_cmp(&db)
+        })
+        .and_then(|v| v["strategy"].as_str())
+        .unwrap_or("rco_lagrangian")
+        .to_string();
+    Ok(json!({
+        "schema": "ojon.strategy_comparison.v1",
+        "target_bpw": target,
+        "lowest_distortion_strategy": best_strategy,
+        "strategies": strategies,
+    }))
+}
+
+/// Generate a protective `--tensor-type-file` tail that preserves sensitive
+/// embeddings, output head, MoE routers, and shared experts when present.
+pub fn sensitive_spine_pinning_recipe(tensors: &[crate::gguf::GgufTensor]) -> String {
+    let mut extra = crate::llama::moe_router_pinning_recipe(tensors).unwrap_or_default();
+    for t in tensors {
+        if (t.name == "token_embd.weight" || t.name == "output.weight" || t.name.contains("_shexp.weight"))
+            && t.shape.len() >= 2
+            && t.shape[0] % 256 == 0
+        {
+            let rule = format!("{}=q6_k\n", regex_literal(&t.name));
+            if !extra.contains(&rule) {
+                extra.push_str(&rule);
+            }
+        }
+    }
+    extra
 }
 
 pub fn prepare_adaptive(
@@ -276,8 +567,8 @@ pub fn run_adaptive(plan:&AdaptivePlan,mut log:impl FnMut(&str))->io::Result<Val
         .map_err(|_|invalid("system time invalid"))?.as_nanos();
     let session=format!("ojon-adaptive-{}-{started}",std::process::id());
     let suite_id=crate::task_eval::parse_eval_suite(&plan.suite)?.id;
-    let router_recipe=crate::llama::moe_router_pinning_recipe(
-        &crate::gguf::inspect_gguf_tensors(&plan.source)?).unwrap_or_default();
+    let source_tensors=crate::gguf::inspect_gguf_tensors(&plan.source)?;
+    let router_recipe=sensitive_spine_pinning_recipe(&source_tensors);
     let mut rows=Vec::new();
     let mut best:Option<(String,u64)>=None;
     let mut baseline_tasks:Option<Value>=None;
@@ -287,7 +578,10 @@ pub fn run_adaptive(plan:&AdaptivePlan,mut log:impl FnMut(&str))->io::Result<Val
         let output=plan.output_dir.join(format!("{prefix}.gguf"));
         let recipe=plan.output_dir.join(format!("{prefix}.tensor-types.txt"));
         let evidence=plan.output_dir.join(format!("{prefix}.quality.json"));
-        let alloc=allocate_bits(&plan.scores,*target)?;
+        let strategy_cmp=compare_allocation_strategies(&plan.scores,*target)?;
+        let best_strat_name=strategy_cmp["lowest_distortion_strategy"].as_str().unwrap_or("rco_lagrangian");
+        let chosen_strategy=AllocationStrategy::parse(best_strat_name).unwrap_or(AllocationStrategy::RcoLagrangian);
+        let alloc=allocate_bits_with_strategy(&plan.scores,*target,chosen_strategy)?;
         // Resume: reuse an existing verified candidate instead of re-quantizing.
         let reusable=match crate::quant_parity::verify_reusable_candidate(&plan.source,&output){
             Ok(reusable)=>reusable,
@@ -302,7 +596,7 @@ pub fn run_adaptive(plan:&AdaptivePlan,mut log:impl FnMut(&str))->io::Result<Val
             bytes
         }else{
             write_recipe(&recipe,&alloc,&router_recipe)?;
-            log(&format!("[ojon] quantizing tensor budget {:.3} BPW",target));
+            log(&format!("[ojon] quantizing tensor budget {:.3} BPW using strategy {}",target,chosen_strategy.name()));
             let converted=(||{
                 let mut q=prepare_gguf(&plan.source,&output,&plan.quantizer,Precision::Q4KM,plan.threads)?
                     .with_tensor_type_file(&recipe)?;
@@ -318,6 +612,9 @@ pub fn run_adaptive(plan:&AdaptivePlan,mut log:impl FnMut(&str))->io::Result<Val
                 Ok(done)=>done.output_info.file_bytes,
             }
         };
+        let topology_json=crate::gguf::inspect_model_topology(&output)
+            .map(|t|t.as_json())
+            .unwrap_or(Value::Null);
         let prior=match crate::quant_parity::verify_prior_evidence(&evidence,
             &plan.reference,&suite_id,&label,&output){
             Ok(prior)=>prior,
@@ -362,7 +659,12 @@ pub fn run_adaptive(plan:&AdaptivePlan,mut log:impl FnMut(&str))->io::Result<Val
                     best=Some((output.to_string_lossy().to_string(),size));
                 }
                 rows.push(json!({"target":target,"status":"measured_task_suite",
-                    "output":output.to_string_lossy(),"bytes":size,"task_quality_pass":passes,
+                    "strategy":chosen_strategy.name(),
+                    "strategy_comparison":strategy_cmp,
+                    "output":output.to_string_lossy(),"bytes":size,
+                    "effective_bpw":topology_json["effective_bpw"],
+                    "artifact_topology":topology_json,
+                    "task_quality_pass":passes,
                     "resumed_quantization":reusable.is_some(),
                     "resumed_task_evidence":prior_used,
                     "moe_router_pinned":!router_recipe.is_empty(),
@@ -400,6 +702,18 @@ mod tests{
         assert!(bpw<=3.4375+1e-8&&bpw>2.5625);
         assert!(allocate_bits(&scores,1.0).is_err());
         assert!(allocate_bits(&scores,f64::NAN).is_err());
+    }
+    #[test]
+    fn rco_and_learned_strategies_respect_budget_and_compare(){
+        let scores=sample();
+        let cmp=compare_allocation_strategies(&scores,4.0).unwrap();
+        assert_eq!(cmp["schema"],"ojon.strategy_comparison.v1");
+        let strats=cmp["strategies"].as_array().unwrap();
+        assert_eq!(strats.len(),3);
+        for s in strats{
+            let bpw=s["estimated_measured_tensor_bpw"].as_f64().unwrap();
+            assert!(bpw<=4.0+1e-6 && bpw>=2.5625);
+        }
     }
     #[test]
     fn escape_tensor_regex(){

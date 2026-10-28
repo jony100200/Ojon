@@ -4,9 +4,283 @@
 //! a *container/catalog check*, NOT inference, tensor checksum, or quality QA.
 //! v2 little-endian and v3 little-/big-endian headers are supported.
 
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
+
+pub fn ggml_type_name(storage_type: u32) -> &'static str {
+    match storage_type {
+        0 => "F32",
+        1 => "F16",
+        2 => "Q4_0",
+        3 => "Q4_1",
+        6 => "Q5_0",
+        7 => "Q5_1",
+        8 => "Q8_0",
+        9 => "Q8_1",
+        10 => "Q2_K",
+        11 => "Q3_K",
+        12 => "Q4_K",
+        13 => "Q5_K",
+        14 => "Q6_K",
+        15 => "Q8_K",
+        16 => "IQ2_XXS",
+        17 => "IQ2_XS",
+        18 => "IQ3_XXS",
+        19 => "IQ1_S",
+        20 => "IQ4_NL",
+        21 => "IQ3_S",
+        22 => "IQ2_S",
+        23 => "IQ4_XS",
+        24 => "I8",
+        25 => "I16",
+        26 => "I32",
+        27 => "I64",
+        28 => "F64",
+        29 => "IQ1_M",
+        30 => "BF16",
+        34 => "TQ1_0",
+        35 => "TQ2_0",
+        39 => "MXFP4",
+        _ => "UNKNOWN",
+    }
+}
+
+/// Returns `(block_elements, block_bytes)` for standard GGML storage types.
+pub fn ggml_type_block_info(storage_type: u32) -> Option<(u64, u64)> {
+    match storage_type {
+        0 => Some((1, 4)),     // F32
+        1 => Some((1, 2)),     // F16
+        2 => Some((32, 18)),   // Q4_0
+        3 => Some((32, 20)),   // Q4_1
+        6 => Some((32, 22)),   // Q5_0
+        7 => Some((32, 24)),   // Q5_1
+        8 => Some((32, 34)),   // Q8_0
+        9 => Some((32, 36)),   // Q8_1
+        10 => Some((256, 84)), // Q2_K
+        11 => Some((256, 110)),// Q3_K
+        12 => Some((256, 144)),// Q4_K
+        13 => Some((256, 176)),// Q5_K
+        14 => Some((256, 210)),// Q6_K
+        15 => Some((256, 292)),// Q8_K
+        16 => Some((256, 66)), // IQ2_XXS
+        17 => Some((256, 74)), // IQ2_XS
+        18 => Some((256, 98)), // IQ3_XXS
+        19 => Some((256, 50)), // IQ1_S
+        20 => Some((32, 18)),  // IQ4_NL
+        21 => Some((256, 110)),// IQ3_S
+        22 => Some((256, 82)), // IQ2_S
+        23 => Some((256, 136)),// IQ4_XS
+        24 => Some((1, 1)),    // I8
+        25 => Some((1, 2)),    // I16
+        26 => Some((1, 4)),    // I32
+        27 => Some((1, 8)),    // I64
+        28 => Some((1, 8)),    // F64
+        29 => Some((256, 56)), // IQ1_M
+        30 => Some((1, 2)),    // BF16
+        34 => Some((256, 54)), // TQ1_0
+        35 => Some((256, 66)), // TQ2_0
+        39 => Some((32, 17)),  // MXFP4
+        _ => None,
+    }
+}
+
+pub fn classify_tensor_role(name: &str) -> &'static str {
+    if name.contains("ffn_gate_inp") || name.contains("exp_probs_b") {
+        "router"
+    } else if name.contains("_shexp") || name.contains("shared_expert") {
+        "shared_expert"
+    } else if name.contains("_exps") || name.contains(".experts.") {
+        "routed_expert"
+    } else if name.contains("token_embd") || name == "output.weight" || name.contains("lm_head") {
+        "embeddings_and_head"
+    } else if name.contains("norm") || name.ends_with(".bias") || name.contains("ssm_a") || name.contains("ssm_d") {
+        "norms_and_biases"
+    } else if name.contains("attn_") || name.contains("ssm_") {
+        "attention"
+    } else if name.contains("ffn_") {
+        "ffn_dense"
+    } else {
+        "other"
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeMemoryEstimate {
+    pub context_tokens: u32,
+    pub batch_size: u32,
+    pub weights_bytes: u64,
+    pub kv_cache_bytes: u64,
+    pub compute_buffer_bytes: u64,
+    pub runtime_overhead_bytes: u64,
+    pub total_estimated_bytes: u64,
+}
+
+impl RuntimeMemoryEstimate {
+    pub fn as_json(&self) -> Value {
+        json!({
+            "context_tokens": self.context_tokens,
+            "batch_size": self.batch_size,
+            "weights_bytes": self.weights_bytes,
+            "kv_cache_bytes": self.kv_cache_bytes,
+            "compute_buffer_bytes": self.compute_buffer_bytes,
+            "runtime_overhead_bytes": self.runtime_overhead_bytes,
+            "total_estimated_bytes": self.total_estimated_bytes,
+            "total_estimated_mib": self.total_estimated_bytes / (1024 * 1024),
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ModelTopology {
+    pub summary: GgufSummary,
+    pub total_parameters: u64,
+    pub payload_bytes: u64,
+    pub effective_bpw: f64,
+    pub block_count: usize,
+    pub embedding_length: u64,
+    pub expert_count: usize,
+    pub is_moe: bool,
+    pub is_high_precision_source: bool,
+    pub dominant_storage_type: String,
+    pub storage_type_histogram: BTreeMap<String, usize>,
+    pub role_type_breakdown: BTreeMap<String, BTreeMap<String, usize>>,
+}
+
+impl ModelTopology {
+    pub fn estimate_runtime_memory(&self, context_tokens: u32, batch_size: u32) -> RuntimeMemoryEstimate {
+        let weights_bytes = self.payload_bytes;
+        let blocks = (self.block_count as u64).max(1);
+        let embd = self.embedding_length.max(512);
+        // F16 KV cache: 2 (K+V) * blocks * embd * 2 bytes/elem * context_tokens
+        // (For GQA models this is an upper-bound safety estimate)
+        let kv_cache_bytes = 2u64
+            .saturating_mul(blocks)
+            .saturating_mul(embd)
+            .saturating_mul(2)
+            .saturating_mul(context_tokens as u64);
+        let moe_extra = if self.is_moe { 256 * 1024 * 1024 } else { 0 };
+        let compute_buffer_bytes = ((batch_size as u64)
+            .saturating_mul(embd)
+            .saturating_mul(32))
+            .max(128 * 1024 * 1024)
+            .saturating_add(moe_extra);
+        let runtime_overhead_bytes = 384 * 1024 * 1024;
+        let total_estimated_bytes = weights_bytes
+            .saturating_add(kv_cache_bytes)
+            .saturating_add(compute_buffer_bytes)
+            .saturating_add(runtime_overhead_bytes);
+        RuntimeMemoryEstimate {
+            context_tokens,
+            batch_size,
+            weights_bytes,
+            kv_cache_bytes,
+            compute_buffer_bytes,
+            runtime_overhead_bytes,
+            total_estimated_bytes,
+        }
+    }
+
+    pub fn as_json(&self) -> Value {
+        let est_4k = self.estimate_runtime_memory(4096, 512);
+        json!({
+            "architecture": self.summary.architecture,
+            "model_name": self.summary.model_name,
+            "file_bytes": self.summary.file_bytes,
+            "payload_bytes": self.payload_bytes,
+            "tensor_count": self.summary.tensor_count,
+            "total_parameters": self.total_parameters,
+            "effective_bpw": (self.effective_bpw * 1000.0).round() / 1000.0,
+            "block_count": self.block_count,
+            "embedding_length": self.embedding_length,
+            "expert_count": self.expert_count,
+            "is_moe": self.is_moe,
+            "is_high_precision_source": self.is_high_precision_source,
+            "dominant_storage_type": self.dominant_storage_type,
+            "storage_type_histogram": self.storage_type_histogram,
+            "role_type_breakdown": self.role_type_breakdown,
+            "runtime_memory_estimate_4k": est_4k.as_json(),
+        })
+    }
+}
+
+pub fn inspect_model_topology(path: &Path) -> io::Result<ModelTopology> {
+    let (summary, tensors) = inspect_gguf_inner(path, true)?;
+    let mut total_parameters = 0u64;
+    let mut max_block_idx: Option<usize> = None;
+    let mut embedding_length = 0u64;
+    let mut expert_count = 0usize;
+    let mut storage_type_histogram: BTreeMap<String, usize> = BTreeMap::new();
+    let mut storage_type_elements: BTreeMap<String, u64> = BTreeMap::new();
+    let mut role_type_breakdown: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+
+    for t in &tensors {
+        total_parameters = total_parameters.saturating_add(t.elements);
+        if let Some(rest) = t.name.strip_prefix("blk.") {
+            if let Some(dot_idx) = rest.find('.') {
+                if let Ok(idx) = rest[..dot_idx].parse::<usize>() {
+                    max_block_idx = Some(max_block_idx.map_or(idx, |m| m.max(idx)));
+                }
+            }
+        }
+        if t.name == "token_embd.weight" && !t.shape.is_empty() {
+            embedding_length = t.shape[0];
+        }
+        if (t.name.contains("_exps.") || t.name.contains("ffn_gate_exps")) && t.shape.len() >= 3 {
+            let n_exp = t.shape[2] as usize;
+            if n_exp > expert_count {
+                expert_count = n_exp;
+            }
+        } else if t.name.contains("ffn_gate_inp.weight") && t.shape.len() >= 2 {
+            let n_exp = t.shape[1] as usize;
+            if n_exp > expert_count {
+                expert_count = n_exp;
+            }
+        }
+        let ty_name = ggml_type_name(t.storage_type).to_string();
+        *storage_type_histogram.entry(ty_name.clone()).or_insert(0) += 1;
+        *storage_type_elements.entry(ty_name.clone()).or_insert(0) += t.elements;
+        let role = classify_tensor_role(&t.name).to_string();
+        *role_type_breakdown
+            .entry(role)
+            .or_default()
+            .entry(ty_name)
+            .or_insert(0) += 1;
+    }
+
+    let payload_bytes = summary.file_bytes.saturating_sub(summary.data_offset);
+    let effective_bpw = if total_parameters > 0 {
+        (payload_bytes as f64 * 8.0) / (total_parameters as f64)
+    } else {
+        0.0
+    };
+    let dominant_storage_type = storage_type_elements
+        .iter()
+        .max_by_key(|(_, elems)| *elems)
+        .map(|(k, _)| k.clone())
+        .unwrap_or_else(|| "UNKNOWN".to_string());
+    let is_high_precision_source = matches!(dominant_storage_type.as_str(), "F32" | "F16" | "BF16");
+    let is_moe = expert_count > 1
+        || role_type_breakdown.contains_key("router")
+        || role_type_breakdown.contains_key("routed_expert");
+
+    Ok(ModelTopology {
+        summary,
+        total_parameters,
+        payload_bytes,
+        effective_bpw,
+        block_count: max_block_idx.map_or(0, |m| m + 1),
+        embedding_length,
+        expert_count,
+        is_moe,
+        is_high_precision_source,
+        dominant_storage_type,
+        storage_type_histogram,
+        role_type_breakdown,
+    })
+}
 
 #[derive(Clone, Debug)]
 pub struct GgufSummary {

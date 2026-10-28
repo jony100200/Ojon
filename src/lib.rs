@@ -73,7 +73,16 @@ pub use discovery::{
     probe_backend_capabilities, probe_quantizer_formats, probe_runtime_devices,
     probe_quantizer_capabilities, bundled_data_file, bundled_data_dir,
 };
-pub use gguf::{inspect_gguf, inspect_gguf_tensors, GgufSummary, GgufTensor};
+pub use jobs::{
+    request_job_cancel, clear_job_cancel, is_job_cancelled,
+    job_history_path, load_job_history, save_job_history,
+    record_job_start, update_job_stage, finish_job_history, JobHistoryEntry,
+};
+pub use gguf::{
+    inspect_gguf, inspect_gguf_tensors, inspect_model_topology,
+    ggml_type_name, ggml_type_block_info, classify_tensor_role,
+    GgufSummary, GgufTensor, ModelTopology, RuntimeMemoryEstimate,
+};
 pub use hf::{
     inspect_hf_folder, prepare_hf, quantize_hf, quantize_hf_with_log,
     HfFolderInfo, HfQuantizePlan, HfQuantizeResult,
@@ -105,7 +114,11 @@ pub use packed::{plan_pack, run_pack, unpack, PackPlan, PackResult};
 pub use calibration::{prepare_imatrix, run_imatrix, ImatrixPlan};
 pub use options::plan_options;
 pub use research_routes::{prepare_research, run_research, ResearchKind, ResearchPlan};
-pub use resource::{assess_resources, resource_plan, ResourceAssessment, ResourceMode};
+pub use resource::{
+    assess_resources, resource_plan, discover_runtime_gpu_devices,
+    resolve_auto_runtime_device, is_integrated_gpu_name,
+    ResourceAssessment, ResourceMode, RuntimeGpuDevice,
+};
 pub use benchmark::{prepare_bench, run_bench, compare_bench_files, BenchPlan};
 pub use exl3::{prepare_exl3, run_exl3, Exl3Plan};
 pub use task_eval::{parse_eval_suite, inspect_task_suite, prepare_eval, run_eval, EvalPlan, EvalSuite};
@@ -124,9 +137,15 @@ pub use uncensor_trace::{prepare_uncensor_from_trace, run_uncensor_from_trace, U
 pub use gguf_edit::{prepare_gguf_abliteration, prepare_gguf_abliteration_value, run_gguf_abliteration, GgufAblationPlan};
 pub use model_edit::{prepare_model_abliteration, run_model_abliteration, ModelAblationPlan, ModelAblationResult};
 pub use abliteration::{direction_from_activations, prepare_abliteration, run_abliteration, AblationPlan, AblationResult};
+pub use cvector_import::{
+    rank_control_vector_blocks, recipe_from_control_vector,
+    recipe_from_control_vector_with_options,
+};
 pub use adaptive::{
-    allocate_bits, parse_tensor_sensitivity, extract_sensitivity_from_imatrix,
-    prepare_adaptive, run_adaptive, AdaptivePlan, TensorScore,
+    allocate_bits, allocate_bits_with_strategy, compare_allocation_strategies,
+    sensitive_spine_pinning_recipe, parse_tensor_sensitivity,
+    extract_sensitivity_from_imatrix, prepare_adaptive, run_adaptive,
+    AdaptivePlan, AllocationStrategy, TensorScore,
 };
 pub use optimize_workflow::{
     plan_optimize_workflow, run_optimize_workflow, OptimizeWorkflowRequest, OptimizeGoal,
@@ -141,6 +160,7 @@ pub use self::workflows::flint_pipeline::{
     run_flint_functional_suite, generate_flint_roco_recipe,
     plan_flint_uncensor, FlintPipelinePlan, FlintMoETopology,
     FlintHardwareFit, FlintParityReceipt, FlintUncensorPlan,
+    FlintDirectLogitsComparison,
     assemble_flint_hybrid_gguf, verify_moe_router_storage,
-    compare_flint_logits_files, measure_moe_routing_agreement,
+    compare_flint_logits_files, router_storage_type_match_pct, parity_gate_passes,
 };

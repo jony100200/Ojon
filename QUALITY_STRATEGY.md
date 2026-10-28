@@ -30,7 +30,7 @@ proof of retained capability.
    exact evidence scope. “No detected regression on this suite” never means
    mathematically lossless.
 
-## Directional editing
+## Directional editing and automatic uncensoring
 
 An original single-file little-endian F16/BF16/F32 GGUF can be edited
 directly with a measured activation direction. Ojon writes a separate GGUF
@@ -38,10 +38,9 @@ and recipe receipt while preserving the original. The supported projection targe
 `blk.N.attn_output.weight` and `blk.N.ffn_down.weight` float matrices.
 Quantized, router, expert and vision tensors are excluded from this route.
 
-The editor reports unmeasured refusal and capability results as
-`NOT_EVALUATED`. A model is ready to quantize for use only after real load,
-refusal, and capability tests against the original. Activation capture and
-automatic strength selection are not provided by this route. Ojon can also
-import a llama.cpp control-vector GGUF made from paired prompts; projecting
-its residual-stream direction from one attention output matrix is an
-experimental choice that requires the same validation.
+Through `uncensor-auto-plan` / `uncensor-auto-run` (and the Kathamo GUI **Uncensor Model** workflow), Ojon automatically:
+1. Captures paired refusal-vs-compliance directions across transformer blocks using `llama-cvector-generator` and ranks candidate layers by measured direction L2 norm.
+2. Evaluates multiple editing strategies independently (`norm_preserving_ablation`, `standard_ablation`, and Heretic-style `projected_multi_layer_heretic` combining attention output and FFN down-projections across top-ranked middle blocks).
+3. Measures both harmful-probe refusal reduction (`refusal_rate`) and benign-prompt false-refusal rate (`benign_overrefusal_rate`), alongside held-out coding/reasoning/tool-use capability retention.
+4. Exports a detachable `<stem>-control-vector.gguf` alongside the winning edited high-precision checkpoint and reloads the published checkpoint to verify container integrity and real runtime inference.
+5. When post-edit quantisation is enabled (`--quantize Q4_K_M|Q5_K_M|Q6_K`), runs the combined workflow (`Original -> Edited Teacher -> Quantised Candidate`) and verifies the final quantised artifact against **both** the original model (`vs_original`) and the accepted edited teacher (`vs_edited_teacher`).

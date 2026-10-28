@@ -21,58 +21,141 @@ pub fn recipe_from_control_vector(path:&Path,block:usize,strength:f64)->io::Resu
 /// Multi-block recipe: one edit per (block, strength) pair. Blocks must be
 /// unique, and gguf_edit's recipe limit of 256 edits still applies.
 pub fn recipe_from_control_vector_blocks(path:&Path,edits:&[(usize,f64)])->io::Result<Value> {
-    if edits.is_empty() || edits.len()>256 {
-        return Err(invalid("require 1..=256 (block, strength) edit pairs"));
-    }
-    let mut seen=std::collections::HashSet::new();
-    for (block,strength) in edits {
-        if *block>1023 || !strength.is_finite() || *strength<=0.0 || *strength>1.0 {
-            return Err(invalid("block must be <=1023 and strength must be >0 and <=1"));
-        }
-        if !seen.insert(*block){return Err(invalid("duplicate block in edit list"));}
-    }
-    let summary=inspect_gguf(path)?;
-    if summary.architecture.as_deref()!=Some("controlvector") || summary.big_endian
-        || summary.tensor_count==0 || summary.tensor_count>1024 {
+    recipe_from_control_vector_with_options(path, edits, true, &[])
+}
+
+/// Rank candidate transformer blocks by the L2 norm of their measured refusal
+/// direction in a `llama-cvector-generator` GGUF file.
+pub fn rank_control_vector_blocks(path: &Path, available_blocks: &[usize]) -> io::Result<Vec<(usize, f64)>> {
+    let summary = inspect_gguf(path)?;
+    if summary.architecture.as_deref() != Some("controlvector") || summary.big_endian {
         return Err(invalid("expected little-endian llama.cpp controlvector GGUF"));
     }
-    let tensors=inspect_gguf_tensors(path)?;
-    let mut out=Vec::new();
-    for (block,strength) in edits {
-        let name=format!("direction.{}",block+1);
-        let tensor=tensors.iter().find(|t|t.name==name)
-            .ok_or_else(||invalid(format!("control vector lacks {name}")))?;
-        if tensor.storage_type!=0 || tensor.shape.len()!=1 || tensor.elements<2
-            || tensor.elements>131072 {
-            return Err(invalid("control direction must be a bounded 1D F32 tensor"));
+    let tensors = inspect_gguf_tensors(path)?;
+    let mut file = File::open(path)?;
+    let mut ranked = Vec::new();
+    for &block in available_blocks {
+        let name = format!("direction.{}", block + 1);
+        let Some(tensor) = tensors.iter().find(|t| t.name == name) else { continue };
+        if tensor.storage_type != 0 || tensor.shape.len() != 1 || tensor.elements < 2 || tensor.elements > 131072 {
+            continue;
         }
-        let size=tensor.elements.checked_mul(4).ok_or_else(||invalid("control vector byte overflow"))?;
-        let offset=summary.data_offset.checked_add(tensor.relative_offset)
-            .ok_or_else(||invalid("control vector offset overflow"))?;
-        if offset.checked_add(size).is_none_or(|end|end>summary.file_bytes) {
-            return Err(invalid("control direction exceeds GGUF bounds"));
+        let Some(size) = tensor.elements.checked_mul(4) else { continue };
+        let Some(offset) = summary.data_offset.checked_add(tensor.relative_offset) else { continue };
+        if offset.checked_add(size).is_none_or(|end| end > summary.file_bytes) {
+            continue;
         }
-        let mut file=File::open(path)?;
         file.seek(SeekFrom::Start(offset))?;
-        let mut values=Vec::with_capacity(tensor.elements as usize);
-        let mut bytes=[0u8;4];
-        let mut norm=0.0f64;
+        let mut bytes = [0u8; 4];
+        let mut norm = 0.0f64;
+        let mut valid = true;
         for _ in 0..tensor.elements {
             file.read_exact(&mut bytes)?;
-            let value=f32::from_le_bytes(bytes) as f64;
-            if !value.is_finite(){return Err(invalid("nonfinite control direction"));}
-            norm=norm.hypot(value);
+            let value = f32::from_le_bytes(bytes) as f64;
+            if !value.is_finite() {
+                valid = false;
+                break;
+            }
+            norm = norm.hypot(value);
+        }
+        if valid && norm.is_finite() && norm > 1e-30 {
+            ranked.push((block, norm));
+        }
+    }
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    Ok(ranked)
+}
+
+/// Extended control-vector recipe builder supporting standard vs norm-preserving
+/// ablation and optional secondary FFN down-projection targets (`blk.N.ffn_down.weight`).
+pub fn recipe_from_control_vector_with_options(
+    path: &Path,
+    edits: &[(usize, f64)],
+    preserve_row_norms: bool,
+    extra_ffn_down_blocks: &[usize],
+) -> io::Result<Value> {
+    if edits.is_empty() || edits.len() > 128 {
+        return Err(invalid("require 1..=128 (block, strength) edit pairs"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (block, strength) in edits {
+        if *block > 1023 || !strength.is_finite() || *strength <= 0.0 || *strength > 1.0 {
+            return Err(invalid("block must be <=1023 and strength must be >0 and <=1"));
+        }
+        if !seen.insert(*block) {
+            return Err(invalid("duplicate block in edit list"));
+        }
+    }
+    let summary = inspect_gguf(path)?;
+    if summary.architecture.as_deref() != Some("controlvector")
+        || summary.big_endian
+        || summary.tensor_count == 0
+        || summary.tensor_count > 1024
+    {
+        return Err(invalid("expected little-endian llama.cpp controlvector GGUF"));
+    }
+    let tensors = inspect_gguf_tensors(path)?;
+    let mut out = Vec::new();
+    for (block, strength) in edits {
+        let name = format!("direction.{}", block + 1);
+        let tensor = tensors
+            .iter()
+            .find(|t| t.name == name)
+            .ok_or_else(|| invalid(format!("control vector lacks {name}")))?;
+        if tensor.storage_type != 0
+            || tensor.shape.len() != 1
+            || tensor.elements < 2
+            || tensor.elements > 131072
+        {
+            return Err(invalid("control direction must be a bounded 1D F32 tensor"));
+        }
+        let size = tensor
+            .elements
+            .checked_mul(4)
+            .ok_or_else(|| invalid("control vector byte overflow"))?;
+        let offset = summary
+            .data_offset
+            .checked_add(tensor.relative_offset)
+            .ok_or_else(|| invalid("control vector offset overflow"))?;
+        if offset.checked_add(size).is_none_or(|end| end > summary.file_bytes) {
+            return Err(invalid("control direction exceeds GGUF bounds"));
+        }
+        let mut file = File::open(path)?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut values = Vec::with_capacity(tensor.elements as usize);
+        let mut bytes = [0u8; 4];
+        let mut norm = 0.0f64;
+        for _ in 0..tensor.elements {
+            file.read_exact(&mut bytes)?;
+            let value = f32::from_le_bytes(bytes) as f64;
+            if !value.is_finite() {
+                return Err(invalid("nonfinite control direction"));
+            }
+            norm = norm.hypot(value);
             values.push(value);
         }
-        if !norm.is_finite() || norm<1e-30 {
+        if !norm.is_finite() || norm < 1e-30 {
             return Err(invalid("control direction is zero or invalid"));
         }
-        let direction=values.into_iter().map(|value|value/norm).collect::<Vec<_>>();
-        out.push(json!({"tensor":format!("blk.{block}.attn_output.weight"),
-            "direction":direction,"strength":strength}));
+        let direction = values.into_iter().map(|value| value / norm).collect::<Vec<_>>();
+        out.push(json!({
+            "tensor": format!("blk.{block}.attn_output.weight"),
+            "direction": direction.clone(),
+            "strength": strength
+        }));
+        if extra_ffn_down_blocks.contains(block) {
+            out.push(json!({
+                "tensor": format!("blk.{block}.ffn_down.weight"),
+                "direction": direction,
+                "strength": (*strength * 0.75).clamp(0.01, 1.0)
+            }));
+        }
     }
-    Ok(json!({"schema":"ojon.abliteration.v1","preserve_row_norms":true,
-        "edits":out}))
+    Ok(json!({
+        "schema": "ojon.abliteration.v1",
+        "preserve_row_norms": preserve_row_norms,
+        "edits": out
+    }))
 }
 
 #[cfg(test)]

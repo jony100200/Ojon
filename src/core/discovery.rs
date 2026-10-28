@@ -227,33 +227,52 @@ fn search_dirs() -> Vec<(PathBuf, &'static str)> {
         }
     }
     // Check adjacent peer directories when repos are cloned side-by-side
+    let mut base_roots = Vec::new();
     if let Ok(cwd) = env::current_dir() {
+        base_roots.push(cwd.clone());
+        if let Some(parent) = cwd.parent() {
+            base_roots.push(parent.to_path_buf());
+        }
+    }
+    if let Ok(exe) = env::current_exe() {
+        let mut cur = exe.parent();
+        for _ in 0..4 {
+            if let Some(dir) = cur {
+                if !base_roots.contains(&dir.to_path_buf()) {
+                    base_roots.push(dir.to_path_buf());
+                }
+                cur = dir.parent();
+            }
+        }
+    }
+    for root in base_roots {
         for sub in [
             "bin",
-            "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-vulkan/bin/Release",
-            "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-cuda/bin/Release",
-            "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl/bin/Release",
-            "../KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl",
-            "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/build-vulkan/bin",
-            "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/build-cpu/bin",
-            "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/vulkan",
-            "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/cuda",
-            "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/sycl",
-            "../KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/cpu",
-            "../KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/vulkan",
-            "../KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/cuda",
-            "../KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/sycl",
-            "../KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/cpu",
-            "../llama.cpp",
-            "../llama.cpp/bin",
-            "../llama.cpp/build/bin",
+            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/build-vulkan/bin",
+            "KS-RupayanFlow/UpStream/KS_llama.cpp/build-vulkan/bin/Release",
+            "KS-RupayanFlow/UpStream/KS_llama.cpp/build-cuda/bin/Release",
+            "KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl/bin/Release",
+            "KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl",
+            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/build-cpu/bin",
+            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/vulkan",
+            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/cuda",
+            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/sycl",
+            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/package-staging/cpu",
+            "KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/vulkan",
+            "KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/cuda",
+            "KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/sycl",
+            "KS-Talk/runtime/llama/releases/ks-llama-v0.7.0-dev-b1689-5b6fb845b/cpu",
+            "llama.cpp",
+            "llama.cpp/bin",
+            "llama.cpp/build/bin",
          ] {
-            dirs.push((cwd.join(sub), "adjacent workspace folder"));
+            dirs.push((root.join(sub), "adjacent workspace folder"));
         }
     }
     if let Ok(root_env) = env::var("KS_WORKSPACE_ROOT") {
         let root = PathBuf::from(root_env);
         for sub in [
+            "KS-RupayanFlow/_local/upstream_sync/20261026-codex/build-vulkan/bin",
             "KS-RupayanFlow/UpStream/KS_llama.cpp/build-vulkan/bin/Release",
             "KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl/bin/Release",
             "KS-RupayanFlow/UpStream/KS_llama.cpp/build-sycl",

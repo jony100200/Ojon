@@ -81,3 +81,4 @@ Desktop.ini
 
 # Cargo.lock for a reproducible binary application is intentionally tracked.
 # Do not broadly ignore *.json or *.toml; real recipe/adapter manifests use them.
+/.agents/

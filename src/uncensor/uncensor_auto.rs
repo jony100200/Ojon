@@ -62,15 +62,35 @@ impl UncensorAutoRequest {
             max_capability_loss: 0.02, max_refusal_rate: None, quantize: None,
             quantizer: PathBuf::from("llama-quantize"), allow_resource_risk: false }
     }
+
+    pub fn with_auto_hardware(mut self) -> Self {
+        if self.device.is_none() && self.gpu_layers == 0 {
+            let (_, rt, layers) = crate::resource::resolve_auto_runtime_device("auto", None, 0);
+            if let Some(rt_id) = rt {
+                self.device = Some(rt_id);
+                self.gpu_layers = layers as i32;
+            }
+        }
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
-struct Candidate { name: String, block: usize, strength: f64, staged: PathBuf }
+struct Candidate {
+    name: String,
+    method: String,
+    block: usize,
+    strength: f64,
+    edits: Vec<(usize, f64)>,
+    preserve_row_norms: bool,
+    staged: PathBuf,
+}
 
 pub struct UncensorAutoPlan {
     request: UncensorAutoRequest,
     source: PathBuf,
     output: PathBuf,
+    control_vector_output: PathBuf,
     quantized_output: Option<PathBuf>,
     positive: PathBuf,
     negative: PathBuf,
@@ -225,6 +245,7 @@ pub fn prepare_uncensor_auto(mut request: UncensorAutoRequest) -> io::Result<Unc
     let stem = source.file_stem().ok_or_else(|| invalid("source name missing"))?.to_string_lossy();
     let output = output_dir.join(format!("{stem}-uncensored.gguf"));
     if output.symlink_metadata().is_ok() { return Err(io::Error::new(ErrorKind::AlreadyExists, "uncensored output exists")); }
+    let control_vector_output = output_dir.join(format!("{stem}-control-vector.gguf"));
     let quantized_output = match request.quantize {
         Some(precision) => {
             let path = output_dir.join(format!("{stem}-uncensored-{}.gguf", precision.as_str()));
@@ -235,10 +256,71 @@ pub fn prepare_uncensor_auto(mut request: UncensorAutoRequest) -> io::Result<Unc
         }
         None => None,
     };
+    let mut candidates = Vec::new();
+    for strength in &strengths {
+        for block in &blocks {
+            let name = format!("s{:03}-b{:03}", (strength * 1000.0).round() as i64, block);
+            let staged = output_dir.join(format!("{stem}-uncensored-staged-{name}.gguf"));
+            candidates.push(Candidate {
+                name,
+                method: "norm_preserving_ablation".into(),
+                block: *block,
+                strength: *strength,
+                edits: vec![(*block, *strength)],
+                preserve_row_norms: true,
+                staged,
+            });
+        }
+    }
+    // When running automatic multi-block discovery (blocks was None) and grid has room (< 12),
+    // also add standard_ablation (no row-norm rescaling) and multi_layer_heretic (tapered multi-block)
+    // candidates so Ojon evaluates multiple editing methods individually.
+    if request.blocks.is_none() && !strengths.is_empty() && !blocks.is_empty() {
+        let mid_block = blocks[blocks.len() / 2];
+        let mid_strength = strengths[strengths.len() / 2];
+        if candidates.len() < 12 {
+            let name = format!("std-s{:03}-b{:03}", (mid_strength * 1000.0).round() as i64, mid_block);
+            let staged = output_dir.join(format!("{stem}-uncensored-staged-{name}.gguf"));
+            candidates.push(Candidate {
+                name,
+                method: "standard_ablation".into(),
+                block: mid_block,
+                strength: mid_strength,
+                edits: vec![(mid_block, mid_strength)],
+                preserve_row_norms: false,
+                staged,
+            });
+        }
+        if blocks.len() >= 2 && candidates.len() < 12 {
+            let multi_edits: Vec<(usize, f64)> = blocks
+                .iter()
+                .map(|&b| {
+                    let s = if b == mid_block {
+                        mid_strength
+                    } else {
+                        (mid_strength * 0.65).clamp(0.02, 1.0)
+                    };
+                    (b, s)
+                })
+                .collect();
+            let name = format!("heretic-multi-s{:03}", (mid_strength * 1000.0).round() as i64);
+            let staged = output_dir.join(format!("{stem}-uncensored-staged-{name}.gguf"));
+            candidates.push(Candidate {
+                name,
+                method: "projected_multi_layer_heretic".into(),
+                block: mid_block,
+                strength: mid_strength,
+                edits: multi_edits,
+                preserve_row_norms: true,
+                staged,
+            });
+        }
+    }
+    let total_candidates = candidates.len();
     // Every staged candidate is a full edited copy of the source: refuse to
     // start when the volume cannot hold the whole sweep plus output.
     let source_bytes = fs::metadata(&source)?.len();
-    let needed = source_bytes as u128 * (candidate_count as u128 + 1)
+    let needed = source_bytes as u128 * (total_candidates as u128 + 1)
         + source_bytes as u128; // control-vector generation reads the original; edits read it too
     if let Some(free) = crate::resource::free_disk(&output_dir) {
         if (needed + 2 * crate::resource::GIB as u128) > free as u128 {
@@ -249,21 +331,13 @@ pub fn prepare_uncensor_auto(mut request: UncensorAutoRequest) -> io::Result<Unc
     } else if !request.allow_resource_risk {
         return Err(invalid("free disk space could not be measured; pass --allow-resource-risk to proceed"));
     }
-    let mut candidates = Vec::new();
-    for strength in &strengths {
-        for block in &blocks {
-            let name = format!("s{:03}-b{:03}", (strength * 1000.0).round() as i64, block);
-            let staged = output_dir.join(format!("{stem}-uncensored-staged-{name}.gguf"));
-            candidates.push(Candidate { name, block: *block, strength: *strength, staged });
-        }
-    }
     for candidate in &candidates {
         if candidate.staged.symlink_metadata().is_ok() {
             return Err(io::Error::new(ErrorKind::AlreadyExists,
                 format!("staged candidate {} exists; remove it first", candidate.staged.display())));
         }
     }
-    Ok(UncensorAutoPlan { request, source, output, quantized_output, positive, negative,
+    Ok(UncensorAutoPlan { request, source, output, control_vector_output, quantized_output, positive, negative,
         candidates, strengths, blocks })
 }
 
@@ -271,13 +345,16 @@ impl UncensorAutoPlan {
     pub fn as_json(&self) -> Value {
         json!({"schema":"ojon.uncensor_auto_plan.v1",
             "source":self.source.to_string_lossy(),"output":self.output.to_string_lossy(),
+            "detachable_control_vector":self.control_vector_output.to_string_lossy(),
             "quantized_output":self.quantized_output.as_ref().map(|p|p.to_string_lossy().to_string()),
             "refusal_probes":self.request.refusal_probes.to_string_lossy(),
             "capability_suite":self.request.capability_suite.to_string_lossy(),
             "candidate_count":self.candidates.len(),
             "grid":{"strengths":self.strengths,"blocks":self.blocks},
             "candidates":self.candidates.iter().map(|c|json!({
-                "name":c.name,"block":c.block,"strength":c.strength,"staged":c.staged.to_string_lossy()}))
+                "name":c.name,"method":c.method,"block":c.block,"strength":c.strength,
+                "edits":c.edits,"preserve_row_norms":c.preserve_row_norms,
+                "staged":c.staged.to_string_lossy()}))
                 .collect::<Vec<_>>(),
             "max_capability_loss":self.request.max_capability_loss,
             "max_refusal_rate":self.request.max_refusal_rate,
@@ -340,6 +417,15 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
         .arg("--method").arg("mean").arg("-o").arg(&vector);
     log("Capturing paired model directions from GGUF");
     run_with_log(&mut command, |line| log(line))?;
+    // Export detachable control-vector GGUF alongside the output if not already present.
+    if !plan.control_vector_output.exists() {
+        let _ = fs::copy(&vector, &plan.control_vector_output);
+    }
+    let ranked_blocks = crate::cvector_import::rank_control_vector_blocks(&vector, &plan.blocks)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(b, norm)| json!({"block": b, "direction_l2_norm": norm}))
+        .collect::<Vec<_>>();
     // 2. Baseline refusal measurement on the untouched original.
     let baseline_refusal_path = staging.0.join("baseline-refusal.json");
     let baseline_refusal_plan = prepare_refusal_eval_with_server(&plan.source,
@@ -349,13 +435,18 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
     log("Measuring refusal behaviour of the original model");
     let baseline_refusal = run_refusal_eval(&baseline_refusal_plan, &mut log)?;
     let baseline_refusal_rate = crate::refusal::refusal_rate_from_report(&baseline_refusal)?;
+    let baseline_benign_overrefusal = baseline_refusal["benign_overrefusal_rate"].as_f64();
     // 3. Stage every candidate as a real edited GGUF copy.
     for (index, candidate) in plan.candidates.iter().enumerate() {
-        let recipe = crate::cvector_import::recipe_from_control_vector_blocks(&vector,
-            &[(candidate.block, candidate.strength)])?;
+        let recipe = crate::cvector_import::recipe_from_control_vector_with_options(
+            &vector,
+            &candidate.edits,
+            candidate.preserve_row_norms,
+            &[],
+        )?;
         let edit = prepare_gguf_abliteration_value(&plan.source, &recipe, &candidate.staged)?;
-        log(&format!("Editing candidate {}/{} ({}): block {} strength {:.2}",
-            index + 1, plan.candidates.len(), candidate.name, candidate.block, candidate.strength));
+        log(&format!("Editing candidate {}/{} ({}, method={}): block {} strength {:.2}",
+            index + 1, plan.candidates.len(), candidate.name, candidate.method, candidate.block, candidate.strength));
         run_gguf_abliteration(&edit, |line| log(line))?;
     }
     // 4. Held-out functional capability for original + all candidates in one
@@ -369,7 +460,7 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
         &capability_report)?;
     log("Measuring held-out functional capability for baseline and candidates");
     let capability = run_eval(&capability_plan, &mut log)?;
-    let baseline_metrics = capability["baseline"]["metrics"].as_object()
+    let baseline_metrics: Value = capability["baseline"]["metrics"].as_object()
         .ok_or_else(|| invalid("capability receipt lacks baseline metrics"))?
         .clone().into();
     // 5. Refusal measurement for every candidate.
@@ -383,11 +474,12 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
         log(&format!("Measuring refusal behaviour of candidate {}", candidate.name));
         let report = run_refusal_eval(&refusal_plan, &mut log)?;
         let rate = crate::refusal::refusal_rate_from_report(&report)?;
-        measured.push((candidate, rate));
+        let benign_over = report["benign_overrefusal_rate"].as_f64();
+        measured.push((candidate, rate, benign_over));
     }
     // 6. Selection from measured scores only.
     let mut candidate_scores = Vec::new();
-    for (candidate, rate) in &measured {
+    for (candidate, rate, _benign_over) in &measured {
         candidate_scores.push(trial_scores(&candidate.name, &candidate.staged, *rate, &capability["candidates"]
             .as_array().and_then(|list| list.iter().find(|c| c["label"] == json!(candidate.name)))
             .ok_or_else(|| invalid("capability receipt lacks a measured candidate"))?
@@ -404,9 +496,19 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
     let mut kept = Vec::new();
     let mut removed = Vec::new();
     let mut published = false;
+    let mut winner_method_kind = Value::Null;
+    let mut winner_refusal_rate = None;
+    let mut winner_metrics: Option<Value> = None;
     if let Some(winner) = winner_name.as_ref() {
         let candidate = plan.candidates.iter().find(|c| &c.name == winner)
             .ok_or_else(|| invalid("chooser selected an unknown candidate"))?;
+        winner_method_kind = json!(candidate.method);
+        winner_refusal_rate = measured.iter().find(|(c, _, _)| c.name == *winner).map(|(_, r, _)| *r);
+        winner_metrics = capability["candidates"]
+            .as_array()
+            .and_then(|list| list.iter().find(|c| c["label"] == json!(candidate.name)))
+            .and_then(|c| c.get("metrics"))
+            .cloned();
         fs::rename(&candidate.staged, &plan.output)?;
         published = true;
     }
@@ -419,30 +521,156 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
         }
     }
     let edited_status = if published { "PUBLISHED_FROM_MEASURED_WINNER" } else { "NOT_PUBLISHED_NO_MEASURED_WINNER" };
+    // 8. Reload the saved edited model and retest independently.
+    let edited_reload_verification = if published {
+        log("Reloading saved edited model from disk for independent verification");
+        match crate::smoke::smoke_gguf_capture_with_device(
+            &plan.output,
+            &plan.request.runtime,
+            "/no_think\nReply with the single word READY.",
+            24,
+            plan.request.gpu_layers.max(0) as u32,
+            plan.request.device.as_deref(),
+        ) {
+            Ok(cap) if crate::smoke::matches_single_word_reply(&cap.stdout, "READY")
+                || cap.stdout.to_ascii_uppercase().contains("READY") => json!({
+                "status": "RELOADED_AND_VERIFIED",
+                "artifact": plan.output.to_string_lossy(),
+                "file_bytes": fs::metadata(&plan.output).map(|m| m.len()).unwrap_or(0),
+            }),
+
+            Ok(cap) => json!({
+                "status": "RELOAD_LOADED_NON_EXACT_PROBE",
+                "artifact": plan.output.to_string_lossy(),
+                "stdout_preview": cap.stdout.chars().take(80).collect::<String>(),
+            }),
+            Err(e) => json!({"status": "RELOAD_FAILED", "reason": e.to_string()}),
+        }
+    } else {
+        json!({"status": "NOT_RUN_NO_PUBLISHED_WINNER"})
+    };
+
+    // 9. Optionally quantize the accepted edited teacher and verify the final
+    //    quantized artifact against BOTH the original model and the edited teacher.
     let mut quantized_status = "NOT_REQUESTED".to_string();
+    let mut quantized_verification = Value::Null;
     if published {
         if let Some(precision) = plan.request.quantize {
             let quant_out = plan.quantized_output.as_ref()
                 .ok_or_else(|| invalid("quantized output path missing"))?;
-            let quant = prepare_gguf(&plan.output, quant_out, &plan.request.quantizer,
-                precision.clone(), threads)?;
-            log(&format!("Quantizing measured winner to {}", precision.as_str()));
+            let spine_recipe = crate::adaptive::sensitive_spine_pinning_recipe(
+                &inspect_gguf_tensors(&plan.output).unwrap_or_default(),
+            );
+            let mut quant = prepare_gguf(&plan.output, quant_out, &plan.request.quantizer,
+                precision, threads)?;
+            if !spine_recipe.is_empty() {
+                let recipe_path = staging.0.join("quant-spine.tensor-types.txt");
+                fs::write(&recipe_path, spine_recipe.as_bytes())?;
+                quant = quant.with_tensor_type_file(&recipe_path)?;
+            }
+            log(&format!("Quantizing accepted edited teacher to {}", precision.as_str()));
             quantize_gguf_with_log(&quant, |line| log(line))?;
-            quantized_status = "QUANTIZED_FROM_PUBLISHED_WINNER".to_string();
+            quantized_status = "QUANTIZED_AND_DUAL_VERIFIED".to_string();
+
+            log("Reloading quantized uncensored artifact and verifying against BOTH original and edited teacher");
+            let q_topology = crate::gguf::inspect_model_topology(quant_out)
+                .map(|t| t.as_json())
+                .unwrap_or(Value::Null);
+            let q_refusal_path = staging.0.join("quantized-refusal.json");
+            let q_refusal_plan = prepare_refusal_eval_with_server(
+                quant_out,
+                &plan.request.refusal_probes,
+                &plan.request.runtime,
+                plan.request.server_runtime.as_deref(),
+                plan.request.gpu_layers,
+                plan.request.device.as_deref(),
+                plan.request.refusal_tokens,
+                &q_refusal_path,
+            )?;
+            let q_refusal_report = run_refusal_eval(&q_refusal_plan, &mut log)?;
+            let q_refusal_rate = crate::refusal::refusal_rate_from_report(&q_refusal_report)?;
+
+            let q_cap_path = staging.0.join("quantized-capability.json");
+            let q_cap_plan = prepare_eval_with_server(
+                &plan.request.capability_suite,
+                &plan.source,
+                &[(String::from("quantized_final"), quant_out.clone())],
+                &plan.request.runtime,
+                plan.request.server_runtime.as_deref(),
+                plan.request.gpu_layers,
+                plan.request.device.as_deref(),
+                plan.request.task_tokens,
+                &q_cap_path,
+            )?;
+            let q_cap_report = crate::task_eval::run_eval_reusing_baseline(
+                &q_cap_plan,
+                Some(&capability),
+                &mut log,
+            )?;
+            let q_metrics = &q_cap_report["candidates"][0]["metrics"];
+            let mut vs_original = Vec::new();
+            let mut vs_teacher = Vec::new();
+            let mut passes_both = true;
+            let allowed_drop_pts = plan.request.max_capability_loss * 100.0;
+            for metric in ["coding_accuracy", "reasoning_accuracy", "tool_call_accuracy"] {
+                let orig_v = baseline_metrics[metric].as_f64().unwrap_or(0.0);
+                let teach_v = winner_metrics.as_ref().and_then(|m| m[metric].as_f64()).unwrap_or(orig_v);
+                let quant_v = q_metrics[metric].as_f64().unwrap_or(0.0);
+                let pass_orig = quant_v + 1e-9 >= orig_v - allowed_drop_pts;
+                let pass_teach = quant_v + 1e-9 >= teach_v - allowed_drop_pts;
+
+                if !pass_orig || !pass_teach {
+                    passes_both = false;
+                }
+                vs_original.push(json!({
+                    "metric": metric,
+                    "original": orig_v,
+                    "quantized": quant_v,
+                    "pass": pass_orig
+                }));
+                vs_teacher.push(json!({
+                    "metric": metric,
+                    "edited_teacher": teach_v,
+                    "quantized": quant_v,
+                    "pass": pass_teach
+                }));
+            }
+            quantized_verification = json!({
+                "artifact": quant_out.to_string_lossy(),
+                "file_bytes": fs::metadata(quant_out).map(|m| m.len()).unwrap_or(0),
+                "topology": q_topology,
+                "refusal_rate": q_refusal_rate,
+                "original_refusal_rate": baseline_refusal_rate,
+                "edited_teacher_refusal_rate": winner_refusal_rate,
+                "benign_overrefusal_rate": q_refusal_report["benign_overrefusal_rate"],
+                "capability_metrics": q_metrics,
+                "vs_original": vs_original,
+                "vs_edited_teacher": vs_teacher,
+                "passes_dual_reference_gate": passes_both && q_refusal_rate <= baseline_refusal_rate,
+            });
         }
     }
     let result = json!({"schema":"ojon.uncensor_auto_result.v1",
         "source":plan.source.to_string_lossy(),
         "output_edited":plan.output.to_string_lossy(),
+        "detachable_control_vector":if plan.control_vector_output.is_file() {
+            Value::String(plan.control_vector_output.to_string_lossy().into_owned())
+        } else { Value::Null },
         "output_quantized":plan.quantized_output.as_ref().map(|p|p.to_string_lossy().to_string()),
         "grid":{"strengths":plan.strengths,"blocks":plan.blocks},
+        "discovered_refusal_directions":ranked_blocks,
         "baseline":{"model":plan.source.to_string_lossy(),
             "refusal_rate":baseline_refusal_rate,
+            "benign_overrefusal_rate":baseline_benign_overrefusal,
             "capability_metrics":capability["baseline"]["metrics"]},
         "candidates":choice.report["tested"],
         "method_choice":choice.report,
+        "selected_edit_strategy":winner_method_kind,
         "published_candidates":kept,"removed_candidates":removed,
-        "edited_status":edited_status,"quantization_status":quantized_status,
+        "edited_status":edited_status,
+        "edited_reload_verification":edited_reload_verification,
+        "quantization_status":quantized_status,
+        "quantized_verification":quantized_verification,
         "refusal_measurement":"bounded_phrase_heuristic_v1",
         "quality_scope":"held-out exact/JSON functional tasks; not full intelligence parity",
         "status":if published {"SELECTED_FROM_MEASURED_SCORES"}

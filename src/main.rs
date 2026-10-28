@@ -1928,7 +1928,7 @@ fn run() -> io::Result<()> {
             let source=PathBuf::from(next_argument(&mut args,"original F16/BF16/F32 GGUF")?);
             let output_dir=PathBuf::from(next_argument(&mut args,"existing output directory")?);
             let mut request=ojon_backend::uncensor_auto::UncensorAutoRequest::new(source,output_dir);
-            let(mut confirmed,mut json)=(false,false);
+            let(mut confirmed,mut json,mut explicit_gpu)=(false,false,false);
             while let Some(option)=args.next(){
                 match option.to_str(){
                     Some("--refusal-suite")=>request.refusal_probes=PathBuf::from(
@@ -1943,10 +1943,22 @@ fn run() -> io::Result<()> {
                         next_argument(&mut args,"llama-cli executable")?),
                     Some("--server")=>request.server_runtime=Some(PathBuf::from(
                         next_argument(&mut args,"local llama-server executable")?)),
-                    Some("--gpu-layers")=>request.gpu_layers=next_argument(&mut args,"GPU offload layers")?
-                        .to_string_lossy().parse().map_err(|_|invalid("GPU layers must be integer"))?,
-                    Some("--device")=>request.device=Some(next_argument(&mut args,"llama.cpp device ID")?
-                        .to_string_lossy().into_owned()),
+                    Some("--gpu-layers")=>{
+                        explicit_gpu=true;
+                        request.gpu_layers=next_argument(&mut args,"GPU offload layers")?
+                            .to_string_lossy().parse().map_err(|_|invalid("GPU layers must be integer"))?;
+                    }
+                    Some("--device")=>{
+                        explicit_gpu=true;
+                        request.device=Some(next_argument(&mut args,"llama.cpp device ID")?
+                            .to_string_lossy().into_owned());
+                    }
+                    Some("--auto-hardware")=>{
+                        let (_, rdev, ngl)=ojon_backend::resolve_auto_runtime_device("auto", None, 0);
+                        request.device=rdev;
+                        request.gpu_layers=ngl as i32;
+                        explicit_gpu=true;
+                    }
                     Some("--refusal-tokens")=>request.refusal_tokens=next_argument(&mut args,"refusal generation tokens")?
                         .to_string_lossy().parse().map_err(|_|invalid("tokens must be integer"))?,
                     Some("--task-tokens")=>request.task_tokens=next_argument(&mut args,"task generation tokens")?
@@ -1988,6 +2000,13 @@ fn run() -> io::Result<()> {
             }
             if confirmed&&!execute{return Err(invalid("--confirm only works with uncensor-auto-run"));}
             if execute&&!confirmed{return Err(invalid("uncensor-auto-run edits model files and requires --confirm"));}
+            if !explicit_gpu {
+                let (_, rdev, ngl)=ojon_backend::resolve_auto_runtime_device("auto", None, 0);
+                if rdev.is_some() {
+                    request.device=rdev;
+                    request.gpu_layers=ngl as i32;
+                }
+            }
             if request.refusal_probes.as_os_str().is_empty(){
                 if let Some(bundled)=ojon_backend::discovery::bundled_data_file("refusal-probes.json"){
                     request.refusal_probes=bundled;
@@ -2004,21 +2023,29 @@ fn run() -> io::Result<()> {
                     request.paired_prompts=bundled;
                 }
             }
-            if request.cvector_generator.as_os_str().is_empty(){
+            if request.cvector_generator.as_os_str().is_empty()
+                || request.cvector_generator == Path::new("llama-cvector-generator")
+            {
                 request.cvector_generator=discovered_path(BackendId::LlamaCvectorGenerator)
                     .ok_or_else(||invalid("no llama-cvector-generator discovered; pass --cvector-generator"))?;
             }
-            if request.runtime.as_os_str().is_empty(){
+            if request.runtime.as_os_str().is_empty()
+                || request.runtime == Path::new("llama-cli")
+            {
                 request.runtime=discovered_path(BackendId::LlamaCli)
                     .ok_or_else(||invalid("no llama-cli discovered; pass --runtime"))?;
             }
             if request.server_runtime.is_none(){
                 request.server_runtime=discovered_path(BackendId::LlamaServer);
             }
-            if request.quantize.is_some() && request.quantizer.as_os_str().is_empty(){
+            if request.quantize.is_some()
+                && (request.quantizer.as_os_str().is_empty()
+                    || request.quantizer == Path::new("llama-quantize"))
+            {
                 request.quantizer=discovered_path(BackendId::LlamaQuantize)
                     .unwrap_or_else(||PathBuf::from("llama-quantize"));
             }
+
             let plan=ojon_backend::uncensor_auto::prepare_uncensor_auto(request)?;
             if execute{
                 let result=ojon_backend::uncensor_auto::run_uncensor_auto(&plan,|line|eprintln!("{line}"))?;
@@ -2061,13 +2088,14 @@ fn run() -> io::Result<()> {
             input.bench_repetitions=prefs.bench_repetitions;
             input.balanced_min_speed_ratio=prefs.balanced_min_speed_ratio;
             input.device=prefs.preferred_device.clone();
-            if matches!(input.device.as_str(),"cuda"|"xpu"){
+            if matches!(input.device.as_str(),"cuda"|"xpu"|"vulkan"){
                 input.runtime_device=prefs.runtime_device.clone();
                 input.gpu_layers=prefs.gpu_layers as i32;
             }
             input.server_tool=ojon_backend::discovered_path(BackendId::LlamaServer);
             let mut json=false;
             let mut confirmed=false;
+            let mut auto_hardware=false;
             while let Some(option)=args.next(){
                 match option.to_str(){
                     Some("--baseline")=>input.current_baseline=Some(
@@ -2133,8 +2161,9 @@ fn run() -> io::Result<()> {
                             input.runtime_device=None;
                         }
                     },
+                    Some("--auto-hardware")=>auto_hardware=true,
                     Some("--runtime-device")=>input.runtime_device=Some(
-                        next_argument(&mut args,"llama.cpp device name, e.g. SYCL0 or CUDA0")?
+                        next_argument(&mut args,"llama.cpp device name, e.g. SYCL0, CUDA0 or Vulkan2")?
                             .to_string_lossy().into_owned()),
                     Some("--gpu-layers")=>input.gpu_layers=next_argument(&mut args,"GPU offload layers")?
                         .to_string_lossy().parse().map_err(|_|invalid("GPU layers must be integer"))?,
@@ -2154,6 +2183,9 @@ fn run() -> io::Result<()> {
             }
             if confirmed && !execute{return Err(invalid("--confirm is only valid with optimize-workflow-run"));}
             if execute && !confirmed{return Err(invalid("optimize-workflow-run requires --confirm"));}
+            if auto_hardware || (matches!(input.device.as_str(),"vulkan"|"cuda"|"xpu") && input.runtime_device.is_none()){
+                input=input.with_auto_hardware();
+            }
             if input.suite.is_none(){
                 input.suite=ojon_backend::discovery::bundled_data_file("sanity-tasks.json");
             }
@@ -2524,6 +2556,30 @@ fn run() -> io::Result<()> {
                 println!("  kl_divergence: {:.4}", receipt.kl_divergence);
                 println!("  passes_negligible_loss_gate: {}", receipt.passes_negligible_loss_gate);
                 println!("  certified_for_production: {}", receipt.certified_for_production);
+            }
+        }
+        Some("flint-compare-logits") => {
+            let reference = PathBuf::from(next_argument(&mut args, "reference _logits_ dump")?);
+            let candidate = PathBuf::from(next_argument(&mut args, "candidate _logits_ dump")?);
+            let mut json = false;
+            while let Some(opt) = args.next() {
+                match opt.to_str() {
+                    Some("--json") => json = true,
+                    _ => return Err(invalid(format!("unknown option: {}", opt.to_string_lossy()))),
+                }
+            }
+            let cmp = ojon_backend::compare_flint_logits_files(&reference, &candidate)?;
+            if json {
+                println!("{}", cmp.as_json());
+            } else {
+                println!("Flint Direct Logits Comparison:");
+                println!("  scored_tokens: {}", cmp.scored_tokens);
+                println!("  vocab_size: {}", cmp.vocab_size);
+                println!("  top1_token_agreement: {:.2}%", cmp.top1_token_agreement_pct);
+                println!("  top5_overlap: {:.2}%", cmp.top5_overlap_pct);
+                println!("  average_cosine_similarity: {:.6}", cmp.average_cosine_similarity);
+                println!("  mean_kl_divergence: {:.6}", cmp.mean_kl_divergence);
+                println!("  max_kl_divergence: {:.6}", cmp.max_kl_divergence);
             }
         }
         Some("flint-functional") => {

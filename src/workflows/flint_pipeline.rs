@@ -8,10 +8,10 @@
 //! - Heretic & Refusal Direction: Multi-block contrastive abliteration with frozen router gating invariants.
 //! Targets host hardware dynamically: evaluates available GPU VRAM, CPU threads, and Host RAM.
 
-use crate::gguf::{inspect_gguf, inspect_gguf_tensors};
+use crate::gguf::{ggml_type_name, inspect_gguf, inspect_gguf_tensors};
 use crate::llama::Precision;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -29,6 +29,8 @@ pub struct FlintMoETopology {
     pub architecture: String,
     pub file_bytes: u64,
     pub total_tensors: u64,
+    pub total_parameters: u64,
+    pub effective_bpw: f64,
     pub block_count: usize,
     pub expert_count: usize,
     pub expert_used_count: usize,
@@ -41,6 +43,11 @@ pub struct FlintMoETopology {
     pub shared_expert_tensor_count: usize,
     pub attention_tensor_count: usize,
     pub other_tensor_count: usize,
+    pub router_tensor_precisions: BTreeMap<String, usize>,
+    pub shared_expert_precisions: BTreeMap<String, usize>,
+    pub packed_expert_precisions: BTreeMap<String, usize>,
+    pub attention_precisions: BTreeMap<String, usize>,
+    pub other_precisions: BTreeMap<String, usize>,
 }
 
 impl FlintMoETopology {
@@ -51,6 +58,8 @@ impl FlintMoETopology {
             "file_bytes": self.file_bytes,
             "file_gib": format!("{:.2} GiB", self.file_bytes as f64 / (1024.0 * 1024.0 * 1024.0)),
             "total_tensors": self.total_tensors,
+            "total_parameters": self.total_parameters,
+            "effective_bpw": (self.effective_bpw * 1000.0).round() / 1000.0,
             "block_count": self.block_count,
             "expert_count": self.expert_count,
             "expert_used_count": self.expert_used_count,
@@ -64,12 +73,19 @@ impl FlintMoETopology {
                 "shared_expert_tensors": self.shared_expert_tensor_count,
                 "attention_tensors": self.attention_tensor_count,
                 "other_tensors": self.other_tensor_count,
+            },
+            "tensor_precisions": {
+                "router_tensors": self.router_tensor_precisions,
+                "packed_expert_tensors": self.packed_expert_precisions,
+                "shared_expert_tensors": self.shared_expert_precisions,
+                "attention_tensors": self.attention_precisions,
+                "other_tensors": self.other_precisions,
             }
         })
     }
 }
 
-/// Inspect a Flint GGUF file and extract its MoE topology.
+/// Inspect a Flint GGUF file and extract its MoE topology and actual tensor precisions.
 pub fn inspect_flint_moe(path: &Path) -> io::Result<FlintMoETopology> {
     let canonical = path.canonicalize()?;
     let summary = inspect_gguf(&canonical)?;
@@ -87,8 +103,15 @@ pub fn inspect_flint_moe(path: &Path) -> io::Result<FlintMoETopology> {
     let mut attention_count = 0;
     let mut other_count = 0;
     let mut max_block_idx = 0;
+    let mut total_parameters = 0u64;
+    let mut router_tensor_precisions = BTreeMap::new();
+    let mut packed_expert_precisions = BTreeMap::new();
+    let mut shared_expert_precisions = BTreeMap::new();
+    let mut attention_precisions = BTreeMap::new();
+    let mut other_precisions = BTreeMap::new();
 
     for t in &tensors {
+        total_parameters = total_parameters.saturating_add(t.elements);
         if let Some(rest) = t.name.strip_prefix("blk.") {
             if let Some(slash_idx) = rest.find('.') {
                 if let Ok(idx) = rest[..slash_idx].parse::<usize>() {
@@ -98,25 +121,39 @@ pub fn inspect_flint_moe(path: &Path) -> io::Result<FlintMoETopology> {
                 }
             }
         }
-
-        if t.name.contains("ffn_gate_inp") {
+        let ty = ggml_type_name(t.storage_type).to_string();
+        if t.name.contains("ffn_gate_inp") || t.name.contains("exp_probs_b") {
             router_count += 1;
+            *router_tensor_precisions.entry(ty).or_insert(0) += 1;
         } else if t.name.contains("_exps") {
             packed_expert_count += 1;
+            *packed_expert_precisions.entry(ty).or_insert(0) += 1;
         } else if t.name.contains("shexp") {
             shared_expert_count += 1;
-        } else if t.name.contains("attn_") {
+            *shared_expert_precisions.entry(ty).or_insert(0) += 1;
+        } else if t.name.contains("attn_") || t.name.contains("ssm_") {
             attention_count += 1;
+            *attention_precisions.entry(ty).or_insert(0) += 1;
         } else {
             other_count += 1;
+            *other_precisions.entry(ty).or_insert(0) += 1;
         }
     }
+
+    let payload_bytes = summary.file_bytes.saturating_sub(summary.data_offset);
+    let effective_bpw = if total_parameters > 0 {
+        (payload_bytes as f64 * 8.0) / (total_parameters as f64)
+    } else {
+        0.0
+    };
 
     Ok(FlintMoETopology {
         model_path: canonical,
         architecture: arch,
         file_bytes: summary.file_bytes,
         total_tensors: tensors.len() as u64,
+        total_parameters,
+        effective_bpw,
         block_count: max_block_idx + 1,
         expert_count: 256,
         expert_used_count: 6,
@@ -129,6 +166,11 @@ pub fn inspect_flint_moe(path: &Path) -> io::Result<FlintMoETopology> {
         shared_expert_tensor_count: shared_expert_count,
         attention_tensor_count: attention_count,
         other_tensor_count: other_count,
+        router_tensor_precisions,
+        shared_expert_precisions,
+        packed_expert_precisions,
+        attention_precisions,
+        other_precisions,
     })
 }
 
@@ -333,29 +375,23 @@ impl FlintParityReceipt {
             "certified_for_production": self.certified_for_production,
             "thresholds": {
                 "negligible_loss_gate": {
-                    "max_kl_divergence": 0.08,
-                    "min_top1_agreement_pct": 95.0,
-                },
-                "production_4bit_gate": {
-                    "max_kl_divergence": 1.00,
-                    "min_top1_agreement_pct": 70.0,
-                    "min_ln_ppl_correlation_pct": 90.0,
+                    "max_kl_divergence_upper_95": MAX_KLD_UPPER_95,
+                    "min_same_top1_pct_lower_95": MIN_SAME_TOP1_LOWER_95,
                     "require_router_verified": true,
-                }
+                },
             }
         })
     }
 }
 
-/// Parse the `_logits_` ground-truth binary format dumped from llama.cpp `--save-all-logits`.
-/// Binary layout:
-/// - magic: `_logits_` (8 bytes)
-/// - context: i32 (4 bytes)
-/// - vocabulary: i32 (4 bytes)
-/// - chunks: i32 (4 bytes)
-/// - tokens: context * chunks * i32 (context * chunks * 4 bytes)
-/// - scored positions count = (context - 1 - context / 2) * chunks
-/// - each scored record has (2 * ((vocabulary + 1) / 2) + 4) half-floats (f16)
+/// Parse the header of a llama-perplexity `--kl-divergence-base` dump.
+/// Binary layout (tools/perplexity/perplexity.cpp):
+/// - magic `_logits_` (8 bytes), then i32 context, i32 vocabulary, i32 chunks
+/// - tokens: context * chunks * i32
+/// - per scored position ((context - 1 - context / 2) * chunks of them) one record of
+///   `2 * ((vocabulary + 1) / 2) + 4` u16 values: an f32 `scale`, an f32 `min_log_prob`,
+///   then one u16 code per vocabulary entry with `log_prob = min_log_prob + scale * code`.
+///   These are compressed log-probabilities, not f16 logits.
 pub fn parse_flint_logits_header(path: &Path) -> io::Result<(usize, usize, usize, usize)> {
     let mut file = File::open(path)?;
     let mut magic = [0u8; 8];
@@ -369,175 +405,146 @@ pub fn parse_flint_logits_header(path: &Path) -> io::Result<(usize, usize, usize
     let vocabulary = i32::from_le_bytes(hdr[4..8].try_into().unwrap()) as usize;
     let chunks = i32::from_le_bytes(hdr[8..12].try_into().unwrap()) as usize;
     let scored = (context.saturating_sub(1).saturating_sub(context / 2)) * chunks;
+    let expected = 20 + (context * chunks * 4) as u64
+        + (scored * (2 * ((vocabulary + 1) / 2) + 4) * 2) as u64;
+    let actual = file.metadata()?.len();
+    if actual != expected {
+        return Err(invalid(format!(
+            "logits dump size {actual} does not match header ({expected} expected); truncated or not a --kl-divergence-base file"
+        )));
+    }
     Ok((context, vocabulary, chunks, scored))
 }
 
-/// Result of direct binary logits comparison between reference and candidate.
+/// Result of a direct comparison between two `--kl-divergence-base` dumps made from the
+/// same tokens. Every field is measured from the decoded distributions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FlintDirectLogitsComparison {
     pub scored_tokens: usize,
     pub vocab_size: usize,
     pub top1_token_agreement_pct: f64,
-    pub top5_token_agreement_pct: f64,
+    /// Mean |top5(ref) ∩ top5(cand)| / 5 over scored positions.
+    pub top5_overlap_pct: f64,
+    /// Mean cosine similarity between probability vectors exp(lp_ref) and exp(lp_cand).
     pub average_cosine_similarity: f64,
     pub mean_kl_divergence: f64,
     pub max_kl_divergence: f64,
 }
 
-fn half_to_float(h: u16) -> f32 {
-    let sign = ((h >> 15) & 1) as u32;
-    let exp = ((h >> 10) & 0x1F) as u32;
-    let mant = (h & 0x3FF) as u32;
-    if exp == 0 {
-        if mant == 0 {
-            f32::from_bits(sign << 31)
-        } else {
-            let mut m = mant;
-            let mut e = 113u32;
-            while (m & 0x400) == 0 {
-                m <<= 1;
-                e -= 1;
-            }
-            f32::from_bits((sign << 31) | (e << 23) | ((m & 0x3FF) << 13))
-        }
-    } else if exp == 31 {
-        if mant == 0 {
-            f32::from_bits((sign << 31) | 0x7F800000)
-        } else {
-            f32::from_bits((sign << 31) | 0x7F800000 | (mant << 13))
-        }
-    } else {
-        let new_exp = exp + 112;
-        f32::from_bits((sign << 31) | (new_exp << 23) | (mant << 13))
+impl FlintDirectLogitsComparison {
+    pub fn as_json(&self) -> Value {
+        json!({
+            "scored_tokens": self.scored_tokens,
+            "vocab_size": self.vocab_size,
+            "top1_token_agreement_pct": self.top1_token_agreement_pct,
+            "top5_overlap_pct": self.top5_overlap_pct,
+            "average_cosine_similarity": self.average_cosine_similarity,
+            "mean_kl_divergence": self.mean_kl_divergence,
+            "max_kl_divergence": self.max_kl_divergence,
+        })
     }
 }
 
-/// Directly compare two binary `.logits` dumps token-by-token and compute real Top-1,
-/// Top-5, Cosine Similarity, and KL Divergence directly from full vocabulary logits.
+/// Decode one record into normalised log-probabilities.
+fn decode_log_probs(record: &[u8], vocab: usize, out: &mut [f64]) {
+    let scale = f32::from_le_bytes(record[0..4].try_into().unwrap()) as f64;
+    let min_log_prob = f32::from_le_bytes(record[4..8].try_into().unwrap()) as f64;
+    for (v, slot) in out.iter_mut().enumerate().take(vocab) {
+        let at = 8 + v * 2;
+        let code = u16::from_le_bytes([record[at], record[at + 1]]) as f64;
+        *slot = min_log_prob + scale * code;
+    }
+    // Codes are 16-bit and the tail is clamped at max-16, so renormalise exactly.
+    let max = out.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let log_z = max + out.iter().map(|x| (x - max).exp()).sum::<f64>().ln();
+    for x in out.iter_mut() {
+        *x -= log_z;
+    }
+}
+
+fn top5(log_probs: &[f64]) -> [usize; 5] {
+    let mut best = [(f64::NEG_INFINITY, 0usize); 5];
+    for (v, &x) in log_probs.iter().enumerate() {
+        if x > best[4].0 {
+            best[4] = (x, v);
+            best.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        }
+    }
+    best.map(|(_, v)| v)
+}
+
+/// Compare two dumps made from identical tokens and context.
 pub fn compare_flint_logits_files(
     reference_path: &Path,
     candidate_path: &Path,
 ) -> io::Result<FlintDirectLogitsComparison> {
     let (ref_ctx, ref_vocab, ref_chunks, ref_scored) = parse_flint_logits_header(reference_path)?;
     let (cand_ctx, cand_vocab, cand_chunks, cand_scored) = parse_flint_logits_header(candidate_path)?;
-
-    if ref_vocab != cand_vocab {
+    if (ref_ctx, ref_vocab, ref_chunks) != (cand_ctx, cand_vocab, cand_chunks) {
         return Err(invalid(format!(
-            "vocabulary size mismatch: ref={ref_vocab}, cand={cand_vocab}"
+            "dumps are not comparable: ref ctx/vocab/chunks={ref_ctx}/{ref_vocab}/{ref_chunks}, cand={cand_ctx}/{cand_vocab}/{cand_chunks}"
         )));
     }
-    if ref_scored == 0 || cand_scored == 0 {
-        return Err(invalid("logits file contains zero scored tokens"));
+    if ref_scored == 0 || ref_scored != cand_scored {
+        return Err(invalid("logits dumps have zero or different scored positions"));
     }
-
-    let tokens_to_score = ref_scored.min(cand_scored);
     let mut ref_file = File::open(reference_path)?;
     let mut cand_file = File::open(candidate_path)?;
-
-    let token_table_bytes = ref_ctx * ref_chunks * 4;
-    ref_file.seek(SeekFrom::Start(20 + token_table_bytes as u64))?;
-    cand_file.seek(SeekFrom::Start(20 + (cand_ctx * cand_chunks * 4) as u64))?;
-
-    let stride_half = 2 * ((ref_vocab + 1) / 2) + 4;
-    let stride_bytes = stride_half * 2;
-
-    let mut buf_ref = vec![0u8; stride_bytes];
-    let mut buf_cand = vec![0u8; stride_bytes];
-
-    let mut top1_matches = 0usize;
-    let mut top5_matches = 0usize;
-    let mut sum_cosine = 0.0f64;
-    let mut sum_kld = 0.0f64;
-    let mut max_kld = 0.0f64;
-
-    for _ in 0..tokens_to_score {
-        ref_file.read_exact(&mut buf_ref)?;
-        cand_file.read_exact(&mut buf_cand)?;
-
-        let mut ref_max_val = f32::NEG_INFINITY;
-        let mut cand_max_val = f32::NEG_INFINITY;
-        let mut ref_top1_idx = 0usize;
-        let mut cand_top1_idx = 0usize;
-
-        let mut ref_top5 = [(f32::NEG_INFINITY, 0usize); 5];
-
-        let mut dot = 0.0f64;
-        let mut ref_norm_sq = 0.0f64;
-        let mut cand_norm_sq = 0.0f64;
-
-        for v in 0..ref_vocab {
-            let r_half = u16::from_le_bytes([buf_ref[v * 2], buf_ref[v * 2 + 1]]);
-            let c_half = u16::from_le_bytes([buf_cand[v * 2], buf_cand[v * 2 + 1]]);
-            let r_f = half_to_float(r_half);
-            let c_f = half_to_float(c_half);
-
-            dot += (r_f as f64) * (c_f as f64);
-            ref_norm_sq += (r_f as f64) * (r_f as f64);
-            cand_norm_sq += (c_f as f64) * (c_f as f64);
-
-            if r_f > ref_max_val {
-                ref_max_val = r_f;
-                ref_top1_idx = v;
-            }
-            if c_f > cand_max_val {
-                cand_max_val = c_f;
-                cand_top1_idx = v;
-            }
-
-            if r_f > ref_top5[4].0 {
-                ref_top5[4] = (r_f, v);
-                ref_top5.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-            }
-        }
-
-        if ref_top1_idx == cand_top1_idx {
-            top1_matches += 1;
-        }
-        if ref_top5.iter().any(|&(_, idx)| idx == cand_top1_idx) {
-            top5_matches += 1;
-        }
-
-        let denom = (ref_norm_sq.sqrt() * cand_norm_sq.sqrt()).max(1e-12);
-        let cos_sim = (dot / denom).clamp(-1.0, 1.0);
-        sum_cosine += cos_sim;
-
-        let mut ref_sum_exp = 0.0f64;
-        let mut cand_sum_exp = 0.0f64;
-        for v in 0..ref_vocab {
-            let r_f = half_to_float(u16::from_le_bytes([buf_ref[v * 2], buf_ref[v * 2 + 1]]));
-            let c_f = half_to_float(u16::from_le_bytes([buf_cand[v * 2], buf_cand[v * 2 + 1]]));
-            ref_sum_exp += ((r_f - ref_max_val) as f64).exp();
-            cand_sum_exp += ((c_f - cand_max_val) as f64).exp();
-        }
-        let ref_log_z = ref_max_val as f64 + ref_sum_exp.ln();
-        let cand_log_z = cand_max_val as f64 + cand_sum_exp.ln();
-
-        let mut token_kld = 0.0f64;
-        for v in 0..ref_vocab {
-            let r_f = half_to_float(u16::from_le_bytes([buf_ref[v * 2], buf_ref[v * 2 + 1]])) as f64;
-            let c_f = half_to_float(u16::from_le_bytes([buf_cand[v * 2], buf_cand[v * 2 + 1]])) as f64;
-            let p = (r_f - ref_log_z).exp();
-            if p > 1e-12 {
-                let log_p = r_f - ref_log_z;
-                let log_q = c_f - cand_log_z;
-                token_kld += p * (log_p - log_q);
-            }
-        }
-
-        let token_kld = token_kld.max(0.0);
-        sum_kld += token_kld;
-        if token_kld > max_kld {
-            max_kld = token_kld;
-        }
+    let mut ref_tokens = vec![0u8; ref_ctx * ref_chunks * 4];
+    let mut cand_tokens = vec![0u8; ref_tokens.len()];
+    ref_file.seek(SeekFrom::Start(20))?;
+    cand_file.seek(SeekFrom::Start(20))?;
+    ref_file.read_exact(&mut ref_tokens)?;
+    cand_file.read_exact(&mut cand_tokens)?;
+    if ref_tokens != cand_tokens {
+        return Err(invalid("dumps were made from different token sequences"));
     }
 
-    let n = tokens_to_score as f64;
+    let record_bytes = (2 * ((ref_vocab + 1) / 2) + 4) * 2;
+    let mut buf_ref = vec![0u8; record_bytes];
+    let mut buf_cand = vec![0u8; record_bytes];
+    let mut lp_ref = vec![0f64; ref_vocab];
+    let mut lp_cand = vec![0f64; ref_vocab];
+    let (mut top1, mut overlap, mut sum_cos, mut sum_kld, mut max_kld) = (0usize, 0usize, 0f64, 0f64, 0f64);
+
+    for _ in 0..ref_scored {
+        ref_file.read_exact(&mut buf_ref)?;
+        cand_file.read_exact(&mut buf_cand)?;
+        decode_log_probs(&buf_ref, ref_vocab, &mut lp_ref);
+        decode_log_probs(&buf_cand, ref_vocab, &mut lp_cand);
+        let (r5, c5) = (top5(&lp_ref), top5(&lp_cand));
+        if r5[0] == c5[0] {
+            top1 += 1;
+        }
+        overlap += r5.iter().filter(|v| c5.contains(v)).count();
+        let mut kld = 0.0f64;
+        let mut dot = 0.0f64;
+        let mut norm_r = 0.0f64;
+        let mut norm_c = 0.0f64;
+        for (&r, &c) in lp_ref.iter().zip(&lp_cand) {
+            let pr = r.exp();
+            let pc = c.exp();
+            kld += pr * (r - c);
+            dot += pr * pc;
+            norm_r += pr * pr;
+            norm_c += pc * pc;
+        }
+        let kld = kld.max(0.0);
+        let denom = (norm_r * norm_c).sqrt();
+        if denom > 0.0 {
+            sum_cos += (dot / denom).clamp(0.0, 1.0);
+        }
+        sum_kld += kld;
+        max_kld = max_kld.max(kld);
+    }
+
+    let n = ref_scored as f64;
     Ok(FlintDirectLogitsComparison {
-        scored_tokens: tokens_to_score,
+        scored_tokens: ref_scored,
         vocab_size: ref_vocab,
-        top1_token_agreement_pct: (top1_matches as f64 / n) * 100.0,
-        top5_token_agreement_pct: (top5_matches as f64 / n) * 100.0,
-        average_cosine_similarity: sum_cosine / n,
+        top1_token_agreement_pct: top1 as f64 / n * 100.0,
+        top5_overlap_pct: overlap as f64 / (n * 5.0) * 100.0,
+        average_cosine_similarity: sum_cos / n,
         mean_kl_divergence: sum_kld / n,
         max_kl_divergence: max_kld,
     })
@@ -566,11 +573,12 @@ pub fn verify_moe_router_storage(model_path: &Path) -> io::Result<bool> {
     Ok(all_high_prec)
 }
 
-/// Measure actual top-k expert routing agreement between two Flint models across all MoE layers.
-pub fn measure_moe_routing_agreement(
+/// Percentage of router (`ffn_gate_inp`) tensors whose GGUF storage type matches the
+/// reference. This is a storage check only: identical router precision does NOT prove
+/// identical expert selection, which needs per-token routing traces.
+pub fn router_storage_type_match_pct(
     reference_gguf: &Path,
     candidate_gguf: &Path,
-    top_k: usize,
 ) -> io::Result<f64> {
     let ref_tensors = inspect_gguf_tensors(reference_gguf)?;
     let cand_tensors = inspect_gguf_tensors(candidate_gguf)?;
@@ -598,16 +606,15 @@ pub fn measure_moe_routing_agreement(
         return Ok(0.0);
     }
 
-    let agreement = (identical_storage as f64 / routers_checked as f64) * 100.0;
-    let _ = top_k;
-    Ok(agreement)
+    Ok((identical_storage as f64 / routers_checked as f64) * 100.0)
 }
 
 /// MoE router guard: Verifies that no abliteration or editing modifies router gating tensors.
 /// Adheres to the ProQuant RoCo (Routing-Consistent) invariant.
 pub fn verify_moe_router_isolation(tensors_to_edit: &[String]) -> io::Result<()> {
     for name in tensors_to_edit {
-        if name.contains("ffn_gate_inp") || name.contains("router") || name.contains("gate_exps") {
+        // ffn_gate_exps are expert FFN weights, not the router; exp_probs_b is the router bias.
+        if name.contains("ffn_gate_inp") || name.contains("exp_probs_b") || name.contains("router") {
             return Err(invalid(format!(
                 "ProQuant RoCo invariant violation: router tensor '{name}' cannot be abliterated without causing expert routing drift"
             )));
@@ -772,6 +779,22 @@ pub fn promote_flint_candidate(pending_path: &Path, receipt: &FlintParityReceipt
             "candidate failed production certification gate; cannot promote to production",
         ));
     }
+    // A receipt is a JSON file anyone can edit: re-check the numbers it carries
+    // against the gate and re-read router storage from the candidate itself.
+    if receipt.kl_divergence > MAX_KLD_UPPER_95
+        || receipt.top1_token_agreement_pct < MIN_SAME_TOP1_LOWER_95
+    {
+        return Err(invalid(format!(
+            "receipt claims certification but its measurements fail the gate (KLD {:.4} > {MAX_KLD_UPPER_95} or same-top1 {:.2}% < {MIN_SAME_TOP1_LOWER_95}%)",
+            receipt.kl_divergence, receipt.top1_token_agreement_pct
+        )));
+    }
+    if receipt.candidate_model_path.canonicalize().ok() != pending_path.canonicalize().ok() {
+        return Err(invalid("receipt was measured on a different candidate file"));
+    }
+    if !verify_moe_router_storage(pending_path)? {
+        return Err(invalid("candidate router tensors are not stored in high precision"));
+    }
 
     let filename = pending_path
         .file_name()
@@ -921,19 +944,22 @@ pub fn evaluate_flint_candidate_logits(
     ));
 
     let ngl = gpu_layers.unwrap_or(0);
+    // The reference dump fixes the context; any other -c makes llama-perplexity refuse it.
+    let ctx = n_tokens.to_string();
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).to_string();
     let mut cmd = Command::new(&tool);
     cmd.arg("-m")
         .arg(&candidate)
         .arg("-c")
-        .arg("2080")
+        .arg(&ctx)
         .arg("-b")
-        .arg("2080")
+        .arg(&ctx)
         .arg("-ub")
-        .arg("2080")
+        .arg("512")
         .arg("-t")
-        .arg("4")
+        .arg(&threads)
         .arg("-tb")
-        .arg("4")
+        .arg(&threads)
         .arg("-fa")
         .arg("on")
         .arg("--no-warmup")
@@ -961,16 +987,8 @@ pub fn evaluate_flint_candidate_logits(
         ))
     })?;
 
-    let kl_upper_95 = metrics.mean_kld.0 + 1.96 * metrics.mean_kld.1;
-    let top1_lower_95 = metrics.same_top_p.0 - 1.96 * metrics.same_top_p.1;
-
-    // Strict Near-Lossless Gate: KLD <= 0.08, Top-1 >= 95.0%
-    let passes_negligible_loss = (kl_upper_95 <= 0.08) && (top1_lower_95 >= 95.0) && router_verified;
-
-    // Working 4-Bit Production Certified Gate: KLD <= 1.00, Top-1 >= 70.0%, Cor(ln PPL) >= 90.0%, Routers Frozen in F32
-    let cor_ppl = metrics.cor_ln_ppl.map(|p| p.0).unwrap_or(0.0);
-    let certified_for_production = passes_negligible_loss
-        || (router_verified && kl_upper_95 <= 1.00 && top1_lower_95 >= 70.0 && cor_ppl >= 90.0);
+    let passes_negligible_loss = parity_gate_passes(
+        metrics.mean_kld, metrics.same_top_p, router_verified);
 
     Ok(FlintParityReceipt {
         reference_logits_path: reference,
@@ -988,10 +1006,23 @@ pub fn evaluate_flint_candidate_logits(
         mean_ppl_q: metrics.mean_ppl_q.map(|p| p.0),
         mean_ppl_base: metrics.mean_ppl_base.map(|p| p.0),
         router_storage_verified: router_verified,
-        moe_top_k_routing_agreement_pct: Some(100.0),
+        // Expert selection is not observable through llama-perplexity; never invent it.
+        moe_top_k_routing_agreement_pct: None,
         passes_negligible_loss_gate: passes_negligible_loss,
-        certified_for_production,
+        certified_for_production: passes_negligible_loss,
     })
+}
+
+/// The single parity gate. Each metric is `(mean, sigma)` as printed by
+/// llama-perplexity; the gate uses the pessimistic 95% bound of both.
+/// There is deliberately no second, looser tier.
+pub const MAX_KLD_UPPER_95: f64 = 0.08;
+pub const MIN_SAME_TOP1_LOWER_95: f64 = 95.0;
+
+pub fn parity_gate_passes(mean_kld: (f64, f64), same_top_p: (f64, f64), router_verified: bool) -> bool {
+    let kl_upper_95 = mean_kld.0 + 1.96 * mean_kld.1;
+    let top1_lower_95 = same_top_p.0 - 1.96 * same_top_p.1;
+    router_verified && kl_upper_95 <= MAX_KLD_UPPER_95 && top1_lower_95 >= MIN_SAME_TOP1_LOWER_95
 }
 
 /// Run the 6 held-out functional test cases against the candidate model.
@@ -1475,6 +1506,94 @@ pub fn assemble_flint_hybrid_gguf(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Write a dump exactly the way llama-perplexity's log_softmax() does.
+    fn write_kld_dump(path: &Path, ctx: usize, rows: &[Vec<f32>]) {
+        let vocab = rows[0].len();
+        let mut f = File::create(path).unwrap();
+        f.write_all(b"_logits_").unwrap();
+        for v in [ctx as i32, vocab as i32, 1] {
+            f.write_all(&v.to_le_bytes()).unwrap();
+        }
+        for t in 0..ctx {
+            f.write_all(&(t as i32).to_le_bytes()).unwrap();
+        }
+        let nv = 2 * ((vocab + 1) / 2) + 4;
+        for logits in rows {
+            let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let min = logits.iter().cloned().fold(f32::INFINITY, f32::min).max(max - 16.0);
+            let lse = logits.iter().map(|x| (x - max).exp()).sum::<f32>().ln();
+            let scale = (max - min) / 65535.0;
+            let mut rec = vec![0u16; nv];
+            let mut head = Vec::new();
+            head.extend_from_slice(&scale.to_le_bytes());
+            head.extend_from_slice(&(min - max - lse).to_le_bytes());
+            for (i, c) in head.chunks(2).enumerate() {
+                rec[i] = u16::from_le_bytes([c[0], c[1]]);
+            }
+            for (i, &x) in logits.iter().enumerate() {
+                rec[4 + i] = if x > min { ((x - min) / scale).round() as u16 } else { 0 };
+            }
+            for v in rec {
+                f.write_all(&v.to_le_bytes()).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn kld_dump_comparison_decodes_llama_format() {
+        let dir = std::env::temp_dir().join(format!("ojon-kld-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let ctx = 8; // scored = 8 - 1 - 4 = 3
+        let base: Vec<Vec<f32>> = (0..3).map(|t| (0..10).map(|v| ((v * 7 + t) % 10) as f32).collect()).collect();
+        let mut moved = base.clone();
+        moved[0][0] = 30.0; // new argmax at position 0 only
+        let (a, b, c) = (dir.join("a.logits"), dir.join("b.logits"), dir.join("c.logits"));
+        write_kld_dump(&a, ctx, &base);
+        write_kld_dump(&b, ctx, &base);
+        write_kld_dump(&c, ctx, &moved);
+
+        let same = compare_flint_logits_files(&a, &b).unwrap();
+        assert_eq!(same.scored_tokens, 3);
+        assert_eq!(same.top1_token_agreement_pct, 100.0);
+        assert_eq!(same.top5_overlap_pct, 100.0);
+        assert!(same.mean_kl_divergence < 1e-9);
+
+        let diff = compare_flint_logits_files(&a, &c).unwrap();
+        assert!((diff.top1_token_agreement_pct - 200.0 / 3.0).abs() < 1e-9);
+        assert!(diff.mean_kl_divergence > 0.1);
+
+        // Truncated dumps are rejected instead of being read as garbage.
+        let raw = fs::read(&a).unwrap();
+        fs::write(&c, &raw[..raw.len() - 2]).unwrap();
+        assert!(compare_flint_logits_files(&a, &c).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parity_gate_has_no_relaxed_tier() {
+        // The published Flint Q4_K_M numbers: KLD 0.7415±0.0555, same-top 74.0±1.4.
+        assert!(!parity_gate_passes((0.7415, 0.0555), (74.013, 1.4), true));
+        assert!(parity_gate_passes((0.02, 0.005), (97.0, 0.5), true));
+        assert!(!parity_gate_passes((0.02, 0.005), (97.0, 0.5), false));
+    }
+
+    #[test]
+    fn promotion_rejects_hand_edited_certification() {
+        let receipt = FlintParityReceipt {
+            reference_logits_path: PathBuf::from("ref.logits"),
+            candidate_model_path: PathBuf::from("x.gguf.pending"),
+            evaluated_tokens: 1039, vocab_size: 150144,
+            top1_token_agreement_pct: 74.013, top5_token_agreement_pct: None,
+            average_cosine_similarity: None, kl_divergence: 0.7415,
+            median_kl_divergence: None, max_kl_divergence: None, rms_delta_p_pct: None,
+            ln_ppl_correlation_pct: None, mean_ppl_q: None, mean_ppl_base: None,
+            router_storage_verified: true, moe_top_k_routing_agreement_pct: None,
+            passes_negligible_loss_gate: true, certified_for_production: true,
+        };
+        let err = promote_flint_candidate(Path::new("x.gguf.pending"), &receipt).unwrap_err();
+        assert!(err.to_string().contains("fail the gate"));
+    }
 
     #[test]
     fn test_roco_router_guard_rejects_gating_tensors() {

@@ -63,9 +63,10 @@ pub fn choose_edit_method(input:&Value)->io::Result<MethodChoice>{
         return Err(invalid("expected ojon.edit_method_scores.v1"));
     }
     let loss=num(input,"max_capability_loss")?;
-    let max_refusal_rate=if input.get("max_refusal_rate").is_some(){
+    let max_refusal_rate=if input.get("max_refusal_rate").is_some_and(|v|!v.is_null()){
         Some(num(input,"max_refusal_rate")?)
     }else{None};
+
     let baseline=input.get("baseline").ok_or_else(||invalid("missing baseline measurements"))?;
     let vision=baseline.get("vision").is_some();
     let base=trial(baseline,vision)?;
