@@ -18,6 +18,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let video_out = PathBuf::from(next_argument(&mut args, "new saved video filename")?);
             let receipt = PathBuf::from(next_argument(&mut args, "new validation receipt JSON")?);
             let mut python = PathBuf::from("python");
+            let mut runtime = "safetensors".to_owned();
             let mut server = None::<String>;
             let mut model_name = None::<String>;
             let mut node_id = None::<String>;
@@ -27,6 +28,13 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             while let Some(arg) = args.next() {
                 match arg.to_str() {
                     Some("--python") => python = PathBuf::from(next_argument(&mut args, "python executable")?),
+                    Some("--runtime") => {
+                        runtime = next_argument(&mut args, "safetensors|orbitquant")?
+                            .to_str().ok_or_else(|| invalid("runtime must be UTF-8"))?.to_owned();
+                        if !matches!(runtime.as_str(), "safetensors" | "orbitquant") {
+                            return Err(invalid("runtime must be safetensors or orbitquant"));
+                        }
+                    },
                     Some("--server") => server = Some(next_argument(&mut args, "loopback ComfyUI URL")?
                         .to_str().ok_or_else(|| invalid("server must be UTF-8"))?.to_owned()),
                     Some("--model-name") => model_name = Some(next_argument(&mut args, "ComfyUI listed model filename")?
@@ -52,7 +60,8 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 .arg("--model").arg(model)
                 .arg("--workflow").arg(workflow)
                 .arg("--video-out").arg(video_out)
-                .arg("--receipt").arg(receipt);
+                .arg("--receipt").arg(receipt)
+                .arg("--runtime").arg(runtime);
             if let Some(value) = server { command.arg("--server").arg(value); }
             if let Some(value) = model_name { command.arg("--model-name").arg(value); }
             if let Some(value) = node_id { command.arg("--node-id").arg(value); }
