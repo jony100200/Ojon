@@ -21,6 +21,8 @@ MAX_HEADER = 32 * 1024 * 1024
 MAX_JSON = 8 * 1024 * 1024
 MAX_VIDEO = 512 * 1024 * 1024
 VIDEO_OUTPUT_NODES = {"SaveVideo", "VHS_VideoCombine"}
+ORBITQUANT_LOADER = "OrbitQuantReleaseLoader"
+ORBITQUANT_OUTPUT = "OrbitQuantGenerateVideo"
 
 
 def fail(text):
@@ -71,24 +73,43 @@ def inspect_checkpoint(path):
     }
 
 
-def prepare_workflow(workflow_file, model_name, node_id):
+def inspect_orbitquant_release(path):
+    path = path.expanduser().resolve(strict=True)
+    if not path.is_dir():
+        fail("OrbitQuant model must be a complete release directory")
+    config_path = path / "comfyui_orbitquant.json"
+    if not config_path.is_file():
+        fail("OrbitQuant release needs comfyui_orbitquant.json; a standalone W4A4 component is not a runnable video pipeline")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(config, dict) or config.get("adapter") != "minimax_h3" or config.get("media_type") != "video":
+        fail("release configuration is not a MiniMax H3 OrbitQuant video bundle")
+    return {"path": str(path), "format_inspection": "ORBITQUANT_MINIMAX_H3_RELEASE_CONFIG_PRESENT",
+            "runtime_requirements": "ComfyUI-OrbitQuant and complete bundled components"}
+
+
+def prepare_workflow(workflow_file, model_name, node_id, runtime="safetensors"):
     workflow = json.loads(workflow_file.read_text(encoding="utf-8"))
     if not isinstance(workflow, dict) or not workflow:
         fail("workflow must be ComfyUI API-format JSON keyed by node ID")
+    loader_type = "UNETLoader" if runtime == "safetensors" else ORBITQUANT_LOADER
+    outputs = VIDEO_OUTPUT_NODES if runtime == "safetensors" else {ORBITQUANT_OUTPUT}
     loaders = [key for key, node in workflow.items()
-               if isinstance(node, dict) and node.get("class_type") == "UNETLoader"]
+               if isinstance(node, dict) and node.get("class_type") == loader_type]
     if node_id is None and len(loaders) != 1:
-        fail("workflow needs exactly one UNETLoader or explicit --node-id")
+        fail(f"workflow needs exactly one {loader_type} or explicit --node-id")
     node_id = node_id or loaders[0]
     if node_id not in loaders:
-        fail("--node-id must identify a UNETLoader node")
-    if not any(isinstance(node, dict) and node.get("class_type") in VIDEO_OUTPUT_NODES
+        fail(f"--node-id must identify a {loader_type} node")
+    if not any(isinstance(node, dict) and node.get("class_type") in outputs
                for node in workflow.values()):
-        fail("workflow has no SaveVideo or VHS_VideoCombine output node")
-    if not model_name.endswith(".safetensors") or "/" in model_name or "\\" in model_name:
-        fail("model name must be a .safetensors filename from the ComfyUI loader list")
+        fail(f"workflow has no video output node for runtime {runtime}")
     workflow = copy.deepcopy(workflow)
-    workflow[node_id].setdefault("inputs", {})["unet_name"] = model_name
+    if runtime == "safetensors":
+        if not model_name.endswith(".safetensors") or "/" in model_name or "\\" in model_name:
+            fail("model name must be a .safetensors filename from the ComfyUI loader list")
+        workflow[node_id].setdefault("inputs", {})["unet_name"] = model_name
+    else:
+        workflow[node_id].setdefault("inputs", {})["model_path"] = model_name
     return workflow, node_id
 
 
@@ -107,18 +128,24 @@ def video_prefix(data):
             or (data.startswith(b"RIFF") and data[8:12] == b"AVI "))
 
 
-def media_items(record):
+def media_items(record, workflow, runtime):
     if record.get("status", {}).get("status_str") == "error":
         fail("ComfyUI history reports an execution error")
     if record.get("status", {}).get("status_str") not in {"success", None}:
         fail("ComfyUI execution did not complete successfully")
     entries = []
-    for node in record.get("outputs", {}).values():
-        if not isinstance(node, dict):
+    for node_id, node in workflow.items():
+        is_output = (node.get("class_type") in VIDEO_OUTPUT_NODES if runtime == "safetensors"
+                     else node.get("class_type") == ORBITQUANT_OUTPUT)
+        if not is_output:
             continue
-        for category in ("videos", "gifs"):
-            for item in node.get(category, []):
-                if isinstance(item, dict) and item.get("filename"):
+        result = record.get("outputs", {}).get(node_id, {})
+        if not isinstance(result, dict):
+            continue
+        for category in ("videos", "gifs", "images"):
+            for item in result.get(category, []):
+                if isinstance(item, dict) and str(item.get("filename", "")).lower().endswith(
+                        (".mp4", ".webm", ".mkv", ".avi")):
                     entries.append(item)
     if not entries:
         fail("ComfyUI completed but did not produce a saved video")
@@ -182,9 +209,12 @@ def probe_video(video_path, ffprobe):
 
 def run(args):
     server = loopback(args.server)
-    model = inspect_checkpoint(args.model)
-    model_name = args.model_name or Path(model["path"]).name
-    workflow, loader_id = prepare_workflow(args.workflow, model_name, args.node_id)
+    runtime = getattr(args, "runtime", "safetensors")
+    if runtime not in {"safetensors", "orbitquant"}:
+        fail("runtime must be safetensors or orbitquant")
+    model = inspect_checkpoint(args.model) if runtime == "safetensors" else inspect_orbitquant_release(args.model)
+    model_name = (args.model_name or Path(model["path"]).name) if runtime == "safetensors" else model["path"]
+    workflow, loader_id = prepare_workflow(args.workflow, model_name, args.node_id, runtime)
     receipt = args.receipt.expanduser().resolve()
     output = args.video_out.expanduser().resolve()
     if not receipt.parent.is_dir() or not output.parent.is_dir():
@@ -194,14 +224,19 @@ def run(args):
     plan = {
         "schema": "ojon.comfy_safetensors_video.v1",
         "status": "PLAN_ONLY", "checkpoint": model, "workflow": str(args.workflow),
-        "loader_id": loader_id, "model_name": model_name, "server": server,
+        "loader_id": loader_id, "runtime": runtime, "model_name": model_name, "server": server,
         "video_out": str(output), "receipt": str(receipt),
         "generation_verified": False, "visual_quality_verified": False,
         "weight_quantization": "UNKNOWN_UNLESS_VALIDATED_BY_RUNTIME",
     }
     if not args.confirm:
         return plan
-    check_loader(server, model_name)
+    if runtime == "safetensors":
+        check_loader(server, model_name)
+    else:
+        info = request_json(server, "/object_info/" + ORBITQUANT_LOADER)
+        if ORBITQUANT_LOADER not in info:
+            fail("ComfyUI-OrbitQuant is not installed or the release loader is missing")
     queued = request_json(server, "/prompt", {"prompt": workflow, "client_id": str(uuid.uuid4())})
     prompt_id = queued.get("prompt_id") if isinstance(queued, dict) else None
     if not prompt_id or queued.get("node_errors"):
@@ -210,7 +245,7 @@ def run(args):
     while time.monotonic() - started < args.timeout:
         history = request_json(server, "/history/" + prompt_id)
         if prompt_id in history:
-            items = media_items(history[prompt_id])
+            items = media_items(history[prompt_id], workflow, runtime)
             count = fetch_video(server, items[0], output)
             check = probe_video(output, args.ffprobe)
             result = dict(plan)
@@ -232,11 +267,13 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--runtime", choices=["safetensors", "orbitquant"], default="safetensors",
+                        help="safetensors uses UNETLoader; orbitquant uses a complete OrbitQuant W4A4 release folder")
     parser.add_argument("--workflow", type=Path, required=True)
     parser.add_argument("--video-out", type=Path, required=True)
     parser.add_argument("--receipt", type=Path, required=True)
-    parser.add_argument("--node-id", help="UNETLoader ID if more than one")
-    parser.add_argument("--model-name", help="filename shown in ComfyUI UNETLoader")
+    parser.add_argument("--node-id", help="loader node ID if more than one")
+    parser.add_argument("--model-name", help="filename shown in ComfyUI UNETLoader (safetensors only)")
     parser.add_argument("--server", default="http://127.0.0.1:8188")
     parser.add_argument("--ffprobe", type=Path)
     parser.add_argument("--timeout", type=int, default=3600)
