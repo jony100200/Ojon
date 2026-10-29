@@ -8,6 +8,10 @@ Ojon is designed to be **one place to inspect, quantize, and test models** using
 
 Intended path: **Import → Inspect → Choose supported conversion → Preflight → Quantize → Test → Export**.
 
+## MiniMax H3 W4A4 and NVFP4 (public experimental adapters)
+
+Use the dedicated [MiniMax H3 guide](docs/MINIMAX_H3.md) for complete requirements, examples and runtime validation. Ojon supports **OrbitQuant W4A4 component conversion** from a full Diffusers directory and **NVFP4 single-file ComfyUI safetensors conversion** from a compatible original checkpoint. These are separate methods; a packed component does **not** constitute a runnable OrbitQuant video release, and NVFP4 storage does **not** guarantee 4-bit activation inference. The video smoke test accepts either a standard ComfyUI UNETLoader workflow or an OrbitQuant complete-release workflow selected explicitly with --runtime orbitquant. CI covers protocol tests, not actual GPU video generation or quality parity.
+
 ## Resource preflight and large model precautions
 
 Use Ojon's non-invasive resource checks before attempting a 50GB or 95GB original model. It reads actual free host RAM and destination drive capacity, and detects NVIDIA per-device free VRAM where `nvidia-smi` is installed. **Intel Arc/XPU free VRAM is measured only when optional `xpu-smi` supports a valid single-shot memory query.** If it is missing, unsupported on the operating system or reports `N/A`, the free VRAM remains unknown; total advertised capacity is never assumed free.
