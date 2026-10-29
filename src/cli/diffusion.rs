@@ -1,6 +1,7 @@
 //! Diffusion model quantization, packing, unpacking, and smoke test commands.
 
 use crate::cli::common::{invalid, next_argument};
+use ojon_backend::models::comfy_checkpoint::{prepare_minimax_checkpoint, run_minimax_checkpoint};
 use ojon_backend::models::orbitquant::{prepare_minimax_w4a4, run_minimax_w4a4, MiniMaxComponent};
 use ojon_backend::diffusion_gguf::*;
 use ojon_backend::*;
@@ -10,6 +11,39 @@ use std::path::PathBuf;
 
 pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result<bool> {
     match cmd {
+        "minimax-checkpoint-plan" | "minimax-checkpoint-run" => {
+            let execute = cmd == "minimax-checkpoint-run";
+            let source = PathBuf::from(next_argument(&mut args, "single-file MiniMax-H3 BF16 .safetensors checkpoint")?);
+            let output = PathBuf::from(next_argument(&mut args, "new ComfyUI NVFP4 .safetensors checkpoint")?);
+            let mut converter = PathBuf::from("ctq");
+            let mut device = "auto".to_owned();
+            let mut confirmed = false;
+            while let Some(opt) = args.next() {
+                match opt.to_str() {
+                    Some("--converter") => converter = PathBuf::from(next_argument(&mut args, "installed ctq executable")?),
+                    Some("--device") => {
+                        device = next_argument(&mut args, "cpu|cuda|xpu|auto")?
+                            .to_str().ok_or_else(|| invalid("device must be UTF-8"))?.to_owned()
+                    }
+                    Some("--confirm") if execute => confirmed = true,
+                    _ => return Err(invalid(format!(
+                        "unknown MiniMax-H3 checkpoint option: {}",
+                        opt.to_string_lossy()
+                    ))),
+                }
+            }
+            let plan = prepare_minimax_checkpoint(&source, &output, &converter, &device)?;
+            if !execute {
+                println!("{}", plan.json());
+            } else {
+                if !confirmed {
+                    return Err(invalid("real MiniMax-H3 NVFP4 conversion requires --confirm"));
+                }
+                let result = run_minimax_checkpoint(&plan, |line| eprintln!("{line}"))?;
+                println!("{result}");
+            }
+            Ok(true)
+        }
         "minimax-w4a4-plan" | "minimax-w4a4-run" => {
             let execute = cmd == "minimax-w4a4-run";
             let source = PathBuf::from(next_argument(&mut args, "local MiniMax-H3 Diffusers folder")?);
