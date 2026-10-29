@@ -1084,6 +1084,10 @@ mod tests {
         write_mock_model(&model);
 
         let mut request = UncensorAutoRequest::new(model, dir.clone());
+        // Planning only checks the path; no external tool is executed by this test.
+        let mock_generator = dir.join("llama-cvector-generator");
+        fs::write(&mock_generator, b"test fixture").unwrap();
+        request.cvector_generator = mock_generator;
         request.allow_resource_risk = true;
         // Test with explicit blocks and strengths
         request.strengths = vec![0.15, 0.30];
