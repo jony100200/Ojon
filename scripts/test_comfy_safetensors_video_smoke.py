@@ -173,7 +173,7 @@ class Tests(unittest.TestCase):
     def test_orbitquant_rejects_single_component_and_wrong_adapter(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            with self.assertRaisesRegex(ValueError, "complete release"):
+            with self.assertRaisesRegex(ValueError, "comfyui_orbitquant.json"):
                 smoke.inspect_orbitquant_release(root)
             (root / "comfyui_orbitquant.json").write_text(json.dumps({
                 "adapter": "other", "media_type": "video"
