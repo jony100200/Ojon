@@ -83,8 +83,8 @@ Commands:
   ojon diffusion-gguf-smoke-run <denoiser.gguf> <output.png|webm> [same options] --confirm
   ojon diffusion-gguf-comfy-plan <denoiser.gguf> <api-workflow.json> <receipt.json> [--kind image|video] [--python python] [--node-id ID] [--server http://127.0.0.1:8188]
   ojon diffusion-gguf-comfy-run  <denoiser.gguf> <api-workflow.json> <receipt.json> [same options] --confirm
-  ojon minimax-video-test-plan <packed-H3.safetensors> <ComfyUI-api-workflow.json> <new-video.mp4> <new-receipt.json> [--server http://127.0.0.1:8188] [--ffprobe path]
-  ojon minimax-video-test-run  <packed-H3.safetensors> <ComfyUI-api-workflow.json> <new-video.mp4> <new-receipt.json> [same options] --confirm
+  ojon minimax-video-test-plan <safetensors-file|OrbitQuant-release-dir> <ComfyUI-api-workflow.json> <new-video.mp4> <new-receipt.json> [--runtime safetensors|orbitquant] [--server http://127.0.0.1:8188] [--ffprobe path]
+  ojon minimax-video-test-run  <safetensors-file|OrbitQuant-release-dir> <ComfyUI-api-workflow.json> <new-video.mp4> <new-receipt.json> [same options] --confirm
   ojon minimax-checkpoint-plan <original-MiniMax-H3.safetensors> <new-NVFP4.safetensors> [--converter ctq] [--device cpu|cuda|xpu|auto]
   ojon minimax-checkpoint-run  <original-MiniMax-H3.safetensors> <new-NVFP4.safetensors> [same options] --confirm
   ojon minimax-w4a4-plan <local-MiniMax-H3-Diffusers-dir> <new-artifact-dir> [--component fl2va|ref2va|text_encoder] [--device cuda|xpu|cpu|auto] [--python python]
