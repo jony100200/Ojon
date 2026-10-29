@@ -5,6 +5,7 @@ pub mod hf;
 pub mod llama;
 pub mod model_build;
 pub mod orbitquant;
+pub mod comfy_checkpoint;
 
 pub use diffusion::*;
 pub use diffusion_gguf::*;
@@ -13,3 +14,4 @@ pub use hf::*;
 pub use llama::*;
 pub use model_build::*;
 pub use orbitquant::*;
+pub use comfy_checkpoint::*;
