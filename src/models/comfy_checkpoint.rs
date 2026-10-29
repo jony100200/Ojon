@@ -190,6 +190,7 @@ pub fn run_minimax_checkpoint(
         .arg("--low-memory")
         .arg("--simple")
         .arg("--exclude-layers").arg(H3_PROTECTED)
+        .arg("--preserve-layers").arg(H3_PROTECTED)
         .env("HF_HUB_OFFLINE", "1")
         .env("TRANSFORMERS_OFFLINE", "1")
         .env("WANDB_MODE", "offline");
@@ -212,6 +213,44 @@ pub fn run_minimax_checkpoint(
         return Err(io::Error::new(ErrorKind::InvalidData,
             "quantization output lost the H3 transformer tensor structure"));
     }
+    // Validate the ComfyUI native format from actual metadata payload bytes.
+    // A few matching tensor names are not enough to prove NVFP4 export.
+    let mut output_file = File::open(&stage.0)?;
+    let mut length_bytes = [0u8; 8];
+    output_file.read_exact(&mut length_bytes)?;
+    let data_start = 8u64 + u64::from_le_bytes(length_bytes);
+    let mut nvfp4_count = 0usize;
+    use std::io::{Seek, SeekFrom};
+    for (name, tensor) in &packed {
+        if !name.ends_with(".comfy_quant") {
+            continue;
+        }
+        let offsets = tensor["data_offsets"].as_array()
+            .ok_or_else(|| invalid("invalid quantization metadata offsets"))?;
+        let start = offsets[0].as_u64().ok_or_else(|| invalid("missing metadata offset"))?;
+        let end = offsets[1].as_u64().ok_or_else(|| invalid("missing metadata end"))?;
+        if end <= start || end - start > 1024 {
+            return Err(invalid("invalid ComfyUI quantization metadata size"));
+        }
+        let mut bytes = vec![0u8; (end - start) as usize];
+        output_file.seek(SeekFrom::Start(data_start + start))?;
+        output_file.read_exact(&mut bytes)?;
+        let meta: Value = serde_json::from_slice(&bytes)
+            .map_err(|err| invalid(format!("invalid ComfyUI quantization marker: {err}")))?;
+        if meta["format"] != "nvfp4" {
+            return Err(invalid(format!("unexpected quantization type for {name}")));
+        }
+        if ["blocks.0.", "blocks.1.", "blocks.47.", "blocks.48.", "blocks.49."]
+            .iter().any(|prefix| name.starts_with(prefix))
+        {
+            return Err(invalid(format!("protected H3 boundary block was quantized: {name}")));
+        }
+        nvfp4_count += 1;
+    }
+    if nvfp4_count != quantized {
+        return Err(invalid("ComfyUI metadata inventory mismatch"));
+    }
+
     if plan.output.symlink_metadata().is_ok() {
         return Err(io::Error::new(ErrorKind::AlreadyExists, "output created concurrently"));
     }
