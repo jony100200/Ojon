@@ -39,10 +39,14 @@ class FakeComfy(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/object_info/UNETLoader":
             self.respond({"UNETLoader": {"input": {"required": {"unet_name": [["packed.safetensors"]]}}}})
+        elif self.path == "/object_info/OrbitQuantReleaseLoader":
+            self.respond({"OrbitQuantReleaseLoader": {"input": {"required": {"model_path": ["STRING"]}}}})
         elif self.path.startswith("/history/"):
             outputs = {"7": {"videos": [{"filename": "sample.mp4", "type": "output"}]}}
             if type(self).scenario == "missing":
                 outputs = {"7": {"images": [{"filename": "still.png"}]}}
+            elif type(self).scenario == "orbitquant":
+                outputs = {"7": {"images": [{"filename": "orbitquant.mp4", "type": "output"}]}}
             self.respond({"smoke-test": {"status": {"status_str": "success"}, "outputs": outputs}})
         elif self.path.startswith("/view?"):
             self.send_response(200)
@@ -119,6 +123,63 @@ class Tests(unittest.TestCase):
                 http.shutdown()
                 http.server_close()
                 thread.join(timeout=3)
+
+    def test_w4a4_orbitquant_release_requires_real_video_and_correct_loader(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            release = root / "release"
+            release.mkdir()
+            (release / "comfyui_orbitquant.json").write_text(json.dumps({
+                "schema_version": 1, "adapter": "minimax_h3", "media_type": "video"
+            }), encoding="utf-8")
+            flow = root / "w4a4-workflow.json"
+            flow.write_text(json.dumps({
+                "1": {"class_type": "OrbitQuantReleaseLoader",
+                      "inputs": {"model_path": "/not/the/actual/model"}},
+                "7": {"class_type": "OrbitQuantGenerateVideo",
+                      "inputs": {"release": ["1", 0], "prompt": "A moving scene"}}
+            }), encoding="utf-8")
+            server = HTTPServer(("127.0.0.1", 0), FakeComfy)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                args = argparse.Namespace(
+                    model=release, workflow=flow, model_name=None, node_id=None,
+                    runtime="orbitquant", server=f"http://127.0.0.1:{server.server_port}",
+                    receipt=root / "w4a4-receipt.json", video_out=root / "clip.mp4",
+                    ffprobe=None, timeout=30, confirm=False)
+                self.assertEqual(smoke.run(args)["status"], "PLAN_ONLY")
+                self.assertFalse(args.receipt.exists())
+                args.confirm = True
+                FakeComfy.scenario = "orbitquant"
+                with patch.object(smoke, "probe_video", return_value={
+                        "verified": True, "decoded_frames": 24, "width": 608, "height": 480}):
+                    result = smoke.run(args)
+                self.assertEqual(result["runtime"], "orbitquant")
+                self.assertEqual(FakeComfy.observed["1"]["inputs"]["model_path"], str(release.resolve()))
+                self.assertTrue(args.video_out.is_file())
+                self.assertTrue(args.receipt.is_file())
+                args.receipt.unlink()
+                args.video_out.unlink()
+                FakeComfy.scenario = "missing"
+                with self.assertRaisesRegex(ValueError, "did not produce a saved video"):
+                    smoke.run(args)
+                self.assertFalse(args.receipt.exists())
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=3)
+
+    def test_orbitquant_rejects_single_component_and_wrong_adapter(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with self.assertRaisesRegex(ValueError, "complete release"):
+                smoke.inspect_orbitquant_release(root)
+            (root / "comfyui_orbitquant.json").write_text(json.dumps({
+                "adapter": "other", "media_type": "video"
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "not a MiniMax"):
+                smoke.inspect_orbitquant_release(root)
 
     def test_invalid_checkpoint_rejected_before_submission(self):
         with tempfile.TemporaryDirectory() as folder:
