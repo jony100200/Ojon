@@ -14,12 +14,18 @@ import subprocess
 import sys
 import time
 from urllib.parse import urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener, HTTPRedirectHandler
 import uuid
 
 MAX_HEADER = 32 * 1024 * 1024
 MAX_JSON = 8 * 1024 * 1024
 MAX_VIDEO = 512 * 1024 * 1024
+class RejectRedirects(HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+
+HTTP = build_opener(RejectRedirects)
 VIDEO_OUTPUT_NODES = {"SaveVideo", "VHS_VideoCombine"}
 ORBITQUANT_LOADER = "OrbitQuantReleaseLoader"
 ORBITQUANT_OUTPUT = "OrbitQuantGenerateVideo"
@@ -41,7 +47,7 @@ def loopback(raw):
 def request_json(server, endpoint, data=None):
     payload = None if data is None else json.dumps(data).encode("utf-8")
     req = Request(server + endpoint, data=payload, headers={"Content-Type": "application/json"})
-    with urlopen(req, timeout=30) as response:
+    with HTTP.open(req, timeout=30) as response:
         body = response.read(MAX_JSON + 1)
     if len(body) > MAX_JSON:
         fail("ComfyUI response exceeds 8 MiB")
@@ -81,7 +87,8 @@ def inspect_orbitquant_release(path):
     if not config_path.is_file():
         fail("OrbitQuant release needs comfyui_orbitquant.json; a standalone W4A4 component is not a runnable video pipeline")
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    if not isinstance(config, dict) or config.get("adapter") != "minimax_h3" or config.get("media_type") != "video":
+    if (not isinstance(config, dict) or config.get("schema_version") != 1
+            or config.get("adapter") != "minimax_h3" or config.get("media_type") != "video"):
         fail("release configuration is not a MiniMax H3 OrbitQuant video bundle")
     return {"path": str(path), "format_inspection": "ORBITQUANT_MINIMAX_H3_RELEASE_CONFIG_PRESENT",
             "runtime_requirements": "ComfyUI-OrbitQuant and complete bundled components"}
@@ -135,6 +142,8 @@ def media_items(record, workflow, runtime):
         fail("ComfyUI execution did not complete successfully")
     entries = []
     for node_id, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
         is_output = (node.get("class_type") in VIDEO_OUTPUT_NODES if runtime == "safetensors"
                      else node.get("class_type") == ORBITQUANT_OUTPUT)
         if not is_output:
@@ -161,7 +170,7 @@ def fetch_video(server, item, output_path):
     if output_path.exists() or temporary.exists():
         fail("refusing to overwrite existing video or partial download")
     try:
-        with urlopen(server + "/view?" + query, timeout=90) as response:
+        with HTTP.open(server + "/view?" + query, timeout=90) as response:
             with temporary.open("xb") as handle:
                 first = response.read(32)
                 if not video_prefix(first):
@@ -213,6 +222,8 @@ def run(args):
     if runtime not in {"safetensors", "orbitquant"}:
         fail("runtime must be safetensors or orbitquant")
     model = inspect_checkpoint(args.model) if runtime == "safetensors" else inspect_orbitquant_release(args.model)
+    if runtime == "orbitquant" and args.model_name:
+        fail("--model-name is only valid for the safetensors UNETLoader runtime")
     model_name = (args.model_name or Path(model["path"]).name) if runtime == "safetensors" else model["path"]
     workflow, loader_id = prepare_workflow(args.workflow, model_name, args.node_id, runtime)
     receipt = args.receipt.expanduser().resolve()
