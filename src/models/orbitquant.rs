@@ -164,6 +164,13 @@ pub fn prepare_minimax_w4a4(
     })
 }
 
+struct StagedDirectory(PathBuf);
+impl Drop for StagedDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Invokes the real, independently installed OrbitQuant conversion and validator.
 /// No network downloads, shell strings, overwrite or synthetic success receipt.
 pub fn run_minimax_w4a4(
@@ -176,15 +183,15 @@ pub fn run_minimax_w4a4(
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH)
         .map_err(io::Error::other)?.as_nanos();
     let name = plan.output.file_name().unwrap().to_string_lossy();
-    let stage = plan.output.with_file_name(format!(".{name}.ojon-{}-{nonce}.partial", std::process::id()));
-    if stage.symlink_metadata().is_ok() {
+    let stage = StagedDirectory(plan.output.with_file_name(format!(".{name}.ojon-{}-{nonce}.partial", std::process::id())));
+    if stage.0.symlink_metadata().is_ok() {
         return Err(io::Error::new(ErrorKind::AlreadyExists, "staging path exists"));
     }
     let mut convert = Command::new(&plan.python);
     convert.arg("-m").arg("orbitquant.cli.main")
         .arg("quantize")
         .arg("--model-id").arg(&plan.source)
-        .arg("--output").arg(&stage)
+        .arg("--output").arg(&stage.0)
         .arg("--component").arg(plan.component.directory())
         .arg("--weight-bits").arg("4")
         .arg("--activation-bits").arg("4")
@@ -198,13 +205,13 @@ pub fn run_minimax_w4a4(
         .env("WANDB_MODE", "offline");
     log("MiniMax-H3 W4A4: running installed OrbitQuant conversion");
     run_with_log(&mut convert, &mut log)?;
-    if !stage.is_dir() || !has_safetensors(&stage)? {
+    if !stage.0.is_dir() || !has_safetensors(&stage.0)? {
         return Err(io::Error::new(ErrorKind::InvalidData,
             "OrbitQuant returned without a packed safetensors artifact"));
     }
     let mut verify = Command::new(&plan.python);
     verify.arg("-m").arg("orbitquant.cli.main")
-        .arg("validate-artifact").arg("--artifact").arg(&stage)
+        .arg("validate-artifact").arg("--artifact").arg(&stage.0)
         .env("HF_HUB_OFFLINE", "1")
         .env("TRANSFORMERS_OFFLINE", "1");
     log("MiniMax-H3 W4A4: validating packed artifact with OrbitQuant");
@@ -212,7 +219,7 @@ pub fn run_minimax_w4a4(
     if plan.output.symlink_metadata().is_ok() {
         return Err(io::Error::new(ErrorKind::AlreadyExists, "output created concurrently"));
     }
-    fs::rename(&stage, &plan.output)?;
+    fs::rename(&stage.0, &plan.output)?;
     Ok(json!({
         "schema": "ojon.minimax_h3_w4a4.v1",
         "status": "PACKED_ARTIFACT_VALIDATED",
