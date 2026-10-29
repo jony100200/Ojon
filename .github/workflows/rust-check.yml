@@ -31,6 +31,9 @@ jobs:
       - name: Check CLI and backend
         run: cargo check --locked --bin ojon
 
+      - name: Test MiniMax compressed video smoke protocol
+        run: python -m unittest discover -s scripts -p "test_comfy_safetensors_video_smoke.py" -v
+
       - name: Test Rust backend and CLI
         run: cargo test --locked --lib --bin ojon
 
