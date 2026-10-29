@@ -83,6 +83,8 @@ Commands:
   ojon diffusion-gguf-smoke-run <denoiser.gguf> <output.png|webm> [same options] --confirm
   ojon diffusion-gguf-comfy-plan <denoiser.gguf> <api-workflow.json> <receipt.json> [--kind image|video] [--python python] [--node-id ID] [--server http://127.0.0.1:8188]
   ojon diffusion-gguf-comfy-run  <denoiser.gguf> <api-workflow.json> <receipt.json> [same options] --confirm
+  ojon minimax-w4a4-plan <local-MiniMax-H3-Diffusers-dir> <new-artifact-dir> [--component fl2va|ref2va|text_encoder] [--device cuda|xpu|cpu|auto] [--python python]
+  ojon minimax-w4a4-run  <local-MiniMax-H3-Diffusers-dir> <new-artifact-dir> [same options] --confirm
   ojon diffusion-plan <local-source> <output.safetensors> --checkout <upstream> [--backend svdq] [--kind image|video] [--format int4] [--python python] [--samples 32]
   ojon pack-plan <original.safetensors> <output.ojonq> [--bits 4] [--group 64]
   ojon pack-run  <original.safetensors> <output.ojonq> [options] --confirm
