@@ -11,6 +11,57 @@ use std::path::PathBuf;
 
 pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result<bool> {
     match cmd {
+        "minimax-video-test-plan" | "minimax-video-test-run" => {
+            let execute = cmd == "minimax-video-test-run";
+            let model = PathBuf::from(next_argument(&mut args, "packed MiniMax-H3 .safetensors")?);
+            let workflow = PathBuf::from(next_argument(&mut args, "ComfyUI API-format video workflow JSON")?);
+            let video_out = PathBuf::from(next_argument(&mut args, "new saved video filename")?);
+            let receipt = PathBuf::from(next_argument(&mut args, "new validation receipt JSON")?);
+            let mut python = PathBuf::from("python");
+            let mut server = None::<String>;
+            let mut model_name = None::<String>;
+            let mut node_id = None::<String>;
+            let mut ffprobe = None::<PathBuf>;
+            let mut timeout = None::<u32>;
+            let mut confirmed = false;
+            while let Some(arg) = args.next() {
+                match arg.to_str() {
+                    Some("--python") => python = PathBuf::from(next_argument(&mut args, "python executable")?),
+                    Some("--server") => server = Some(next_argument(&mut args, "loopback ComfyUI URL")?
+                        .to_str().ok_or_else(|| invalid("server must be UTF-8"))?.to_owned()),
+                    Some("--model-name") => model_name = Some(next_argument(&mut args, "ComfyUI listed model filename")?
+                        .to_str().ok_or_else(|| invalid("model name must be UTF-8"))?.to_owned()),
+                    Some("--node-id") => node_id = Some(next_argument(&mut args, "UNETLoader node ID")?
+                        .to_str().ok_or_else(|| invalid("node id must be UTF-8"))?.to_owned()),
+                    Some("--ffprobe") => ffprobe = Some(PathBuf::from(next_argument(&mut args, "ffprobe executable")?)),
+                    Some("--timeout") => timeout = Some(next_argument(&mut args, "timeout seconds")?
+                        .to_str().ok_or_else(|| invalid("timeout must be UTF-8"))?
+                        .parse().map_err(|_| invalid("timeout must be integer seconds"))?),
+                    Some("--confirm") if execute => confirmed = true,
+                    _ => return Err(invalid(format!("unknown MiniMax video test argument: {}",
+                        arg.to_string_lossy()))),
+                }
+            }
+            if execute && !confirmed {
+                return Err(invalid("real MiniMax video generation requires --confirm"));
+            }
+            // Embedded adapter keeps the compiled CLI independent of the working directory.
+            // It submits only to loopback ComfyUI and requires a saved video artifact.
+            let mut command = std::process::Command::new(python);
+            command.arg("-c").arg(include_str!("../../scripts/comfy_safetensors_video_smoke.py"))
+                .arg("--model").arg(model)
+                .arg("--workflow").arg(workflow)
+                .arg("--video-out").arg(video_out)
+                .arg("--receipt").arg(receipt);
+            if let Some(value) = server { command.arg("--server").arg(value); }
+            if let Some(value) = model_name { command.arg("--model-name").arg(value); }
+            if let Some(value) = node_id { command.arg("--node-id").arg(value); }
+            if let Some(value) = ffprobe { command.arg("--ffprobe").arg(value); }
+            if let Some(value) = timeout { command.arg("--timeout").arg(value.to_string()); }
+            if execute { command.arg("--confirm"); }
+            ojon_backend::jobs::run_with_log(&mut command, |line| println!("{line}"))?;
+            Ok(true)
+        }
         "minimax-checkpoint-plan" | "minimax-checkpoint-run" => {
             let execute = cmd == "minimax-checkpoint-run";
             let source = PathBuf::from(next_argument(&mut args, "single-file MiniMax-H3 BF16 .safetensors checkpoint")?);
