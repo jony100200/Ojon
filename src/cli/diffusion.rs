@@ -1,6 +1,7 @@
 //! Diffusion model quantization, packing, unpacking, and smoke test commands.
 
 use crate::cli::common::{invalid, next_argument};
+use ojon_backend::models::orbitquant::{prepare_minimax_w4a4, run_minimax_w4a4, MiniMaxComponent};
 use ojon_backend::diffusion_gguf::*;
 use ojon_backend::*;
 use std::ffi::OsString;
@@ -9,6 +10,46 @@ use std::path::PathBuf;
 
 pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result<bool> {
     match cmd {
+        "minimax-w4a4-plan" | "minimax-w4a4-run" => {
+            let execute = cmd == "minimax-w4a4-run";
+            let source = PathBuf::from(next_argument(&mut args, "local MiniMax-H3 Diffusers folder")?);
+            let output = PathBuf::from(next_argument(&mut args, "new packed W4A4 artifact directory")?);
+            let mut python = PathBuf::from("python");
+            let mut component = MiniMaxComponent::Fl2va;
+            let mut device = "auto".to_owned();
+            let mut confirm = false;
+            while let Some(option) = args.next() {
+                match option.to_str() {
+                    Some("--python") => python = PathBuf::from(next_argument(&mut args, "Python interpreter")?),
+                    Some("--component") => {
+                        component = MiniMaxComponent::parse(
+                            next_argument(&mut args, "fl2va|ref2va|text_encoder")?
+                                .to_str().ok_or_else(|| invalid("component must be UTF-8"))?,
+                        )?;
+                    }
+                    Some("--device") => {
+                        device = next_argument(&mut args, "auto|cpu|cuda|xpu")?
+                            .to_str().ok_or_else(|| invalid("device must be UTF-8"))?.to_owned();
+                    }
+                    Some("--confirm") if execute => confirm = true,
+                    _ => return Err(invalid(format!(
+                        "unknown MiniMax-H3 W4A4 option: {}",
+                        option.to_string_lossy()
+                    ))),
+                }
+            }
+            let plan = prepare_minimax_w4a4(&source, &output, &python, component, &device)?;
+            if !execute {
+                println!("{}", plan.json());
+            } else {
+                if !confirm {
+                    return Err(invalid("MiniMax-H3 W4A4 conversion requires --confirm"));
+                }
+                let result = run_minimax_w4a4(&plan, |line| eprintln!("{line}"))?;
+                println!("{result}");
+            }
+            Ok(true)
+        }
         "pack-plan" | "pack-run" => {
             let execute = cmd == "pack-run";
             let source = PathBuf::from(next_argument(
