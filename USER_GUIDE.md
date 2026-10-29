@@ -17,10 +17,12 @@ Use the dedicated [MiniMax H3 guide](docs/MINIMAX_H3.md) for complete requiremen
 Use Ojon's non-invasive resource checks before attempting a 50GB or 95GB original model. It reads actual free host RAM and destination drive capacity, and detects NVIDIA per-device free VRAM where `nvidia-smi` is installed. **Intel Arc/XPU free VRAM is measured only when optional `xpu-smi` supports a valid single-shot memory query.** If it is missing, unsupported on the operating system or reports `N/A`, the free VRAM remains unknown; total advertised capacity is never assumed free.
 
 ```powershell
-ojon resource-plan "M:\Models\original-hf" "M:\OjonOutputs" --mode hqq --device xpu --json
-ojon resource-plan "M:\Models\original-hf" "M:\OjonOutputs" --mode openvino --device cpu --json
-ojon resource-plan "M:\Models\original-hf" "M:\OjonOutputs" --mode autoround --device xpu --json
+ojon resource-plan "./models/original-hf" "./outputs" --mode hqq --device xpu --json
+ojon resource-plan "./models/original-hf" "./outputs" --mode openvino --device cpu --json
+ojon resource-plan "./models/original-hf" "./outputs" --mode autoround --device xpu --json
 ```
+
+Examples use portable relative paths. Create the indicated directories, or replace the examples with suitable locations on your machine.
 
 The HQQ, OpenVINO and AutoRound *operator safety budget* requires at least original source weight bytes plus a **4 GiB RAM reserve**; destination capacity requires original weight bytes plus **2 GiB disk reserve** (or twice source weights for AutoRound/GGUF). These are policy floors, **not** estimates of actual peak memory. Backend activation, GPU driver support and runtime compatibility are separate tests. Streamed GGUF/native packers are not assigned imaginary peak RAM.
 
@@ -32,12 +34,12 @@ These commands work independently of the KS llama.cpp build. Install public `hqq
 
 ```powershell
 # Dry-run plan, no model loaded
-ojon research-plan hqq "C:\Models\original-hf" "C:\Models\out-hqq" --device cpu --bits 4 --group 64 --json
-ojon research-plan openvino "C:\Models\original-hf" "C:\Models\out-ov-int4" --bits 4 --ratio 1.0 --json
-ojon research-plan openvino "C:\Models\original-hf" "C:\Models\out-ov-mixed" --bits 4 --ratio 0.8 --json
+ojon research-plan hqq "./models/original-hf" "./models/out-hqq" --device cpu --bits 4 --group 64 --json
+ojon research-plan openvino "./models/original-hf" "./models/out-ov-int4" --bits 4 --ratio 1.0 --json
+ojon research-plan openvino "./models/original-hf" "./models/out-ov-mixed" --bits 4 --ratio 0.8 --json
 
 # After validating available RAM, Python packages and target loader, authorize only the chosen experiment
-ojon research-run openvino "C:\Models\original-hf" "C:\Models\out-ov-int4" --bits 4 --ratio 1.0 --confirm
+ojon research-run openvino "./models/original-hf" "./models/out-ov-int4" --bits 4 --ratio 1.0 --confirm
 ```
 
 HQQ exports `qmodel.pt` and `config.json`, not GGUF; use `AutoHQQHFModel.from_quantized` for compatible inference. OpenVINO exports matching `.xml/.bin` IR artifacts, not GGUF; use OpenVINO/Optimum Intel loaders. Both conversions are staged to avoid publishing an incomplete final output and explicitly refuse to overwrite existing results. They block automatic Hugging Face network downloads. Their output checks do **not** run the loaders, measure memory or evaluate quality. Intel Arc/XPU acceleration is possible only where the exact installed device kernel, PyTorch and model architecture support it. Do not attempt a larger-than-RAM original checkpoint until streaming/offloading has been benchmarked.
@@ -49,8 +51,8 @@ Plan a genuine AutoRound GGUF export with `gguf:q4_k_m` (default) or `--bits 5 -
 For calibrated tuning, provide an existing local JSON dataset and nonzero iteration count. Without an explicit dataset, Ojon uses 0-iteration RTN and blocks automatic model/dataset downloads when running.
 
 ```powershell
-ojon autoround-plan "C:\Models\hf-original" "C:\Models\out\q4-rtn" --bits 4 --iters 0 --device cpu --json
-ojon autoround-plan "C:\Models\hf-original" "C:\Models\out\q5-calibrated" --bits 5 --format gguf:q5_k_m --iters 200 --dataset "C:\Datasets\calibration.json" --device xpu --json
+ojon autoround-plan "./models/hf-original" "./models/out\q4-rtn" --bits 4 --iters 0 --device cpu --json
+ojon autoround-plan "./models/hf-original" "./models/out\q5-calibrated" --bits 5 --format gguf:q5_k_m --iters 200 --dataset "./datasets/calibration.json" --device xpu --json
 ```
 
 To execute, use `autoround-run` with the same options and `--confirm`. Ojon checks that GGUF output metadata exists, not that the model runs or meets a quality threshold. Compare against existing llama.cpp K/IQ conversions using held-out data and a verified target loader. See Intel's upstream AutoRound step-by-step guide.
@@ -58,8 +60,8 @@ To execute, use `autoround-run` with the same options and `--confirm`. Ojon chec
 ## Plan several quantization options before choosing
 
 ```powershell
-ojon optimize-plan "C:\Models\qwen-original" --device xpu --json
-ojon optimize-plan "C:\Models\source-f16.gguf" --device cuda --json
+ojon optimize-plan "./models/qwen-original" --device xpu --json
+ojon optimize-plan "./models/source-f16.gguf" --device cuda --json
 ```
 
 `optimize-plan` is metadata-only and returns a versioned JSON comparison proposal. It keeps separate choices for size, balanced precision, calibration, or distinct available backends. A `missing_tool`, `experimental`, `blocked_source`, `storage_only`, or `requires_compatibility_test` state is not permission to execute or a claim of loadability. The device flag describes a requested target; no live free VRAM/RAM or driver support is measured yet. `recommendation: null` is intentional until real matched quality, memory and runtime measurements exist. To execute a supported route, use the existing guarded manual commands.
@@ -70,14 +72,14 @@ Ojon's performance test works only for a **GGUF** accepted by a user-installed p
 
 ```powershell
 # Read-only, no tensor loads
-ojon bench-plan "C:\Models\Qwen3-Q4_K_M.gguf" --json
+ojon bench-plan "./models/Qwen3-Q4_K_M.gguf" --json
 
 # Loads quantized weights intentionally, writes a NEW receipt without overwriting
-ojon bench-run "C:\Models\Qwen3-Q4_K_M.gguf" "C:\Reports\qwen-q4.json" --tool "C:\Tools\llama.cpp\llama-bench.exe" --prompt-tokens 512 --gen-tokens 128 --repetitions 3 --gpu-layers 99 --confirm
+ojon bench-run "./models/Qwen3-Q4_K_M.gguf" "./reports/qwen-q4.json" --tool "./tools/llama.cpp\llama-bench.exe" --prompt-tokens 512 --gen-tokens 128 --repetitions 3 --gpu-layers 99 --confirm
 
 # Optional, only when the original really fits the machine and same settings
-ojon bench-run "C:\Models\Qwen3-BF16.gguf" "C:\Reports\qwen-bf16.json" --tool "C:\Tools\llama.cpp\llama-bench.exe" --prompt-tokens 512 --gen-tokens 128 --repetitions 3 --gpu-layers 99 --confirm
-ojon bench-compare "C:\Reports\qwen-bf16.json" "C:\Reports\qwen-q4.json" --json
+ojon bench-run "./models/Qwen3-BF16.gguf" "./reports/qwen-bf16.json" --tool "./tools/llama.cpp\llama-bench.exe" --prompt-tokens 512 --gen-tokens 128 --repetitions 3 --gpu-layers 99 --confirm
+ojon bench-compare "./reports/qwen-bf16.json" "./reports/qwen-q4.json" --json
 ```
 
 The Kathamo GUI exposes **Benchmark Output (512/128, 3 runs)** in its existing Test pane. Supply an actual output GGUF and the installed `llama-bench` path. The process runs off the render thread, displays real prefill/decode tokens/s and writes its receipt beside the model.
@@ -134,9 +136,9 @@ Local agents may call the JSON commands. They cannot control your computer throu
 Ojon ships its **own Rust quantizer** for eligible 2D weight matrices in original F16, BF16 or F32 safetensors checkpoints. It uses bounded-memory per-group affine uniform quantization (2/3/4-bit); unrecognized and sensitive tensors are preserved without modification. There is no dependency on RebelUI, PyTorch or GPU drivers for this converter.
 
 ```powershell
-ojon pack-plan "C:\Models\original.safetensors" "C:\Models\packed\model-q4.ojonq" --bits 4 --group 64
-ojon pack-run "C:\Models\original.safetensors" "C:\Models\packed\model-q4.ojonq" --bits 4 --group 64 --confirm
-ojon unpack "C:\Models\packed\model-q4.ojonq" "C:\Models\packed\model-q4-restored.safetensors" --confirm
+ojon pack-plan "./models/original.safetensors" "./models/packed\model-q4.ojonq" --bits 4 --group 64
+ojon pack-run "./models/original.safetensors" "./models/packed\model-q4.ojonq" --bits 4 --group 64 --confirm
+ojon unpack "./models/packed\model-q4.ojonq" "./models/packed\model-q4-restored.safetensors" --confirm
 ```
 
 **Format boundary:** `.ojonq` is a documented Ojon-owned weight-storage format, **not** GGUF, ComfyUI W4A8, or directly loadable low-bit Diffusers weights. The built-in Rust unpacker reconstructs ordinary safetensors for portability, but its restored weights no longer save GPU VRAM and have quantization error. Task quality, image fidelity and compatible on-device kernels remain unverified.
@@ -144,9 +146,9 @@ ojon unpack "C:\Models\packed\model-q4.ojonq" "C:\Models\packed\model-q4-restore
 Optional SVDQuant INT4 image/video conversion is separately available via an independently installed public [diffuse-compressor](https://github.com/rootonchair/diffuse-compressor) checkout for compatible local Diffusers pipelines. The SVDQuant pipeline uses NVIDIA CUDA; neither installed Python dependencies nor 16 GB GPU feasibility can be inferred from source detection.
 
 ```powershell
-ojon diffusion-plan "C:\Models\MyDiffusersPipeline" "C:\Models\packed\denoiser-int4.safetensors" --checkout "C:\Tools\diffuse-compressor" --backend svdq --kind image --format int4
-ojon diffusion-inspect "C:\Models\MyDiffusersPipeline" "C:\Models\packed\denoiser-int4.safetensors" --checkout "C:\Tools\diffuse-compressor" --backend svdq --kind image --format int4 --confirm
-ojon diffusion-run "C:\Models\MyDiffusersPipeline" "C:\Models\packed\denoiser-int4.safetensors" --checkout "C:\Tools\diffuse-compressor" --backend svdq --kind image --format int4 --confirm
+ojon diffusion-plan "./models/MyDiffusersPipeline" "./models/packed\denoiser-int4.safetensors" --checkout "./tools/diffuse-compressor" --backend svdq --kind image --format int4
+ojon diffusion-inspect "./models/MyDiffusersPipeline" "./models/packed\denoiser-int4.safetensors" --checkout "./tools/diffuse-compressor" --backend svdq --kind image --format int4 --confirm
+ojon diffusion-run "./models/MyDiffusersPipeline" "./models/packed\denoiser-int4.safetensors" --checkout "./tools/diffuse-compressor" --backend svdq --kind image --format int4 --confirm
 ```
 
 All file-writing operations are explicit, outputs must not exist, and sources are never overwritten. Model-quality evaluation should compare matched prompts, seeds, schedulers, frames and all conditioning components.
@@ -159,24 +161,24 @@ Ojon can also orchestrate two independent, public Apache-2.0 projects: [GSQ](htt
 **GSQ:** install a trusted copy of the upstream source and its dependencies into your own isolated Python environment. Supply an existing local YAML configuration with `model.name` pointing to a local HF model folder. The safe default is a **one-layer smoke test**; a full run requires `--all-layers`.
 
 ```powershell
-ojon gsq-plan "C:\Tools\GSQ" "C:\Data\gsq-config.yaml" --python "C:\Venvs\gsq\Scripts\python.exe"
-ojon gsq-run "C:\Tools\GSQ" "C:\Data\gsq-config.yaml" --python "C:\Venvs\gsq\Scripts\python.exe" --layers 1 --confirm
+ojon gsq-plan "./tools/GSQ" "./data/gsq-config.yaml" --python "./venvs/gsq\Scripts\python.exe"
+ojon gsq-run "./tools/GSQ" "./data/gsq-config.yaml" --python "./venvs/gsq\Scripts\python.exe" --layers 1 --confirm
 # If quantization completes and the checkpoint is ready:
-ojon gsq-assemble-plan "C:\Tools\GSQ" "C:\Data\gsq-config.yaml" "C:\Models\gsq-output"
-ojon gsq-assemble "C:\Tools\GSQ" "C:\Data\gsq-config.yaml" "C:\Models\gsq-output" --confirm
+ojon gsq-assemble-plan "./tools/GSQ" "./data/gsq-config.yaml" "./models/gsq-output"
+ojon gsq-assemble "./tools/GSQ" "./data/gsq-config.yaml" "./models/gsq-output" --confirm
 ```
 
 **RCO:** for an original **dense Qwen3** Hugging Face checkpoint, Ojon can launch the public upstream CUDA/PyTorch stage that creates a per-layer 2/3/4-bit GPTQ database. This stage is experimental and requires a suitable CUDA environment, calibration data already cached locally, and substantial scratch memory. It has not been tested on typical consumer GPUs. After the database has been built, Ojon can run a bounded precision search and assemble the result. A search assignment is not a ready-to-load model.
 
 ```powershell
-ojon rco-db-plan "C:\Tools\RCO" "C:\Models\hf-original" "C:\Data\rco-new-db" --tokens 16384
-ojon rco-db-run "C:\Tools\RCO" "C:\Models\hf-original" "C:\Data\rco-new-db" --confirm
+ojon rco-db-plan "./tools/RCO" "./models/hf-original" "./data/rco-new-db" --tokens 16384
+ojon rco-db-run "./tools/RCO" "./models/hf-original" "./data/rco-new-db" --confirm
 # Use the populated output directory actually created by the upstream script:
-ojon rco-plan "C:\Tools\RCO" "C:\Models\hf-original" "C:\Data\rco-layer-db" 2.5
-ojon rco-run "C:\Tools\RCO" "C:\Models\hf-original" "C:\Data\rco-layer-db" 2.5 --confirm
+ojon rco-plan "./tools/RCO" "./models/hf-original" "./data/rco-layer-db" 2.5
+ojon rco-run "./tools/RCO" "./models/hf-original" "./data/rco-layer-db" 2.5 --confirm
 # After the upstream search produces an assignment:
-ojon rco-assemble-plan "C:\Tools\RCO" "C:\Models\hf-original" "C:\Data\rco-layer-db" "C:\Data\rco-layer-db\assignment.json" "C:\Models\rco-packed"
-ojon rco-assemble "C:\Tools\RCO" "C:\Models\hf-original" "C:\Data\rco-layer-db" "C:\Data\rco-layer-db\assignment.json" "C:\Models\rco-packed" --confirm
+ojon rco-assemble-plan "./tools/RCO" "./models/hf-original" "./data/rco-layer-db" "./data/rco-layer-db\assignment.json" "./models/rco-packed"
+ojon rco-assemble "./tools/RCO" "./models/hf-original" "./data/rco-layer-db" "./data/rco-layer-db\assignment.json" "./models/rco-packed" --confirm
 ```
 
 Replace all placeholder paths with your actual existing files, including the real assignment file name generated by RCO. RCO assembly produces a **compressed-tensors Hugging Face checkpoint**, not automatically GGUF. Both integrations request offline Hugging Face and Weights & Biases modes; this is **not an operating-system network sandbox**. No claim is made that these researchers' Python trainers fit a specific 16 GB or 24 GB GPU. Run planning first and inspect source, Python environment, configuration, calibration data, scratch space and output.
