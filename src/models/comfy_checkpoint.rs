@@ -45,6 +45,8 @@ impl MiniMaxCheckpointPlan {
             "device": self.device,
             "output_format": "ComfyUI native NVFP4 safetensors",
             "weight_format": "NVFP4",
+            "rounding": "learned SVD (upstream default; higher compute and memory than simple)",
+            "layer_policy": "upstream --minimaxh3 plus explicit protected boundary layers",
             "activation_precision": "runtime-dependent; NOT W4A4 certified",
             "protected_layer_regex": H3_PROTECTED,
             "quality_verified": false,
@@ -185,10 +187,10 @@ pub fn run_minimax_checkpoint(
         .arg("-i").arg(&plan.source)
         .arg("-o").arg(&stage.0)
         .arg("--nvfp4")
+        .arg("--minimaxh3")
         .arg("--comfy_quant")
         .arg("--save-quant-metadata")
         .arg("--low-memory")
-        .arg("--simple")
         .arg("--exclude-layers").arg(H3_PROTECTED)
         .arg("--preserve-layers").arg(H3_PROTECTED)
         .env("HF_HUB_OFFLINE", "1")
@@ -197,7 +199,7 @@ pub fn run_minimax_checkpoint(
     if plan.device != "auto" {
         command.arg("--device").arg(&plan.device);
     }
-    log("MiniMax-H3: quantizing original single-file checkpoint to ComfyUI NVFP4");
+    log("MiniMax-H3: converting with upstream MiniMax H3 layer policy and learned NVFP4 rounding");
     run_with_log(&mut command, &mut log)?;
     if !stage.0.is_file() {
         return Err(io::Error::new(ErrorKind::InvalidData, "converter produced no checkpoint"));
