@@ -200,7 +200,7 @@ Use `cargo run -- backends` for the list of detection results, actual found path
 For Windows PowerShell with a custom tools folder:
 
 ```powershell
-$env:OJON_BACKENDS_DIR = "C:\\Tools\\AI"
+$env:OJON_BACKENDS_DIR = "./tools/AI"
 cargo run -- backends
 cargo run --features gui --bin ojon-gui
 ```
