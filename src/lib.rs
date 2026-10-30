@@ -35,6 +35,8 @@ pub use self::quant::quant_parity;
 pub use self::quant::recipe;
 pub use self::quant::recipe_run;
 pub use self::quant::sweep;
+pub use self::quant::wer;
+pub use self::quant::whisper_parity;
 
 // Uncensor
 pub use self::uncensor::abliteration;
@@ -55,6 +57,7 @@ pub use self::models::gguf;
 pub use self::models::hf;
 pub use self::models::llama;
 pub use self::models::model_build;
+pub use self::models::whisper;
 
 // Eval
 pub use self::eval::benchmark;
