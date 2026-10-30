@@ -32,6 +32,11 @@ fn invalid(s: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, s.into())
 }
 
+const BS_LIT: &str = r"\";
+const BLK_ANY: &str = r"^blk\.\d+\.";
+const DOT: &str = r"\.";
+const NL: &str = "\n";
+
 /// Tensor classes with distinct, well-known quantization sensitivity. Order is
 /// the order recipes and receipts list them in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -372,6 +377,70 @@ pub fn render_recipe(recipe: &Recipe, base: &str) -> String {
     out
 }
 
+/// First and last transformer blocks carry more representation sensitivity
+/// than the middle (the same observation behind Unsloth's per-layer bits). The
+/// boundary refinement keeps those blocks at the base level for every class the
+/// recipe lowered, at the cost of one more quantization. Returns (head, tail)
+/// block indices, or None when the model is too shallow for the split to mean
+/// anything.
+pub fn boundary_blocks(tensors: &[GgufTensor]) -> Option<(Vec<u32>, Vec<u32>)> {
+    let n_layer = tensors
+        .iter()
+        .filter_map(|t| t.name.strip_prefix("blk.").and_then(|r| r.split('.').next()).and_then(|n| n.parse::<u32>().ok()))
+        .max()
+        .map(|m| m + 1)?;
+    if n_layer < 6 {
+        return None;
+    }
+    Some((vec![0, 1], vec![n_layer - 2, n_layer - 1]))
+}
+
+/// A class pattern restricted to specific blocks. Only meaningful for classes
+/// that live inside `blk.N.`; embeddings and the output head return None.
+pub fn block_pattern(class: TensorClass, blocks: &[u32]) -> Option<String> {
+    if blocks.is_empty() || matches!(class, TensorClass::TokenEmbd | TensorClass::Output | TensorClass::Router | TensorClass::Other) {
+        return None;
+    }
+    let alt = blocks.iter().map(u32::to_string).collect::<Vec<_>>().join("|");
+    let pat = class.pattern();
+    let prefix = format!("^blk{0}.({alt}){0}.", BS_LIT);
+    if let Some(rest) = pat.strip_prefix(BLK_ANY) {
+        Some(format!("{prefix}{rest}"))
+    } else if let Some(rest) = pat.strip_prefix(DOT) {
+        Some(format!("{prefix}{rest}"))
+    } else {
+        None
+    }
+}
+
+/// Lines that pin `blocks` of every lowered class back to `base`. They must come
+/// BEFORE the class-wide lines in a tensor-type file: llama-quantize applies the
+/// first pattern that matches.
+pub fn render_boundary_lines(recipe: &Recipe, base: &str, blocks: &[u32]) -> String {
+    let mut out = String::new();
+    for (class, level) in &recipe.levels {
+        if *level != base {
+            if let Some(pat) = block_pattern(*class, blocks) {
+                out.push_str(&format!("{pat}={base}{NL}"));
+            }
+        }
+    }
+    out
+}
+
+/// Adopt the boundary-refined file only when it is measurably better and not
+/// meaningfully bigger: mean KLD lower by more than the reported uncertainty
+/// of both measurements, size within 2% of the plain recipe.
+pub fn adopt_boundary(plain_kld: f64, plain_unc: f64, refined_kld: f64, refined_unc: f64, plain_bytes: u64, refined_bytes: u64) -> bool {
+    if plain_bytes == 0 {
+        return false;
+    }
+    let margin = plain_unc.max(0.0) + refined_unc.max(0.0);
+    let better = refined_kld + margin < plain_kld;
+    let size_ok = refined_bytes as f64 <= plain_bytes as f64 * 1.02;
+    better && size_ok
+}
+
 pub fn recipe_json(recipe: &Recipe, base: &str, base_kld: f64, budget_kld: f64) -> Value {
     json!({
         "schema": "ojon.kld_recipe.v1",
@@ -545,6 +614,39 @@ mod tests {
         let bad = vec![Measured { class: TensorClass::FfnDown, level: "q4_k", mean_kld: f64::INFINITY }];
         assert!(select_recipe("q5_k", &present, 0.01, &bad, 0.01).is_err());
         assert!(probe_matrix("nope", &present, "iq2_s").is_err());
+    }
+
+    #[test]
+    fn boundary_blocks_and_patterns() {
+        let m = moe_model(); // blocks 0 and 1 only -> too shallow
+        assert!(boundary_blocks(&m).is_none());
+        let mut deep = m.clone();
+        deep.push(t("blk.7.ffn_down.weight", &[64, 64]));
+        let (head, tail) = boundary_blocks(&deep).unwrap();
+        assert_eq!((head, tail), (vec![0, 1], vec![6, 7]));
+        let p = block_pattern(TensorClass::AttnVo, &[0, 1]).unwrap();
+        assert!(p.starts_with("^blk") && p.contains("(0|1)") && p.ends_with("attn_(v|output)\\.weight$"), "{p}");
+        let f = block_pattern(TensorClass::FfnDown, &[6, 7]).unwrap();
+        assert!(f.contains("(6|7)") && f.ends_with("ffn_down\\.weight$"), "{f}");
+        assert!(block_pattern(TensorClass::TokenEmbd, &[0]).is_none());
+        assert!(block_pattern(TensorClass::Router, &[0]).is_none());
+    }
+
+    #[test]
+    fn boundary_lines_only_for_lowered_block_classes_and_adoption_rule() {
+        let present = class_elements(&moe_model());
+        let measured = vec![
+            Measured { class: TensorClass::ExpertDown, level: "q4_k", mean_kld: 0.0 },
+            Measured { class: TensorClass::Output, level: "q4_k", mean_kld: 0.0 },
+        ];
+        let r = select_recipe("q5_k", &present, 0.0, &measured, 0.0).unwrap();
+        let lines = render_boundary_lines(&r, "q5_k", &[0, 1]);
+        assert_eq!(lines.lines().count(), 1, "{lines}"); // expert_down yes, output head no
+        assert!(lines.contains("ffn_down_exps") && lines.ends_with("=q5_k\n"));
+        assert!(adopt_boundary(0.030, 0.001, 0.025, 0.001, 1000, 1010));
+        assert!(!adopt_boundary(0.030, 0.001, 0.0295, 0.001, 1000, 1010)); // inside noise
+        assert!(!adopt_boundary(0.030, 0.001, 0.020, 0.001, 1000, 1030)); // 3% bigger
+        assert!(!adopt_boundary(0.030, 0.0, 0.020, 0.0, 0, 10));
     }
 
     #[test]

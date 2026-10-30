@@ -61,7 +61,15 @@ task suite before anyone claims capability was kept.
    increase are free and always taken. Greedy on a ratio is the standard
    approximation for this knapsack; the exact optimum would need all 2^n
    combinations and the deltas are only approximately additive anyway.
-6. **Final**: the selected recipe is quantized and measured again. The receipt's
+6. **Final**: the selected recipe is quantized and measured again.
+7. **Boundary refinement** (default on): one more file keeps blocks 0-1 and the
+   last two blocks of every lowered class at the base level, because boundary
+   blocks carry more representation sensitivity (the observation behind
+   per-layer dynamic quants). It replaces the recipe only if it measures better
+   by more than both reported uncertainties and is at most 2% larger; the plain
+   recipe is kept beside it as `recipe-plain.gguf`. The tensor-type file lists
+   the block-specific lines first because `llama-quantize` applies the first
+   matching pattern. The receipt's
    `measured_within_budget` comes from this measurement only. The additive
    prediction is reported beside it so you can see how far the approximation
    was off for this model.

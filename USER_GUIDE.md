@@ -98,7 +98,11 @@ same corpus before any probe (low-bit levels depend on it; without one the searc
 understates how low a class can go), `--imatrix <file>` reuses one you already
 have, and `--budget-p99 <x>` adds a tail gate so the 99th-percentile per-token KLD
 may not rise more than `x` over the base either. Mean KLD alone can hide rare,
-large divergences on individual tokens. A long run keeps an append-only
+large divergences on individual tokens. After the recipe is measured, one more file is tried that keeps the first two
+and last two transformer blocks of every lowered class at the base level
+(boundary blocks are the most sensitive); it replaces the recipe only if it
+measures better by more than the reported uncertainty and is at most 2% bigger
+(`--no-boundary-refine` skips this). A long run keeps an append-only
 `recipe-progress.jsonl`; if it dies after hours, `recipe-run ... --resume` in the
 same directory reuses the importance matrix, reference logits, base candidate and
 every measured probe, and only redoes what is missing.

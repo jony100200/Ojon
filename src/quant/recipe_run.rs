@@ -27,8 +27,8 @@ use crate::gguf::{inspect_gguf, inspect_gguf_tensors};
 use crate::llama::{prepare_gguf, quantize_gguf_with_log, Precision};
 use crate::quant::kld::{measure_kld, save_reference_logits, KldSettings, KldStats};
 use crate::quant::recipe::{
-    class_elements, ladder_index, probe_matrix, recipe_json, select_recipe, Measured, Probe, Recipe,
-    TensorClass, LADDER,
+    adopt_boundary, boundary_blocks, class_elements, ladder_index, probe_matrix, recipe_json, render_boundary_lines,
+    select_recipe, Measured, Probe, Recipe, TensorClass, LADDER,
 };
 
 fn invalid(s: impl Into<String>) -> io::Error {
@@ -87,12 +87,17 @@ pub struct RecipeJob {
     /// deterministically: the first half calibrates (imatrix), the second half
     /// evaluates. Measuring on the calibration text overstates quality.
     pub eval_corpus: Option<PathBuf>,
+    /// After the recipe is measured, try one more file that keeps the first two
+    /// and last two blocks of every lowered class at the base level; adopt it
+    /// only if it measures better and is not more than 2% bigger.
+    pub refine_boundaries: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct RecipePlan {
     pub job: RecipeJob,
     pub present: BTreeMap<TensorClass, u64>,
+    pub boundary: Option<(Vec<u32>, Vec<u32>)>,
     pub probes: Vec<Probe>,
     pub source_bytes: u64,
     pub tensor_count: u64,
@@ -226,8 +231,9 @@ pub fn prepare_recipe(job: RecipeJob) -> io::Result<RecipePlan> {
     if probes.is_empty() {
         return Err(invalid("nothing to search: no ladder level between floor and base for the classes present"));
     }
+    let boundary = boundary_blocks(&tensors);
     let job = RecipeJob { source, output_dir, ..job };
-    Ok(RecipePlan { job, present, probes, source_bytes: info.file_bytes, tensor_count: info.tensor_count })
+    Ok(RecipePlan { job, present, boundary, probes, source_bytes: info.file_bytes, tensor_count: info.tensor_count })
 }
 
 impl RecipePlan {
@@ -262,6 +268,8 @@ impl RecipePlan {
             "imatrix_auto_tool": self.job.imatrix_tool.as_ref().map(|p| plain(p)),
             "budget_p99": self.job.budget_p99,
             "resume": self.job.resume,
+            "refine_boundaries": self.job.refine_boundaries && self.boundary.is_some(),
+            "boundary_blocks": self.boundary.as_ref().map(|(h, t)| json!({"head": h, "tail": t})),
             "execution": "plan_only",
             "claim": "none; every number in the receipt is measured, and KLD is a distribution distance, not a task score"
         })
@@ -307,6 +315,15 @@ fn quantize_with<F>(plan: &RecipePlan, stem: &str, levels: &BTreeMap<TensorClass
 where
     F: FnMut(&str),
 {
+    quantize_with_prefix(plan, stem, "", levels, log)
+}
+
+/// `prefix` lines go first in the tensor-type file; llama-quantize applies the
+/// first matching pattern, so block-specific pins must precede class lines.
+fn quantize_with_prefix<F>(plan: &RecipePlan, stem: &str, prefix: &str, levels: &BTreeMap<TensorClass, &'static str>, log: &mut F) -> io::Result<Quantized>
+where
+    F: FnMut(&str),
+{
     let dir = &plan.job.output_dir;
     let tt_path = dir.join(format!("{stem}.tensor-types.txt"));
     let out_path = dir.join(format!("{stem}.gguf"));
@@ -318,7 +335,7 @@ where
             return Err(invalid(format!("refusing to overwrite {}", out_path.display())));
         }
     }
-    fs::write(&tt_path, render_full(levels))?;
+    fs::write(&tt_path, format!("{prefix}{}", render_full(levels)))?;
     let started = Instant::now();
     let mut q = prepare_gguf(&plan.job.source, &out_path, &plan.job.quantize_tool, main_precision_for(plan.job.base)?, plan.job.threads)?
         .with_tensor_type_file(&tt_path)?;
@@ -535,6 +552,53 @@ where
         },
         if within { "within budget" } else { "OVER budget; not accepted" }));
 
+    // Boundary refinement: one more quantization, adopted only on measurement.
+    let mut final_q = final_q;
+    let mut final_kld = final_kld;
+    let mut within = within;
+    let mut boundary_json = Value::Null;
+    if plan.job.refine_boundaries && !recipe.steps.is_empty() {
+        if let Some((head, tail)) = &plan.boundary {
+            let blocks: Vec<u32> = head.iter().chain(tail.iter()).copied().collect();
+            let prefix = render_boundary_lines(&recipe, base_level, &blocks);
+            if !prefix.is_empty() {
+                log(&format!("[ojon] boundary refinement: blocks {:?} of every lowered class back to {base_level}", blocks));
+                match quantize_with_prefix(plan, "recipe-boundary", &prefix, &recipe.levels, &mut log)
+                    .and_then(|q| measure_kld(&q.path, &dump, &plan.job.kld, &mut log).map(|k| (q, k)))
+                {
+                    Ok((bq, bk)) => {
+                        let adopt = adopt_boundary(final_kld.mean, final_kld.mean_uncertainty.unwrap_or(0.0),
+                                                   bk.mean, bk.mean_uncertainty.unwrap_or(0.0), final_q.bytes, bq.bytes);
+                        log(&format!("[ojon]   boundary file: mean KLD {:.6} vs {:.6}, {:.2}% vs {:.2}% of source -> {}",
+                            bk.mean, final_kld.mean, 100.0 * bq.bytes as f64 / plan.source_bytes as f64,
+                            100.0 * final_q.bytes as f64 / plan.source_bytes as f64, if adopt { "adopted" } else { "kept plain recipe" }));
+                        boundary_json = json!({"blocks": blocks, "path": plain(&bq.path), "bytes": bq.bytes, "kld": kld_json(&bk), "adopted": adopt});
+                        if adopt {
+                            // the adopted file becomes recipe.gguf; the plain one is kept for inspection
+                            let plain_path = dir.join("recipe-plain.gguf");
+                            fs::rename(&final_q.path, &plain_path)?;
+                            fs::rename(&bq.path, &final_q.path)?;
+                            let mean_ok = bk.mean <= base_kld.mean + plan.job.budget_kld + 1e-9;
+                            let p99_ok = match (plan.job.budget_p99, base_kld.p99, bk.p99) {
+                                (Some(b), Some(bp), Some(fp)) => fp <= bp + b + 1e-9,
+                                (Some(_), _, _) => false,
+                                (None, _, _) => true,
+                            };
+                            within = mean_ok && p99_ok;
+                            final_q = Quantized { path: final_q.path.clone(), bytes: bq.bytes, seconds: bq.seconds };
+                            final_kld = bk;
+                            boundary_json["plain_recipe_kept_as"] = json!(plain(&plain_path));
+                        }
+                    }
+                    Err(e) => {
+                        log(&format!("[ojon]   boundary refinement failed: {e}"));
+                        boundary_json = json!({"blocks": blocks, "status": "failed", "error": e.to_string()});
+                    }
+                }
+            }
+        }
+    }
+
     let receipt = json!({
         "schema": "ojon.kld_recipe_receipt.v1",
         "plan": plan.plan_json(),
@@ -550,6 +614,7 @@ where
                   "p99_budget": plan.job.budget_p99,
                   "p99_within_budget": p99_within,
                   "measured_within_budget": within},
+        "boundary_refinement": boundary_json,
         "imatrix": plan.job.imatrix.as_ref().map(|p| plain(p)),
         "imatrix_computed_by_this_run": imatrix_auto.as_ref().map(|p| plain(p)),
         "calibration_corpus": plain(&calibration_corpus),
@@ -791,7 +856,7 @@ mod tests {
         let job = RecipeJob {
             source: dir.join("missing.gguf"), output_dir: dir.clone(), base: "q5_k", floor: "iq2_s", budget_kld: 0.01,
             quantize_tool: PathBuf::from("llama-quantize"), imatrix: None, imatrix_tool: None, threads: 4, kld,
-            keep_probes: false, budget_p99: None, resume: false, eval_corpus: None,
+            keep_probes: false, budget_p99: None, resume: false, eval_corpus: None, refine_boundaries: true,
         };
         assert!(prepare_recipe(RecipeJob { budget_p99: Some(-0.5), ..job.clone() }).is_err());
         assert!(prepare_recipe(RecipeJob { budget_kld: 2.0, ..job.clone() }).is_err());

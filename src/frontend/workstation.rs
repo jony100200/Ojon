@@ -904,6 +904,7 @@ impl Workstation {
                     budget_p99: None,
                     resume: false,
                     eval_corpus: None,
+                    refine_boundaries: true,
                 })
                 .map_err(|e| e.to_string())?;
                 let path = plan.write_plan().map_err(|e| e.to_string())?;

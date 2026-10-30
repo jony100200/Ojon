@@ -2258,6 +2258,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let mut fit = false;
             let mut threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(4);
             let (mut keep_probes, mut confirm, mut json, mut resume) = (false, false, false, false);
+            let mut refine_boundaries = true;
             let text = |v: std::ffi::OsString, what: &str| -> io::Result<String> {
                 v.to_str().map(str::to_owned).ok_or_else(|| invalid(format!("{what} requires UTF-8")))
             };
@@ -2301,6 +2302,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     Some("--threads") => threads = text(next_argument(&mut args, "thread count")?, "threads")?.parse().map_err(|_| invalid("threads must be a number"))?,
                     Some("--keep-probes") => keep_probes = true,
                     Some("--resume") if execute => resume = true,
+                    Some("--no-boundary-refine") => refine_boundaries = false,
                     Some("--json") => json = true,
                     Some("--confirm") if execute => confirm = true,
                     _ => return Err(invalid(format!("unknown recipe option: {}", option.to_string_lossy()))),
@@ -2328,6 +2330,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 budget_p99,
                 resume,
                 eval_corpus,
+                refine_boundaries,
             })?;
             let plan_path = plan.write_plan()?;
             if json {
