@@ -68,6 +68,32 @@ pub fn normalise_words(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Characters for a character error rate: lower-cased, whitespace runs
+/// collapsed to one space, leading/trailing space dropped, each character its
+/// own unit so `align_words` can score it.
+pub fn normalise_chars(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut pending_space = false;
+    for ch in text.chars().flat_map(char::to_lowercase) {
+        if ch.is_whitespace() {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if pending_space {
+            out.push(" ".to_owned());
+            pending_space = false;
+        }
+        out.push(ch.to_string());
+    }
+    out
+}
+
+/// Character-level error counts of `hypothesis` against `reference`
+/// (`counts.wer()` is then the character error rate).
+pub fn char_error(reference: &str, hypothesis: &str) -> WerCounts {
+    align_words(&normalise_chars(reference), &normalise_chars(hypothesis))
+}
+
 /// Minimum-edit alignment of two word sequences with the error breakdown.
 /// Ties are resolved deterministically: substitution, then deletion, then
 /// insertion.
@@ -196,5 +222,22 @@ mod tests {
         assert_eq!(total.errors(), 1);
         assert!(close(total.wer().unwrap(), 0.1));
         assert_eq!(wer_corpus(Vec::<(&str, &str)>::new()).wer(), Some(0.0));
+    }
+}
+
+#[cfg(test)]
+mod cer_tests {
+    use super::*;
+
+    #[test]
+    fn character_error_rate_counts_substitutions_and_ignores_whitespace_runs() {
+        let c = char_error("Hello World", "hallo  world");
+        assert_eq!(c.reference_words, 11);
+        assert_eq!(c.substitutions, 1);
+        assert_eq!(c.insertions + c.deletions, 0);
+        assert!((c.wer().unwrap() - 1.0 / 11.0).abs() < 1e-9);
+        assert_eq!(char_error("abc", "abc").errors(), 0);
+        assert_eq!(char_error("abc", "").deletions, 3);
+        assert_eq!(normalise_chars("  A  b\n"), vec!["a", " ", "b"]);
     }
 }

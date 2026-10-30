@@ -434,6 +434,23 @@ zero in the F32 round trip). A real adapter from `learn-train-run` is the next
 test; the pure parts (adapter detection, base precision check, command
 rendering, never-overwrite) are unit-tested.
 
+## OCR models: the character-error-rate gate
+
+```sh
+python scripts/make_ocr_pages.py pages --count 6          # or your own pages.jsonl with real scans
+ojon ocr-parity-run model-F16.gguf model-Q5_K_M.gguf --mmproj mmproj-F16.gguf --pages pages/pages.jsonl \
+     --device Vulkan0 --max-cer-delta 0.02 --confirm
+```
+
+Every model reads every page through `llama-mtmd-cli` (temperature 0, fixed
+seed) and the transcript is scored against the manifest text as a character
+error rate (lower-cased, whitespace collapsed). The gate is the candidate's
+corpus CER minus the original's; a candidate that reads better than the
+original passes. The receipt (`ojon.ocr_parity.v1`) keeps every transcript and
+states the claim: a parity measurement on these pages, not a general OCR
+accuracy. Synthetic pages prove plumbing; real scans in your language prove
+the quant.
+
 ## Speech: whisper.cpp quantize and WER gate
 
 whisper.cpp models are GGML `.bin` files, not GGUF, and whisper.cpp ships its

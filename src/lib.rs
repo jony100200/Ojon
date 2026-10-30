@@ -37,6 +37,7 @@ pub use self::quant::recipe_run;
 pub use self::quant::sweep;
 pub use self::quant::wer;
 pub use self::quant::whisper_parity;
+pub use self::quant::ocr_parity;
 
 // Uncensor
 pub use self::uncensor::abliteration;
