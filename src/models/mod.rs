@@ -7,6 +7,7 @@ pub mod llama;
 pub mod mmproj;
 pub mod model_build;
 pub mod whisper;
+pub mod lora_merge;
 pub mod orbitquant;
 pub mod comfy_checkpoint;
 

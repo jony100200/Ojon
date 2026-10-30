@@ -2665,6 +2665,7 @@ impl Workstation {
                                     BackendId::IntelSyclCli => "Intel SYCL / oneAPI",
                                     BackendId::LlamaCvectorGenerator => "llama.cpp control-vector generator",
                                     BackendId::WhisperQuantize => "Speech / whisper quantize",
+                                    BackendId::LlamaExportLora => "LoRA merge (export-lora)",
                                 };
                                 details.horizontal(22.0, |row| {
                                     row.label(&format!("{}:", label));

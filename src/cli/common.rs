@@ -96,6 +96,8 @@ Commands:
   ojon minimax-checkpoint-run  <original-MiniMax-H3.safetensors> <new-NVFP4.safetensors> [same options] --confirm
   ojon minimax-w4a4-plan <local-MiniMax-H3-Diffusers-dir> <new-artifact-dir> [--component fl2va|ref2va|text_encoder] [--device cuda|xpu|cpu|auto] [--python python]
   ojon minimax-w4a4-run  <local-MiniMax-H3-Diffusers-dir> <new-artifact-dir> [same options] --confirm
+  ojon lora-merge-plan <original-F16-GGUF> <adapter.gguf|peft-dir> <merged.gguf> [--scale 1.0] [--hf-base <hf-folder>] [--task-suite tasks.json] [--export-tool path] [--convert-script path] [--python python] [--json]   Plan LoRA-then-quant step one: merge through llama-export-lora; writes nothing
+  ojon lora-merge-run  <original-F16-GGUF> <adapter.gguf|peft-dir> <merged.gguf> [same options] --confirm   Writes merged GGUF (+ converted adapter for a PEFT folder) and a receipt naming the task-suite gate and the auto-quant step
   ojon whisper-quant-plan <whisper-ggml.bin> <output-dir> [--formats q8_0,q5_0,q4_0] [--tool whisper-quantize] [--json]   Plan whisper.cpp quantization (q8_0 q5_0 q4_0 q5_1 q4_1); writes nothing
   ojon whisper-quant-run  <whisper-ggml.bin> <output-dir> [same options] --confirm   One .bin per format plus whisper-quant-receipt.json with sizes; never overwrites
   ojon whisper-parity-plan <original.bin> <candidate.bin> [...] --clips clips.jsonl [--max-wer-delta 0.02] [--language en] [--threads N] [--whisper-cli path] [--out-dir dir] [--json]   Plan the WER gate: every model transcribes every clip through whisper-cli

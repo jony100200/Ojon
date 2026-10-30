@@ -365,6 +365,30 @@ Vision scoring prefers `llama-mtmd-cli` when it is discovered (or given with
 `llama-cli` builds do not accept `--mmproj` / `--image`; only the rewritten
 `llama-cli` (shipped with `llama-cli-impl.dll`) and `llama-mtmd-cli` do.
 
+## LoRA that makes the original better, then quant
+
+```sh
+ojon lora-merge-run qwen3-8b-f16.gguf runs/adapter_out merged/qwen3-8b-tuned-f16.gguf      --hf-base D:\models\Qwen3-8B --task-suite tasks.json --confirm
+ojon quant-compare-run qwen3-8b-f16.gguf tasks.json merged/qwen3-8b-tuned-f16.vs-base-report.json      --candidate merged=merged/qwen3-8b-tuned-f16.gguf
+ojon auto-quant merged/qwen3-8b-tuned-f16.gguf merged/quants --preset balanced
+```
+
+Order matters: merge first, quantize last, so the KLD recipe search measures the
+quant against the *improved* original. The adapter is a GGUF adapter or a PEFT
+directory (`adapter_config.json` + `adapter_model.safetensors`, what the
+`learn-train-run` path produces); a PEFT folder is converted beside the output
+with `convert_lora_to_gguf.py --outtype f16` (found next to the HF converter,
+or `--convert-script`). The base must be F16/BF16/F32: `llama-export-lora`
+merges into an unquantized original and writes F16 tensors. `--scale` maps to
+the tool's `--lora-scaled`.
+
+The merge receipt (`ojon.lora_merge.v1`) records sizes and both commands and
+states its claim: merge only. KLD against the base is not a gate here, because a
+merged model differs from its base on purpose. The gate is the held-out task
+suite through `quant-compare-run` with the base as reference and the merged
+file as the candidate: quantize the merged file only if it holds or beats the
+base, or the quant inherits an unmeasured change.
+
 ## Speech: whisper.cpp quantize and WER gate
 
 whisper.cpp models are GGML `.bin` files, not GGUF, and whisper.cpp ships its

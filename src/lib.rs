@@ -59,6 +59,7 @@ pub use self::models::llama;
 pub use self::models::mmproj;
 pub use self::models::model_build;
 pub use self::models::whisper;
+pub use self::models::lora_merge;
 
 // Eval
 pub use self::eval::benchmark;

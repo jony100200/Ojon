@@ -40,6 +40,7 @@ pub enum BackendId {
     IntelAutoRound,
     IntelSyclCli,
     WhisperQuantize,
+    LlamaExportLora,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -53,7 +54,7 @@ pub struct BackendSpec {
     pub role: &'static str,
 }
 
-const SPECS: [BackendSpec; 16] = [
+const SPECS: [BackendSpec; 17] = [
     BackendSpec {
         id: BackendId::LlamaQuantize,
         name: "llama.cpp quantizer",
@@ -197,6 +198,15 @@ const SPECS: [BackendSpec; 16] = [
         website: "https://github.com/ggml-org/whisper.cpp",
         integration: Integration::Wired,
         role: "whisper.cpp GGML .bin quantization: q8_0 / q5_0 / q4_0 (q5_1, q4_1) via `whisper-quantize <in.bin> <out.bin> <type>`",
+    },
+    BackendSpec {
+        id: BackendId::LlamaExportLora,
+        name: "llama.cpp LoRA merger",
+        executable_names: &["llama-export-lora", "llama-export-lora.exe"],
+        override_env: "OJON_LLAMA_EXPORT_LORA",
+        website: "https://github.com/ggml-org/llama.cpp",
+        integration: Integration::Wired,
+        role: "merge a LoRA adapter into an F16/BF16/F32 GGUF original (`llama-export-lora -m base --lora adapter -o merged`); output tensors are F16",
     },
 ];
 
