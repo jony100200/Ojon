@@ -88,6 +88,13 @@ Protocol, all through public `llama-quantize` and `llama-perplexity`:
    and `measured_within_budget`. A recipe over budget is reported as rejected and
    the base candidate stays the accepted output.
 
+Options worth knowing: `--imatrix auto` computes an importance matrix from the
+same corpus before any probe (low-bit levels depend on it; without one the search
+understates how low a class can go), `--imatrix <file>` reuses one you already
+have, and `--budget-p99 <x>` adds a tail gate so the 99th-percentile per-token KLD
+may not rise more than `x` over the base either. Mean KLD alone can hide rare,
+large divergences on individual tokens.
+
 Mean KLD is a distance between output distributions, not a task score. A recipe
 within budget still goes through the task suite before any capability claim.
 Typical budgets: 0.005 strict, 0.01 default, 0.02 relaxed; the receipt also

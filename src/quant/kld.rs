@@ -86,7 +86,10 @@ pub struct KldStats {
 pub fn parse_kld_line(line: &str) -> Option<(&'static str, f64, Option<f64>)> {
     let line = line.trim();
     let (label, rest) = line.split_once("KLD:")?;
-    let key = match label.trim() {
+    // Ojon's log streamer prefixes lines with "[stdout] " / "[stderr] "; the tool
+    // itself may prefix a timestamp. Only the last word before "KLD:" matters.
+    let label = label.rsplit(char::is_whitespace).find(|w| !w.is_empty()).unwrap_or("");
+    let key = match label {
         "Mean" => "mean",
         "Median" => "median",
         "Maximum" => "max",
@@ -183,6 +186,8 @@ mod tests {
         assert_eq!(parse_kld_line("Maximum KLD:   1.500000"), Some(("max", 1.5, None)));
         assert_eq!(parse_kld_line("99.0%   KLD:   0.100000"), Some(("p99", 0.1, None)));
         assert_eq!(parse_kld_line("Median  KLD:   0.010000"), Some(("median", 0.01, None)));
+        assert_eq!(parse_kld_line("[stdout] Mean    KLD:   0.043846 ±   0.001000"), Some(("mean", 0.043846, Some(0.001))));
+        assert_eq!(parse_kld_line("[stderr] 99.0%   KLD:   0.262591"), Some(("p99", 0.262591, None)));
         assert_eq!(parse_kld_line("95.0%   KLD:   0.050000"), None);
         assert_eq!(parse_kld_line("Mean    KLD:   nan"), None);
         assert_eq!(parse_kld_line("[1]4.1234,[2]4.2"), None);

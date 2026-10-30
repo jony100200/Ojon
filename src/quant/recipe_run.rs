@@ -68,12 +68,20 @@ pub struct RecipeJob {
     pub budget_kld: f64,
     pub quantize_tool: PathBuf,
     pub imatrix: Option<PathBuf>,
+    /// When set and `imatrix` is None, an importance matrix is computed first
+    /// from the same corpus/context with this `llama-imatrix` executable and
+    /// used for every quantization. Low-bit levels depend on it.
+    pub imatrix_tool: Option<PathBuf>,
     pub threads: usize,
     pub kld: KldSettings,
     pub keep_probes: bool,
+    /// Optional tail gate: the final recipe must also keep the 99th-percentile
+    /// per-token KLD within `base_p99 + budget_p99`. Mean KLD hides rare but
+    /// large divergences on individual tokens; this catches them.
+    pub budget_p99: Option<f64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RecipePlan {
     pub job: RecipeJob,
     pub present: BTreeMap<TensorClass, u64>,
@@ -128,6 +136,19 @@ pub fn prepare_recipe(job: RecipeJob) -> io::Result<RecipePlan> {
             return Err(invalid("importance matrix must be a nonempty local file"));
         }
     }
+    if let Some(tool) = &job.imatrix_tool {
+        if tool.as_os_str().is_empty() {
+            return Err(invalid("imatrix executable missing"));
+        }
+        if output_dir.join("calibration.imatrix").exists() {
+            return Err(invalid("calibration.imatrix already exists in the output directory"));
+        }
+    }
+    if let Some(p99) = job.budget_p99 {
+        if !(p99.is_finite() && (0.0..=10.0).contains(&p99)) {
+            return Err(invalid("p99 budget must be a finite number in 0..=10"));
+        }
+    }
     let tensors = inspect_gguf_tensors(&source)?;
     let present = class_elements(&tensors);
     if present.is_empty() {
@@ -165,6 +186,8 @@ impl RecipePlan {
             "quantize_tool": plain(&self.job.quantize_tool),
             "perplexity_tool": plain(&self.job.kld.tool),
             "imatrix": self.job.imatrix.as_ref().map(|p| plain(p)),
+            "imatrix_auto_tool": self.job.imatrix_tool.as_ref().map(|p| plain(p)),
+            "budget_p99": self.job.budget_p99,
             "execution": "plan_only",
             "claim": "none; every number in the receipt is measured, and KLD is a distribution distance, not a task score"
         })
@@ -237,7 +260,25 @@ where
     let started = Instant::now();
     let base_level = ladder_name(plan.job.base)?;
 
-    log(&format!("[ojon] reference logits for {} ({} chunks of {} ctx)", plan.job.source.display(), plan.job.kld.chunks, plan.job.kld.context));
+    // Optional calibration first: an importance matrix from the same corpus makes
+    // every low-bit level materially better, so a search without one would
+    // understate how low the classes can go.
+    let mut plan_used = plan.clone();
+    let mut imatrix_auto: Option<PathBuf> = None;
+    if plan.job.imatrix.is_none() {
+        if let Some(tool) = &plan.job.imatrix_tool {
+            let out = dir.join("calibration.imatrix");
+            log(&format!("[ojon] importance matrix from the corpus with {}", plain(tool)));
+            let im_plan = crate::quant::calibration::prepare_imatrix(
+                &plan.job.source, &plan.job.kld.corpus, &out, tool, plan.job.kld.gpu_layers, plan.job.kld.context)?;
+            let saved = crate::quant::calibration::run_imatrix(&im_plan, |line| log(line))?;
+            plan_used.job.imatrix = Some(saved.clone());
+            imatrix_auto = Some(saved);
+        }
+    }
+    let plan = &plan_used;
+
+    log(&format!("[ojon] reference logits for {} ({} chunks of {} ctx)", plain(&plan.job.source), plan.job.kld.chunks, plan.job.kld.context));
     let dump = save_reference_logits(&plan.job.source, &dir.join("reference.logits"), &plan.job.kld, &mut log)?;
 
     let all_base: BTreeMap<TensorClass, &'static str> = plan.present.keys().map(|c| (*c, base_level)).collect();
@@ -280,9 +321,20 @@ where
         recipe.steps.len(), recipe.predicted_kld_delta, 100.0 * recipe.predicted_bytes as f64 / recipe.base_bytes.max(1) as f64));
     let final_q = quantize_with(plan, "recipe", &recipe.levels, &mut log)?;
     let final_kld = measure_kld(&final_q.path, &dump, &plan.job.kld, &mut log)?;
-    let within = final_kld.mean <= base_kld.mean + plan.job.budget_kld + 1e-9;
-    log(&format!("[ojon] recipe: {:.2}% of source, mean KLD {:.6} (base {:.6}, budget +{:.6}) -> {}",
+    let mean_within = final_kld.mean <= base_kld.mean + plan.job.budget_kld + 1e-9;
+    // Tail gate: only when both p99 values were reported and a p99 budget was set.
+    let p99_within = match (plan.job.budget_p99, base_kld.p99, final_kld.p99) {
+        (Some(budget), Some(base_p99), Some(final_p99)) => Some(final_p99 <= base_p99 + budget + 1e-9),
+        (Some(_), _, _) => Some(false), // asked for a tail gate but the tool did not report p99: fail closed
+        (None, _, _) => None,
+    };
+    let within = mean_within && p99_within.unwrap_or(true);
+    log(&format!("[ojon] recipe: {:.2}% of source, mean KLD {:.6} (base {:.6}, budget +{:.6}){} -> {}",
         100.0 * final_q.bytes as f64 / plan.source_bytes as f64, final_kld.mean, base_kld.mean, plan.job.budget_kld,
+        match (plan.job.budget_p99, final_kld.p99) {
+            (Some(b), Some(p)) => format!(", p99 {:.6} (budget +{:.6})", p, b),
+            _ => String::new(),
+        },
         if within { "within budget" } else { "OVER budget; not accepted" }));
 
     let receipt = json!({
@@ -296,7 +348,12 @@ where
                   "size_ratio_vs_source": final_q.bytes as f64 / plan.source_bytes as f64,
                   "size_ratio_vs_base": final_q.bytes as f64 / base.bytes.max(1) as f64,
                   "kld": kld_json(&final_kld), "kld_delta_vs_base": final_kld.mean - base_kld.mean,
+                  "mean_within_budget": mean_within,
+                  "p99_budget": plan.job.budget_p99,
+                  "p99_within_budget": p99_within,
                   "measured_within_budget": within},
+        "imatrix": plan.job.imatrix.as_ref().map(|p| plain(p)),
+        "imatrix_computed_by_this_run": imatrix_auto.as_ref().map(|p| plain(p)),
         "elapsed_seconds": started.elapsed().as_secs_f64(),
         "claim": if within {
             "measured mean KLD within budget on this corpus slice; run the task suite before any capability claim"
@@ -357,8 +414,10 @@ mod tests {
         let kld = KldSettings { tool: PathBuf::from("llama-perplexity"), corpus, gpu_layers: 99, context: 512, chunks: 10 };
         let job = RecipeJob {
             source: dir.join("missing.gguf"), output_dir: dir.clone(), base: "q5_k", floor: "iq2_s", budget_kld: 0.01,
-            quantize_tool: PathBuf::from("llama-quantize"), imatrix: None, threads: 4, kld, keep_probes: false,
+            quantize_tool: PathBuf::from("llama-quantize"), imatrix: None, imatrix_tool: None, threads: 4, kld,
+            keep_probes: false, budget_p99: None,
         };
+        assert!(prepare_recipe(RecipeJob { budget_p99: Some(-0.5), ..job.clone() }).is_err());
         assert!(prepare_recipe(RecipeJob { budget_kld: 2.0, ..job.clone() }).is_err());
         assert!(prepare_recipe(RecipeJob { floor: "q6_k", ..job.clone() }).is_err());
         assert!(prepare_recipe(RecipeJob { threads: 0, ..job.clone() }).is_err());

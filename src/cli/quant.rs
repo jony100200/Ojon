@@ -2183,6 +2183,8 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let mut floor = String::from("iq2_s");
             let mut budget = 0.01f64;
             let mut imatrix: Option<PathBuf> = None;
+            let mut imatrix_tool: Option<PathBuf> = None;
+            let mut budget_p99: Option<f64> = None;
             let mut quantize_tool = ojon_backend::discovery::resolve_backend_command(
                 BackendId::LlamaQuantize,
                 "llama-quantize",
@@ -2207,7 +2209,24 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                             .parse::<f64>()
                             .map_err(|_| invalid("budget must be a number (mean KLD delta over base)"))?
                     }
-                    Some("--imatrix") => imatrix = Some(PathBuf::from(next_argument(&mut args, "importance matrix file")?)),
+                    Some("--imatrix") => {
+                        // `--imatrix auto` computes one from the corpus first; anything else is an existing file
+                        let value = next_argument(&mut args, "importance matrix file, or 'auto'")?;
+                        if value.to_str() == Some("auto") {
+                            imatrix_tool = Some(ojon_backend::discovery::resolve_backend_command(
+                                BackendId::LlamaImatrix,
+                                "llama-imatrix",
+                            )?);
+                        } else {
+                            imatrix = Some(PathBuf::from(value));
+                        }
+                    }
+                    Some("--imatrix-tool") => imatrix_tool = Some(PathBuf::from(next_argument(&mut args, "llama-imatrix executable")?)),
+                    Some("--budget-p99") => {
+                        budget_p99 = Some(text(next_argument(&mut args, "p99 KLD budget")?, "budget-p99")?
+                            .parse::<f64>()
+                            .map_err(|_| invalid("budget-p99 must be a number (99th-percentile KLD delta over base)"))?)
+                    }
                     Some("--quantize-tool") => quantize_tool = PathBuf::from(next_argument(&mut args, "llama-quantize executable")?),
                     Some("--perplexity-tool") => perplexity_tool = PathBuf::from(next_argument(&mut args, "llama-perplexity executable")?),
                     Some("--ctx") => context = text(next_argument(&mut args, "context")?, "ctx")?.parse().map_err(|_| invalid("ctx must be a number"))?,
@@ -2235,9 +2254,11 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 budget_kld: budget,
                 quantize_tool,
                 imatrix,
+                imatrix_tool,
                 threads,
                 kld: ojon_backend::kld::KldSettings { tool: perplexity_tool, corpus, gpu_layers, context, chunks },
                 keep_probes,
+                budget_p99,
             })?;
             let plan_path = plan.write_plan()?;
             if json {
