@@ -418,7 +418,8 @@ fn inspect_ojonq(path: &Path) -> io::Result<ModelProbe> {
 }
 
 /// whisper.cpp GGML `.bin`: accepted by magic only. Reads 8 bytes (magic + the
-/// first hparam, whisper's `n_vocab`); never the tensors. No converter is wired.
+/// first hparam, whisper's `n_vocab`); never the tensors. The wired route is
+/// whisper.cpp's own `whisper-quantize` (`whisper-quant-plan|run`).
 fn inspect_ggml_bin(path: &Path) -> io::Result<ModelProbe> {
     let mut f = File::open(path)?;
     let size = f.metadata()?.len();
@@ -449,12 +450,12 @@ fn inspect_ggml_bin(path: &Path) -> io::Result<ModelProbe> {
         confidence,
         bytes: size,
         tensor_count: None,
-        conversion_route: "none",
-        conversion_status: "no_wired_converter",
+        conversion_route: "public_whisper_cpp_whisper_quantize",
+        conversion_status: "candidate_only_requires_installed_backend_compatibility",
         notes: vec![
             "GGML magic matched; hparams beyond the first field and tensor payloads were not read.".into(),
             "The 'ggml' magic is shared with legacy pre-GGUF llama containers; whisper is inferred from the vocabulary size.".into(),
-            "whisper.cpp quantization and a WER gate are not wired yet (roadmap task 5).".into(),
+            "Quantize with whisper-quant-plan|run (whisper.cpp whisper-quantize); gate the result with whisper-parity-plan|run (WER on held-out clips).".into(),
         ],
     })
 }
@@ -703,8 +704,8 @@ mod tests {
         let probe = probe_model(&file).unwrap();
         assert_eq!(probe.format, "ggml_bin");
         assert_eq!(probe.category, ModelCategory::Speech);
-        assert_eq!(probe.conversion_route, "none");
-        assert_eq!(probe.conversion_status, "no_wired_converter");
+        assert_eq!(probe.conversion_route, "public_whisper_cpp_whisper_quantize");
+        assert_eq!(probe.conversion_status, "candidate_only_requires_installed_backend_compatibility");
         assert_eq!(probe.bytes, 16);
         assert!(probe.identification.contains("whisper"));
         assert_eq!(probe.as_json()["category"], "audio_speech");
