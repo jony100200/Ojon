@@ -1,5 +1,6 @@
 //! Ojon CLI dispatch router and domain submodules.
 
+pub mod audio;
 pub mod auto;
 pub mod common;
 pub mod diffusion;
@@ -40,6 +41,9 @@ pub fn run() -> io::Result<()> {
         return Ok(());
     }
     if learn::handle(cmd, &mut args)? {
+        return Ok(());
+    }
+    if audio::handle(cmd, &mut args)? {
         return Ok(());
     }
 

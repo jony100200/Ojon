@@ -2663,6 +2663,7 @@ impl Workstation {
                                     BackendId::IntelAutoRound => "Intel AutoRound (XPU)",
                                     BackendId::IntelSyclCli => "Intel SYCL / oneAPI",
                                     BackendId::LlamaCvectorGenerator => "llama.cpp control-vector generator",
+                                    BackendId::WhisperQuantize => "Speech / whisper quantize",
                                 };
                                 details.horizontal(22.0, |row| {
                                     row.label(&format!("{}:", label));

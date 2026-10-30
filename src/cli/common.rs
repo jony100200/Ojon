@@ -96,6 +96,10 @@ Commands:
   ojon minimax-checkpoint-run  <original-MiniMax-H3.safetensors> <new-NVFP4.safetensors> [same options] --confirm
   ojon minimax-w4a4-plan <local-MiniMax-H3-Diffusers-dir> <new-artifact-dir> [--component fl2va|ref2va|text_encoder] [--device cuda|xpu|cpu|auto] [--python python]
   ojon minimax-w4a4-run  <local-MiniMax-H3-Diffusers-dir> <new-artifact-dir> [same options] --confirm
+  ojon whisper-quant-plan <whisper-ggml.bin> <output-dir> [--formats q8_0,q5_0,q4_0] [--tool whisper-quantize] [--json]   Plan whisper.cpp quantization (q8_0 q5_0 q4_0 q5_1 q4_1); writes nothing
+  ojon whisper-quant-run  <whisper-ggml.bin> <output-dir> [same options] --confirm   One .bin per format plus whisper-quant-receipt.json with sizes; never overwrites
+  ojon whisper-parity-plan <original.bin> <candidate.bin> [...] --clips clips.jsonl [--max-wer-delta 0.02] [--language en] [--threads N] [--whisper-cli path] [--out-dir dir] [--json]   Plan the WER gate: every model transcribes every clip through whisper-cli
+  ojon whisper-parity-run  <original.bin> <candidate.bin> [...] --clips clips.jsonl [same options] --confirm   Corpus WER per model vs the manifest transcripts; candidate-minus-original delta gated
   ojon diffusion-plan <local-source> <output.safetensors> --checkout <upstream> [--backend svdq] [--kind image|video] [--format int4] [--python python] [--samples 32]
   ojon pack-plan <original.safetensors> <output.ojonq> [--bits 4] [--group 64]
   ojon pack-run  <original.safetensors> <output.ojonq> [options] --confirm

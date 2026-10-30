@@ -38,6 +38,7 @@ pub enum BackendId {
     LlamaCvectorGenerator,
     IntelAutoRound,
     IntelSyclCli,
+    WhisperQuantize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -51,7 +52,7 @@ pub struct BackendSpec {
     pub role: &'static str,
 }
 
-const SPECS: [BackendSpec; 14] = [
+const SPECS: [BackendSpec; 15] = [
     BackendSpec {
         id: BackendId::LlamaQuantize,
         name: "llama.cpp quantizer",
@@ -148,8 +149,8 @@ const SPECS: [BackendSpec; 14] = [
         executable_names: &["whisper-cli", "whisper-cli.exe"],
         override_env: "OJON_WHISPER_CLI",
         website: "https://github.com/ggml-org/whisper.cpp",
-        integration: Integration::DiscoveryOnly,
-        role: "Speech support requires a separate compatible adapter",
+        integration: Integration::Wired,
+        role: "Speech transcription for the WER parity gate: whisper-cli -nt -np -otxt on held-out clips, original vs quantized candidates",
     },
     BackendSpec {
         id: BackendId::LlamaCvectorGenerator,
@@ -177,6 +178,15 @@ const SPECS: [BackendSpec; 14] = [
         website: "https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/SYCL.md",
         integration: Integration::Wired,
         role: "GGUF inference accelerated on Intel Arc GPU via native oneAPI SYCL and XMX engines",
+    },
+    BackendSpec {
+        id: BackendId::WhisperQuantize,
+        name: "whisper.cpp quantizer",
+        executable_names: &["whisper-quantize", "whisper-quantize.exe", "quantize", "quantize.exe"],
+        override_env: "OJON_WHISPER_QUANTIZE",
+        website: "https://github.com/ggml-org/whisper.cpp",
+        integration: Integration::Wired,
+        role: "whisper.cpp GGML .bin quantization: q8_0 / q5_0 / q4_0 (q5_1, q4_1) via `whisper-quantize <in.bin> <out.bin> <type>`",
     },
 ];
 
