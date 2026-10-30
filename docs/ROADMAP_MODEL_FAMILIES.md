@@ -32,9 +32,14 @@ quantizes the language part (no mmproj); mmproj creation only inside
 `ojon.vision_suite.v1`, accuracy drop bounded by `max_loss_points`); smoke via
 `adapter-smoke-run --image --mmproj`.
 
-Gap: the projector is never a quantization variable. The same `--mmproj` feeds
-reference and candidate, and `quantize-hf` drops it. A GGUF mmproj probes as
-`Language weak_guess` because `clip` is not in the VLM list.
+Since 2026-10-30 the projector is a variable: `quantize-hf --mmproj-out
+--mmproj-precision f16|bf16|q8_0` writes it beside the language GGUF, and
+`quant-parity-* --mmproj-candidate` scores reference and candidate with
+different projectors (`llama-mtmd-cli` preferred when discovered).
+
+Remaining gap: the (Q4_K_M + mmproj f16) vs (Q4_K_M + mmproj q8_0) comparison
+has not yet been executed on a real model; the receipts still say
+`vision_inference_test: NOT_RUN` until it is.
 
 ## Image (diffusion)
 
@@ -98,7 +103,7 @@ No embedding, reranker, ONNX, detection or segmentation command.
    `llama-embedding` on reference and candidate over a held-out set; min and
    mean cosine, top-k overlap, Recall@k; reranker mode on NDCG@10. Needs
    `BackendId::LlamaEmbedding` and better embedding classification.
-4. **mmproj as a quantization variable.** `quantize-hf --mmproj-out
+4. **DONE 2026-10-30 (`quantize-hf --mmproj-out --mmproj-precision f16|bf16|q8_0`, `quant-parity-plan|run --mmproj-candidate [--vision-tool]`, `BackendId::LlamaMtmdCli`; the (Q4_K_M + f16) vs (Q4_K_M + q8_0) vision-suite run is wired, not yet executed on a real model). mmproj as a quantization variable.** `quantize-hf --mmproj-out
    --mmproj-precision f16|bf16|q8_0`; `quant-parity --mmproj-candidate`; discover
    `llama-mtmd-cli`. Done when (Q4_K_M + mmproj f16) vs (Q4_K_M + mmproj q8_0) are
    scored against the F16 reference on one vision suite.
