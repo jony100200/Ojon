@@ -78,8 +78,8 @@ pub fn align_words(reference: &[String], hypothesis: &[String]) -> WerCounts {
     for (i, row) in dp.iter_mut().enumerate().skip(1) {
         row[0] = (i, 0, 0, i);
     }
-    for j in 1..=m {
-        dp[0][j] = (j, 0, j, 0);
+    for (j, cell) in dp[0].iter_mut().enumerate().skip(1) {
+        *cell = (j, 0, j, 0);
     }
     for i in 1..=n {
         for j in 1..=m {
