@@ -43,7 +43,11 @@ pub fn parse_formats_for(spec: &str, converter: &GgufConverter) -> io::Result<Ve
             continue;
         }
         if converter.nominal_bits(f).is_none() {
-            return Err(bad(format!("unknown sweep format '{f}'; use any of q8_0,q5_0,q4_K,q4_0,q3_K")));
+            return Err(bad(format!(
+                "unknown sweep format '{f}' for {}; use any of {}",
+                converter.name(),
+                converter.formats().iter().map(|(x, _)| *x).collect::<Vec<_>>().join(",")
+            )));
         }
         if !out.iter().any(|x| x == f) {
             out.push(f.to_string());
