@@ -155,10 +155,8 @@ pub fn choose_edit_method(input: &Value) -> io::Result<MethodChoice> {
                 reasons.push(format!("{name} loss exceeds tolerance"));
             }
         }
-        if vision {
-            if x.vision.unwrap() + loss + 1e-12 < base.vision.unwrap() {
-                reasons.push("vision loss exceeds tolerance".to_owned());
-            }
+        if vision && x.vision.unwrap() + loss + 1e-12 < base.vision.unwrap() {
+            reasons.push("vision loss exceeds tolerance".to_owned());
         }
         if let Some(maximum) = max_refusal_rate {
             if x.refusal_rate > maximum + 1e-12 {

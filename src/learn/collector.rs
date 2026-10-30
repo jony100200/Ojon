@@ -1289,10 +1289,11 @@ pub fn extract_episode_metadata(ep: &CollectedEpisode) -> ExtractedEpisodeMetada
             )
     }) {
         let trimmed = token.trim_matches(|c: char| c == '.' || c == '/');
-        if trimmed.len() >= 3 && exts.iter().any(|ext| trimmed.ends_with(ext)) {
-            if !detected_files.contains(&trimmed.to_string()) {
-                detected_files.push(trimmed.to_string());
-            }
+        if trimmed.len() >= 3
+            && exts.iter().any(|ext| trimmed.ends_with(ext))
+            && !detected_files.contains(&trimmed.to_string())
+        {
+            detected_files.push(trimmed.to_string());
         }
     }
 
