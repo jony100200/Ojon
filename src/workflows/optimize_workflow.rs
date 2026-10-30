@@ -5,7 +5,7 @@
 //! existing CLI routes. This does NOT run quantizers, load weights, benchmark
 //! models, allocate GPU memory, download dependencies or promise a winner.
 
-use crate::adaptive::{prepare_adaptive_against_reference, run_adaptive};
+use crate::adaptive::{prepare_adaptive_against_reference, run_adaptive, AdaptiveRequest};
 use crate::benchmark::{compare_bench_files, prepare_bench, run_bench};
 use crate::discovery::{
     probe_quantizer_capabilities, probe_runtime_devices, BackendId, FoundBackend,
@@ -608,20 +608,22 @@ pub fn plan_optimize_workflow(
                 checks.push("Adaptive workflow requires installed quantizer and llama-cli.".into());
             } else {
                 match prepare_adaptive_against_reference(
-                    &source,
+                    AdaptiveRequest {
+                        source: &source,
+                        scores,
+                        output_dir: out,
+                        suite,
+                        quantizer: &options.quantizer,
+                        eval_tool: &options.eval_tool,
+                        imatrix: options.imatrix.as_deref(),
+                        targets: &[3.0, 3.5, 4.0],
+                        threads: options.threads,
+                        gpu_layers: 0,
+                        device: None,
+                        tokens: options.tokens,
+                        max_absolute_loss_pct: input.max_loss_points,
+                    },
                     base,
-                    scores,
-                    out,
-                    suite,
-                    &options.quantizer,
-                    &options.eval_tool,
-                    options.imatrix.as_deref(),
-                    &[3.0, 3.5, 4.0],
-                    options.threads,
-                    0,
-                    None,
-                    options.tokens,
-                    input.max_loss_points,
                 ) {
                     Ok(_) => {
                         permitted = true;
@@ -990,20 +992,22 @@ pub fn run_optimize_workflow(
                 .as_ref()
                 .ok_or_else(|| invalid("adaptive workflow needs sensitivity data"))?;
             let mut plan = prepare_adaptive_against_reference(
-                &request.model,
+                AdaptiveRequest {
+                    source: &request.model,
+                    scores,
+                    output_dir: out,
+                    suite,
+                    quantizer: &options.quantizer,
+                    eval_tool: &options.eval_tool,
+                    imatrix: options.imatrix.as_deref(),
+                    targets: &[3.0, 3.5, 4.0],
+                    threads: options.threads,
+                    gpu_layers: options.gpu_layers,
+                    device: options.device.as_deref(),
+                    tokens: options.tokens,
+                    max_absolute_loss_pct: request.max_loss_points,
+                },
                 baseline,
-                scores,
-                out,
-                suite,
-                &options.quantizer,
-                &options.eval_tool,
-                options.imatrix.as_deref(),
-                &[3.0, 3.5, 4.0],
-                options.threads,
-                options.gpu_layers,
-                options.device.as_deref(),
-                options.tokens,
-                request.max_loss_points,
             )?;
             plan.server_tool = options.server_tool.clone();
             log("[ojon] Using existing adaptive allocator, Q4-referenced quality evaluation and tensor recipes");

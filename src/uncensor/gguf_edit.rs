@@ -2,7 +2,7 @@
 //! The source remains read-only. Float matrices are patched in a staged copy;
 //! a loader and refusal/capability evaluation must still validate the result.
 
-use crate::abliteration::{apply_directional_matrix, normalized_direction};
+use crate::abliteration::{apply_directional_matrix, normalized_direction, MatrixRegion};
 use crate::gguf::{inspect_gguf, inspect_gguf_tensors};
 use crate::resource::free_disk;
 use serde_json::{json, Value};
@@ -311,10 +311,12 @@ pub fn run_gguf_abliteration(
         ));
         apply_directional_matrix(
             &mut output,
-            edit.offset,
-            edit.rows,
-            edit.cols,
-            edit.dtype,
+            MatrixRegion {
+                offset: edit.offset,
+                rows: edit.rows,
+                cols: edit.cols,
+                dtype: edit.dtype,
+            },
             &edit.direction,
             edit.strength,
             plan.preserve_row_norms,

@@ -86,12 +86,13 @@ pub use abliteration::{
 };
 pub use activation_trace::{compile_activation_recipe, save_activation_recipe, ActivationRecipe};
 pub use adapter_smoke::{
-    prepare_adapter_smoke, run_adapter_smoke, AdapterSmokePlan, AdapterSmokeResult,
+    prepare_adapter_smoke, run_adapter_smoke, AdapterSmokePlan, AdapterSmokeRequest,
+    AdapterSmokeResult,
 };
 pub use adaptive::{
     allocate_bits, allocate_bits_with_strategy, compare_allocation_strategies,
     extract_sensitivity_from_imatrix, parse_tensor_sensitivity, prepare_adaptive, run_adaptive,
-    sensitive_spine_pinning_recipe, AdaptivePlan, AllocationStrategy, TensorScore,
+    sensitive_spine_pinning_recipe, AdaptivePlan, AdaptiveRequest, AllocationStrategy, TensorScore,
 };
 pub use advanced::{
     discover_advanced, plan_gsq, plan_gsq_assemble, plan_rco_assemble, plan_rco_database,
@@ -110,7 +111,7 @@ pub use cvector_import::{
 };
 pub use diffusion::{
     discover_diffusion, inspect_diffusion_recipe, plan_diffusion, run_diffusion, DiffusionEngine,
-    DiffusionFormat, DiffusionKind, DiffusionPlan, DiffusionResult,
+    DiffusionFormat, DiffusionKind, DiffusionPlan, DiffusionPlanRequest, DiffusionResult,
 };
 pub use discovery::{
     backend_specs, bundled_data_dir, bundled_data_file, discover_backends, discovered_path,
@@ -122,7 +123,7 @@ pub use distill::{
     audit_dataset_file, prepare_distill_plan, retrieve_recipes, DatasetAuditReport, DatasetEntry,
     DistillPlan, KnowledgeTier, RecipeMatch,
 };
-pub use exl3::{prepare_exl3, run_exl3, Exl3Plan};
+pub use exl3::{prepare_exl3, run_exl3, Exl3Plan, Exl3Request};
 pub use gguf::{
     classify_tensor_role, ggml_type_block_info, ggml_type_name, inspect_gguf, inspect_gguf_tensors,
     inspect_model_topology, GgufSummary, GgufTensor, ModelTopology, RuntimeMemoryEstimate,
@@ -143,7 +144,9 @@ pub use llama::{
     prepare_gguf, quantize_gguf, quantize_gguf_with_log, Precision, QuantizePlan, QuantizeResult,
 };
 pub use method_select::{choose_edit_method, choose_edit_method_file, MethodChoice};
-pub use model_build::{prepare_model_build, run_model_build, ModelBuildPlan, ModelBuildResult};
+pub use model_build::{
+    prepare_model_build, run_model_build, ModelBuildPlan, ModelBuildRequest, ModelBuildResult,
+};
 pub use model_edit::{
     prepare_model_abliteration, run_model_abliteration, ModelAblationPlan, ModelAblationResult,
 };
@@ -163,7 +166,9 @@ pub use quant_compare::{
 pub use quant_parity::{
     prepare_quant_parity, run_quant_parity, QuantParityOptions, QuantParityPlan,
 };
-pub use research_routes::{prepare_research, run_research, ResearchKind, ResearchPlan};
+pub use research_routes::{
+    prepare_research, run_research, ResearchKind, ResearchPlan, ResearchRequest,
+};
 pub use resource::{
     assess_resources, discover_runtime_gpu_devices, is_integrated_gpu_name,
     resolve_auto_runtime_device, resource_plan, ResourceAssessment, ResourceMode, RuntimeGpuDevice,
@@ -195,8 +200,8 @@ pub use self::learn::{
     CurationReceipt, DaemonConfig, DaemonStatus, DatasetCatalogEntry, DatasetCategory,
     DpoPreferencePair, DualBufferConfig, EpisodeOutcome, ExtractedEpisodeMetadata, GateCheckResult,
     HardwareDiagnosis, HardwareTier, HarvestReceipt, ImportReceipt, InstallReceipt, KnowledgeItem,
-    KnowledgeSourceKind, LearnCollector, LearnDaemon, LearnTrainPlan, PackageKind, PackageManifest,
-    PromotedModelPointer, PromotionDecision, PromotionPolicy, RollbackReceipt,
+    KnowledgeItemInput, KnowledgeSourceKind, LearnCollector, LearnDaemon, LearnTrainPlan, PackageKind,
+    PackageManifest, PackageMeta, PromotedModelPointer, PromotionDecision, PromotionPolicy, RollbackReceipt,
     TemporalKnowledgeEngine, TemporalRetrievalQuery, TemporalSearchResult, ToolCallRecord,
     TrainReceipt, UtilityModelSpec, CANONICAL_TOOL_DECLINE_SUITE, CURATED_DATASETS,
 };

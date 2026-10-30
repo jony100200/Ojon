@@ -87,17 +87,30 @@ fn destination(path: &Path) -> io::Result<PathBuf> {
     Ok(parent.join(name))
 }
 
+/// Inputs for [`prepare_exl3`].
+#[derive(Clone, Copy, Debug)]
+pub struct Exl3Request<'a> {
+    pub source: &'a Path,
+    pub output: &'a Path,
+    pub work_dir: &'a Path,
+    pub checkout: &'a Path,
+    pub python: &'a Path,
+    pub bits: f64,
+    pub high_quality: bool,
+    pub resume: bool,
+}
 /// Plans only. Verify input is a local unquantized Hugging Face checkpoint.
-pub fn prepare_exl3(
-    source: &Path,
-    output: &Path,
-    work_dir: &Path,
-    checkout: &Path,
-    python: &Path,
-    bits: f64,
-    high_quality: bool,
-    resume: bool,
-) -> io::Result<Exl3Plan> {
+pub fn prepare_exl3(request: Exl3Request<'_>) -> io::Result<Exl3Plan> {
+    let Exl3Request {
+        source,
+        output,
+        work_dir,
+        checkout,
+        python,
+        bits,
+        high_quality,
+        resume,
+    } = request;
     if !bits.is_finite() || !(2.0..=8.0).contains(&bits) {
         return Err(invalid(
             "EXL3 target bitrate must be finite and between 2.0 and 8.0",
@@ -318,67 +331,67 @@ mod tests {
         let (root, source, checkout) = fixture();
         let out = root.join("exl3");
         let work = root.join("work");
-        let p = prepare_exl3(
-            &source,
-            &out,
-            &work,
-            &checkout,
-            Path::new("python"),
-            3.5,
-            true,
-            false,
-        )
+        let p = prepare_exl3(Exl3Request {
+            source: &source,
+            output: &out,
+            work_dir: &work,
+            checkout: &checkout,
+            python: Path::new("python"),
+            bits: 3.5,
+            high_quality: true,
+            resume: false,
+        })
         .unwrap();
         assert_eq!(p.as_json()["output_format"], "EXL3 (NOT GGUF)");
         assert_eq!(p.as_json()["runtime_load_verified"], false);
-        assert!(prepare_exl3(
-            &source,
-            &out,
-            &work,
-            &checkout,
-            Path::new("python"),
-            0.5,
-            false,
-            false
-        )
+        assert!(prepare_exl3(Exl3Request {
+            source: &source,
+            output: &out,
+            work_dir: &work,
+            checkout: &checkout,
+            python: Path::new("python"),
+            bits: 0.5,
+            high_quality: false,
+            resume: false,
+        },)
         .is_err());
-        assert!(prepare_exl3(
-            &source,
-            &source.join("out"),
-            &work,
-            &checkout,
-            Path::new("python"),
-            3.0,
-            false,
-            false
-        )
+        assert!(prepare_exl3(Exl3Request {
+            source: &source,
+            output: &source.join("out"),
+            work_dir: &work,
+            checkout: &checkout,
+            python: Path::new("python"),
+            bits: 3.0,
+            high_quality: false,
+            resume: false,
+        },)
         .is_err());
-        assert!(prepare_exl3(
-            &source,
-            &out,
-            &out,
-            &checkout,
-            Path::new("python"),
-            3.0,
-            false,
-            false
-        )
+        assert!(prepare_exl3(Exl3Request {
+            source: &source,
+            output: &out,
+            work_dir: &out,
+            checkout: &checkout,
+            python: Path::new("python"),
+            bits: 3.0,
+            high_quality: false,
+            resume: false,
+        },)
         .is_err());
         fs::write(
             source.join("config.json"),
             r#"{"quantization_config":{"bits":4}}"#,
         )
         .unwrap();
-        assert!(prepare_exl3(
-            &source,
-            &out,
-            &work,
-            &checkout,
-            Path::new("python"),
-            3.0,
-            false,
-            false
-        )
+        assert!(prepare_exl3(Exl3Request {
+            source: &source,
+            output: &out,
+            work_dir: &work,
+            checkout: &checkout,
+            python: Path::new("python"),
+            bits: 3.0,
+            high_quality: false,
+            resume: false,
+        },)
         .is_err());
         fs::remove_dir_all(root).unwrap();
     }
@@ -387,16 +400,16 @@ mod tests {
         let (root, source, checkout) = fixture();
         let out = root.join("exl3");
         let work = root.join("work");
-        let plan = prepare_exl3(
-            &source,
-            &out,
-            &work,
-            &checkout,
-            Path::new("python"),
-            3.0,
-            false,
-            false,
-        )
+        let plan = prepare_exl3(Exl3Request {
+            source: &source,
+            output: &out,
+            work_dir: &work,
+            checkout: &checkout,
+            python: Path::new("python"),
+            bits: 3.0,
+            high_quality: false,
+            resume: false,
+        })
         .unwrap();
         fs::create_dir_all(&work).unwrap();
         fs::write(
@@ -404,28 +417,28 @@ mod tests {
             serde_json::to_vec(&plan.job_record()).unwrap(),
         )
         .unwrap();
-        let resumed = prepare_exl3(
-            &source,
-            &out,
-            &work,
-            &checkout,
-            Path::new("python"),
-            3.0,
-            false,
-            true,
-        )
+        let resumed = prepare_exl3(Exl3Request {
+            source: &source,
+            output: &out,
+            work_dir: &work,
+            checkout: &checkout,
+            python: Path::new("python"),
+            bits: 3.0,
+            high_quality: false,
+            resume: true,
+        })
         .unwrap();
         assert!(existing_job_matches(&resumed).is_ok());
-        let changed = prepare_exl3(
-            &source,
-            &out,
-            &work,
-            &checkout,
-            Path::new("python"),
-            4.0,
-            false,
-            true,
-        )
+        let changed = prepare_exl3(Exl3Request {
+            source: &source,
+            output: &out,
+            work_dir: &work,
+            checkout: &checkout,
+            python: Path::new("python"),
+            bits: 4.0,
+            high_quality: false,
+            resume: true,
+        })
         .unwrap();
         assert!(existing_job_matches(&changed).is_err());
         fs::remove_dir_all(root).unwrap();

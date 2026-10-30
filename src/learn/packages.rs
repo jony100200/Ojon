@@ -193,18 +193,32 @@ pub fn verify_package_integrity(
     Ok(manifest)
 }
 
+/// Identity and provenance shared by every package kind.
+#[derive(Clone, Debug)]
+pub struct PackageMeta<'a> {
+    pub package_id: &'a str,
+    pub name: &'a str,
+    pub version: &'a str,
+    pub description: &'a str,
+    pub author: &'a str,
+    pub license: &'a str,
+    pub changelog: Vec<String>,
+}
 /// Create a new KnowledgePack containing verified JSONL facts.
 pub fn create_knowledge_pack(
-    package_id: &str,
-    name: &str,
-    version: &str,
+    meta: PackageMeta<'_>,
     facts_jsonl: &Path,
     dest_dir: &Path,
-    description: &str,
-    author: &str,
-    license: &str,
-    changelog: Vec<String>,
 ) -> io::Result<PackageManifest> {
+    let PackageMeta {
+        package_id,
+        name,
+        version,
+        description,
+        author,
+        license,
+        changelog,
+    } = meta;
     fs::create_dir_all(dest_dir)?;
 
     let target_facts = dest_dir.join("knowledge_store.jsonl");
@@ -243,18 +257,21 @@ pub fn create_knowledge_pack(
 
 /// Create a new SkillPack containing an adapter and benchmark scores.
 pub fn create_skill_pack(
-    package_id: &str,
-    name: &str,
-    version: &str,
+    meta: PackageMeta<'_>,
     adapter_file: &Path,
     base_model_compatibility: &str,
     dest_dir: &Path,
     benchmark_scores: HashMap<String, f64>,
-    description: &str,
-    author: &str,
-    license: &str,
-    changelog: Vec<String>,
 ) -> io::Result<PackageManifest> {
+    let PackageMeta {
+        package_id,
+        name,
+        version,
+        description,
+        author,
+        license,
+        changelog,
+    } = meta;
     fs::create_dir_all(dest_dir)?;
 
     let file_name = adapter_file
@@ -296,17 +313,20 @@ pub fn create_skill_pack(
 
 /// Create a new ModelRelease containing a full model checkpoint or GGUF.
 pub fn create_model_release(
-    package_id: &str,
-    name: &str,
-    version: &str,
+    meta: PackageMeta<'_>,
     model_file: &Path,
     dest_dir: &Path,
     benchmark_scores: HashMap<String, f64>,
-    description: &str,
-    author: &str,
-    license: &str,
-    changelog: Vec<String>,
 ) -> io::Result<PackageManifest> {
+    let PackageMeta {
+        package_id,
+        name,
+        version,
+        description,
+        author,
+        license,
+        changelog,
+    } = meta;
     fs::create_dir_all(dest_dir)?;
 
     let file_name = model_file
@@ -547,15 +567,17 @@ mod tests {
 
         // 1. Create Knowledge Pack v1.0.0
         let m1 = create_knowledge_pack(
-            "kp-game-apis",
-            "Game Dev Verified APIs",
-            "1.0.0",
+            PackageMeta {
+                package_id: "kp-game-apis",
+                name: "Game Dev Verified APIs",
+                version: "1.0.0",
+                description: "Game dev APIs v1",
+                author: "Kalponic R&D",
+                license: "MIT",
+                changelog: vec!["Initial release".to_string()],
+            },
             &dummy_facts_v1,
             &pkg_v1_dir,
-            "Game dev APIs v1",
-            "Kalponic R&D",
-            "MIT",
-            vec!["Initial release".to_string()],
         )
         .unwrap();
         assert_eq!(m1.version, "1.0.0");
@@ -568,15 +590,17 @@ mod tests {
 
         // 3. Create and Install Knowledge Pack v2.0.0
         let _m2 = create_knowledge_pack(
-            "kp-game-apis",
-            "Game Dev Verified APIs",
-            "2.0.0",
+            PackageMeta {
+                package_id: "kp-game-apis",
+                name: "Game Dev Verified APIs",
+                version: "2.0.0",
+                description: "Game dev APIs v2",
+                author: "Kalponic R&D",
+                license: "MIT",
+                changelog: vec!["Updated to 2026 specs".to_string()],
+            },
             &dummy_facts_v2,
             &pkg_v2_dir,
-            "Game dev APIs v2",
-            "Kalponic R&D",
-            "MIT",
-            vec!["Updated to 2026 specs".to_string()],
         )
         .unwrap();
 
@@ -622,17 +646,19 @@ mod tests {
 
         let pkg_v1 = temp_root.join("skill_v1");
         create_skill_pack(
-            "sp-coder",
-            "Rust Coder Skill",
-            "1.0.0",
+            PackageMeta {
+                package_id: "sp-coder",
+                name: "Rust Coder Skill",
+                version: "1.0.0",
+                description: "Skill v1",
+                author: "KS",
+                license: "Apache-2.0",
+                changelog: vec!["v1".into()],
+            },
             &adapter_file,
             "Qwen3-4B",
             &pkg_v1,
             HashMap::new(),
-            "Skill v1",
-            "KS",
-            "Apache-2.0",
-            vec!["v1".into()],
         )
         .unwrap();
 
@@ -647,17 +673,19 @@ mod tests {
         // Tamper with payload bytes in pkg_v2
         let pkg_v2 = temp_root.join("skill_v2_tampered");
         create_skill_pack(
-            "sp-coder",
-            "Rust Coder Skill",
-            "2.0.0",
+            PackageMeta {
+                package_id: "sp-coder",
+                name: "Rust Coder Skill",
+                version: "2.0.0",
+                description: "Skill v2",
+                author: "KS",
+                license: "Apache-2.0",
+                changelog: vec!["v2".into()],
+            },
             &adapter_file,
             "Qwen3-4B",
             &pkg_v2,
             HashMap::new(),
-            "Skill v2",
-            "KS",
-            "Apache-2.0",
-            vec!["v2".into()],
         )
         .unwrap();
         // Corrupt payload bytes while keeping same length

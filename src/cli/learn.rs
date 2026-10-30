@@ -294,9 +294,11 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 }
             }
             let episodes = ojon_backend::load_episodes_from_jsonl(&episodes_path)?;
-            let mut config = ojon_backend::DualBufferConfig::default();
-            config.anchor_ratio = anchor_ratio;
-            config.recency_window_k = recency_k;
+            let config = ojon_backend::DualBufferConfig {
+                anchor_ratio,
+                recency_window_k: recency_k,
+                ..Default::default()
+            };
             let batch = ojon_backend::partition_dual_buffer(&episodes, &config);
             let receipt = ojon_backend::export_to_llamafactory(&batch, &output_dir)?;
             if json {
@@ -567,21 +569,21 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     domain, title, published_epoch_s
                 ))
             );
-            let item = ojon_backend::create_knowledge_item(
-                &item_id,
-                kind,
-                &source_url,
-                &title,
-                &domain,
-                &content,
+            let item = ojon_backend::create_knowledge_item(ojon_backend::KnowledgeItemInput {
+                item_id: &item_id,
+                source_kind: kind,
+                source_url: &source_url,
+                title: &title,
+                domain: &domain,
+                raw_content: &content,
                 published_epoch_s,
-                version.as_deref(),
-                &tier,
-                &license,
-                vec![format!(
+                software_version: version.as_deref(),
+                reliability_tier: &tier,
+                license: &license,
+                citations: vec![format!(
                     "Source: {source_url} (Published: {published_epoch_s})"
                 )],
-            );
+            });
 
             let mut store = ojon_backend::load_knowledge_store(&store_path).unwrap_or_default();
             let superseded_ids = ojon_backend::apply_supersession(&mut store, &item);
@@ -805,40 +807,46 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
 
             let manifest = match kind_arg.to_ascii_lowercase().as_str() {
                 "knowledge" | "knowledge_pack" => ojon_backend::create_knowledge_pack(
-                    &id,
-                    &name,
-                    &version,
+                    ojon_backend::PackageMeta {
+                        package_id: &id,
+                        name: &name,
+                        version: &version,
+                        description: &description,
+                        author: &author,
+                        license: &license,
+                        changelog,
+                    },
                     &input_path,
                     &dest_dir,
-                    &description,
-                    &author,
-                    &license,
-                    changelog,
                 )?,
                 "skill" | "skill_pack" => ojon_backend::create_skill_pack(
-                    &id,
-                    &name,
-                    &version,
+                    ojon_backend::PackageMeta {
+                        package_id: &id,
+                        name: &name,
+                        version: &version,
+                        description: &description,
+                        author: &author,
+                        license: &license,
+                        changelog,
+                    },
                     &input_path,
                     &base_model,
                     &dest_dir,
                     std::collections::HashMap::new(),
-                    &description,
-                    &author,
-                    &license,
-                    changelog,
                 )?,
                 "release" | "model_release" => ojon_backend::create_model_release(
-                    &id,
-                    &name,
-                    &version,
+                    ojon_backend::PackageMeta {
+                        package_id: &id,
+                        name: &name,
+                        version: &version,
+                        description: &description,
+                        author: &author,
+                        license: &license,
+                        changelog,
+                    },
                     &input_path,
                     &dest_dir,
                     std::collections::HashMap::new(),
-                    &description,
-                    &author,
-                    &license,
-                    changelog,
                 )?,
                 other => {
                     return Err(invalid(format!(

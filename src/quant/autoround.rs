@@ -118,26 +118,52 @@ pub fn prepare_autoround_plan(
     seqlen: u32,
 ) -> io::Result<AutoRoundPlan> {
     // Preserve existing API and GUI calls: 0-iteration optimized RTN by default.
-    prepare_autoround_recipe_plan(
-        model_dir, output_dir, bits, device_str, python, nsamples, seqlen, None, 0, None,
-    )
+    prepare_autoround_recipe_plan(AutoRoundRecipeRequest {
+        model_dir,
+        output_dir,
+        bits,
+        device_str,
+        python,
+        nsamples,
+        seqlen,
+        requested_format: None,
+        iters: 0,
+        dataset: None,
+    })
 }
 
+/// Inputs for [`prepare_autoround_recipe_plan`].
+#[derive(Clone, Copy, Debug)]
+pub struct AutoRoundRecipeRequest<'a> {
+    pub model_dir: &'a Path,
+    pub output_dir: &'a Path,
+    pub bits: u32,
+    pub device_str: &'a str,
+    pub python: &'a Path,
+    pub nsamples: u32,
+    pub seqlen: u32,
+    pub requested_format: Option<&'a str>,
+    pub iters: u32,
+    pub dataset: Option<&'a Path>,
+}
 /// Explicit paper-backed recipe: local original HF -> experimental GGUF export.
 /// GGUF formats come from intel/auto-round docs/step_by_step.md.
 /// Calibration iterations require an operator-supplied local JSON dataset.
 pub fn prepare_autoround_recipe_plan(
-    model_dir: &Path,
-    output_dir: &Path,
-    bits: u32,
-    device_str: &str,
-    python: &Path,
-    nsamples: u32,
-    seqlen: u32,
-    requested_format: Option<&str>,
-    iters: u32,
-    dataset: Option<&Path>,
+    request: AutoRoundRecipeRequest<'_>,
 ) -> io::Result<AutoRoundPlan> {
+    let AutoRoundRecipeRequest {
+        model_dir,
+        output_dir,
+        bits,
+        device_str,
+        python,
+        nsamples,
+        seqlen,
+        requested_format,
+        iters,
+        dataset,
+    } = request;
     if !model_dir.is_dir() {
         return Err(bad_input(format!(
             "model directory does not exist: {}",
@@ -417,18 +443,18 @@ mod tests {
         fs::create_dir_all(&model).unwrap();
         fs::write(model.join("config.json"), "{}").unwrap();
         let out = root.join("out");
-        let rt = prepare_autoround_recipe_plan(
-            &model,
-            &out,
-            4,
-            "cpu",
-            Path::new("python"),
-            128,
-            2048,
-            None,
-            0,
-            None,
-        )
+        let rt = prepare_autoround_recipe_plan(AutoRoundRecipeRequest {
+            model_dir: &model,
+            output_dir: &out,
+            bits: 4,
+            device_str: "cpu",
+            python: Path::new("python"),
+            nsamples: 128,
+            seqlen: 2048,
+            requested_format: None,
+            iters: 0,
+            dataset: None,
+        })
         .unwrap();
         assert_eq!(rt.format, "gguf:q4_k_m");
         assert!(rt
@@ -437,18 +463,18 @@ mod tests {
             .any(|w| w[0] == "--iters" && w[1] == "0"));
         let path = root.join("calibration.json");
         fs::write(&path, "[]").unwrap();
-        let calibrated = prepare_autoround_recipe_plan(
-            &model,
-            &out,
-            5,
-            "xpu",
-            Path::new("python"),
-            128,
-            2048,
-            Some("gguf:q5_k_m"),
-            200,
-            Some(&path),
-        )
+        let calibrated = prepare_autoround_recipe_plan(AutoRoundRecipeRequest {
+            model_dir: &model,
+            output_dir: &out,
+            bits: 5,
+            device_str: "xpu",
+            python: Path::new("python"),
+            nsamples: 128,
+            seqlen: 2048,
+            requested_format: Some("gguf:q5_k_m"),
+            iters: 200,
+            dataset: Some(&path),
+        })
         .unwrap();
         assert_eq!(calibrated.format, "gguf:q5_k_m");
         assert_eq!(calibrated.json()["method"], "calibrated_auto_round");
@@ -456,44 +482,44 @@ mod tests {
             .arguments
             .windows(2)
             .any(|w| w.first().map(String::as_str) == Some("--dataset")));
-        assert!(prepare_autoround_recipe_plan(
-            &model,
-            &out,
-            4,
-            "cpu",
-            Path::new("python"),
-            128,
-            2048,
-            Some("auto_round:gguf"),
-            0,
-            None
-        )
+        assert!(prepare_autoround_recipe_plan(AutoRoundRecipeRequest {
+            model_dir: &model,
+            output_dir: &out,
+            bits: 4,
+            device_str: "cpu",
+            python: Path::new("python"),
+            nsamples: 128,
+            seqlen: 2048,
+            requested_format: Some("auto_round:gguf"),
+            iters: 0,
+            dataset: None,
+        },)
         .is_err());
-        assert!(prepare_autoround_recipe_plan(
-            &model,
-            &out,
-            4,
-            "cpu",
-            Path::new("python"),
-            128,
-            2048,
-            Some("gguf:q5_k_m"),
-            0,
-            None
-        )
+        assert!(prepare_autoround_recipe_plan(AutoRoundRecipeRequest {
+            model_dir: &model,
+            output_dir: &out,
+            bits: 4,
+            device_str: "cpu",
+            python: Path::new("python"),
+            nsamples: 128,
+            seqlen: 2048,
+            requested_format: Some("gguf:q5_k_m"),
+            iters: 0,
+            dataset: None,
+        },)
         .is_err());
-        assert!(prepare_autoround_recipe_plan(
-            &model,
-            &out,
-            4,
-            "cpu",
-            Path::new("python"),
-            128,
-            2048,
-            None,
-            200,
-            None
-        )
+        assert!(prepare_autoround_recipe_plan(AutoRoundRecipeRequest {
+            model_dir: &model,
+            output_dir: &out,
+            bits: 4,
+            device_str: "cpu",
+            python: Path::new("python"),
+            nsamples: 128,
+            seqlen: 2048,
+            requested_format: None,
+            iters: 200,
+            dataset: None,
+        },)
         .is_err());
         let _ = fs::remove_dir_all(root);
     }

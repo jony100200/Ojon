@@ -533,21 +533,39 @@ pub fn sensitive_spine_pinning_recipe(tensors: &[crate::gguf::GgufTensor]) -> St
     extra
 }
 
-pub fn prepare_adaptive(
-    source: &Path,
-    scores: &Path,
-    output_dir: &Path,
-    suite: &Path,
-    quantizer: &Path,
-    eval_tool: &Path,
-    imatrix: Option<&Path>,
-    targets: &[f64],
-    threads: usize,
-    gpu_layers: i32,
-    device: Option<&str>,
-    tokens: u32,
-    max_absolute_loss_pct: f64,
-) -> io::Result<AdaptivePlan> {
+/// Inputs for [`prepare_adaptive`] and [`prepare_adaptive_against_reference`].
+#[derive(Clone, Copy, Debug)]
+pub struct AdaptiveRequest<'a> {
+    pub source: &'a Path,
+    pub scores: &'a Path,
+    pub output_dir: &'a Path,
+    pub suite: &'a Path,
+    pub quantizer: &'a Path,
+    pub eval_tool: &'a Path,
+    pub imatrix: Option<&'a Path>,
+    pub targets: &'a [f64],
+    pub threads: usize,
+    pub gpu_layers: i32,
+    pub device: Option<&'a str>,
+    pub tokens: u32,
+    pub max_absolute_loss_pct: f64,
+}
+pub fn prepare_adaptive(request: AdaptiveRequest<'_>) -> io::Result<AdaptivePlan> {
+    let AdaptiveRequest {
+        source,
+        scores,
+        output_dir,
+        suite,
+        quantizer,
+        eval_tool,
+        imatrix,
+        targets,
+        threads,
+        gpu_layers,
+        device,
+        tokens,
+        max_absolute_loss_pct,
+    } = request;
     let source = source.canonicalize()?;
     let scores_file = scores.canonicalize()?;
     let parsed = parse_tensor_sensitivity(&source, &scores_file)?;
@@ -627,37 +645,12 @@ pub fn prepare_adaptive(
 
 /// Guided searches use the existing quantized Q4 benchmark reference.
 pub fn prepare_adaptive_against_reference(
-    source: &Path,
+    request: AdaptiveRequest<'_>,
     reference: &Path,
-    scores: &Path,
-    output_dir: &Path,
-    suite: &Path,
-    quantizer: &Path,
-    eval_tool: &Path,
-    imatrix: Option<&Path>,
-    targets: &[f64],
-    threads: usize,
-    gpu_layers: i32,
-    device: Option<&str>,
-    tokens: u32,
-    max_absolute_loss_pct: f64,
 ) -> io::Result<AdaptivePlan> {
-    let mut plan = prepare_adaptive(
-        source,
-        scores,
-        output_dir,
-        suite,
-        quantizer,
-        eval_tool,
-        imatrix,
-        targets,
-        threads,
-        gpu_layers,
-        device,
-        tokens,
-        max_absolute_loss_pct,
-    )?;
-    let (_, matched, _) = crate::quant_parity::inspect_compatible_models(source, reference)?;
+    let mut plan = prepare_adaptive(request)?;
+    let (_, matched, _) =
+        crate::quant_parity::inspect_compatible_models(request.source, reference)?;
     plan.reference = matched;
     Ok(plan)
 }

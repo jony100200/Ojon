@@ -339,20 +339,36 @@ pub fn extract_clean_text(raw: &str) -> String {
     sanitized
 }
 
+/// Inputs for [`create_knowledge_item`].
+#[derive(Clone, Debug)]
+pub struct KnowledgeItemInput<'a> {
+    pub item_id: &'a str,
+    pub source_kind: KnowledgeSourceKind,
+    pub source_url: &'a str,
+    pub title: &'a str,
+    pub domain: &'a str,
+    pub raw_content: &'a str,
+    pub published_epoch_s: u64,
+    pub software_version: Option<&'a str>,
+    pub reliability_tier: &'a str,
+    pub license: &'a str,
+    pub citations: Vec<String>,
+}
 /// Create a new validated knowledge record.
-pub fn create_knowledge_item(
-    item_id: &str,
-    source_kind: KnowledgeSourceKind,
-    source_url: &str,
-    title: &str,
-    domain: &str,
-    raw_content: &str,
-    published_epoch_s: u64,
-    software_version: Option<&str>,
-    reliability_tier: &str,
-    license: &str,
-    citations: Vec<String>,
-) -> KnowledgeItem {
+pub fn create_knowledge_item(input: KnowledgeItemInput<'_>) -> KnowledgeItem {
+    let KnowledgeItemInput {
+        item_id,
+        source_kind,
+        source_url,
+        title,
+        domain,
+        raw_content,
+        published_epoch_s,
+        software_version,
+        reliability_tier,
+        license,
+        citations,
+    } = input;
     let clean_content = extract_clean_text(raw_content);
     let hash = compute_content_hash(&clean_content);
     let now = SystemTime::now()
@@ -474,33 +490,35 @@ mod tests {
     #[test]
     fn test_knowledge_item_creation_and_supersession() {
         // 1. Fact published in 2021 (e.g. Unity 2021 Mesh API)
-        let old_doc = create_knowledge_item(
-            "doc-unity-mesh-v2021",
-            KnowledgeSourceKind::SoftwareDocumentation,
-            "https://docs.unity.com/mesh-api",
-            "Mesh Generation API",
-            "game_engine_unity",
-            "In Unity 2021, use Mesh.SetVertices(List<Vector3>) with CPU allocation.",
-            1_609_459_200, // Jan 1, 2021
-            Some("2021.3"),
-            "Authoritative",
-            "Public Documentation",
-            vec!["Unity 2021.3 LTS Manual".to_string()],
-        );
+        let old_doc = create_knowledge_item(KnowledgeItemInput {
+            item_id: "doc-unity-mesh-v2021",
+            source_kind: KnowledgeSourceKind::SoftwareDocumentation,
+            source_url: "https://docs.unity.com/mesh-api",
+            title: "Mesh Generation API",
+            domain: "game_engine_unity",
+            raw_content: "In Unity 2021, use Mesh.SetVertices(List<Vector3>) with CPU allocation.",
+            published_epoch_s: 1_609_459_200, // Jan 1, 2021
+            software_version: Some("2021.3"),
+            reliability_tier: "Authoritative",
+            license: "Public Documentation",
+            citations: vec!["Unity 2021.3 LTS Manual".to_string()],
+        });
 
         // 2. Updated API published in 2026 (e.g. Unity 6 Mesh Allocation)
         let new_doc = create_knowledge_item(
-            "doc-unity-mesh-v2026",
-            KnowledgeSourceKind::SoftwareDocumentation,
-            "https://docs.unity.com/mesh-api",
-            "Mesh Generation API",
-            "game_engine_unity",
-            "In Unity 6 / 2026, use Mesh.SetVertexBufferData with native GraphicsBuffer direct GPU upload.",
-            1_767_225_600, // Jan 1, 2026
-            Some("6.0"),
-            "Authoritative",
-            "Public Documentation",
-            vec!["Unity 6 User Manual".to_string()],
+            KnowledgeItemInput {
+                item_id: "doc-unity-mesh-v2026",
+                source_kind: KnowledgeSourceKind::SoftwareDocumentation,
+                source_url: "https://docs.unity.com/mesh-api",
+                title: "Mesh Generation API",
+                domain: "game_engine_unity",
+                raw_content: "In Unity 6 / 2026, use Mesh.SetVertexBufferData with native GraphicsBuffer direct GPU upload.",
+                published_epoch_s: 1_767_225_600, // Jan 1, 2026
+                software_version: Some("6.0"),
+                reliability_tier: "Authoritative",
+                license: "Public Documentation",
+                citations: vec!["Unity 6 User Manual".to_string()],
+            },
         );
 
         let mut corpus = vec![old_doc.clone()];

@@ -208,16 +208,29 @@ fn inspect_diffusers(source: &Path) -> io::Result<u64> {
     }
     Ok(total)
 }
-pub fn plan_diffusion(
-    source: &Path,
-    output: &Path,
-    checkout: &Path,
-    python: &Path,
-    engine: DiffusionEngine,
-    kind: DiffusionKind,
-    format: DiffusionFormat,
-    samples: u32,
-) -> io::Result<DiffusionPlan> {
+/// Inputs for [`plan_diffusion`].
+#[derive(Clone, Copy, Debug)]
+pub struct DiffusionPlanRequest<'a> {
+    pub source: &'a Path,
+    pub output: &'a Path,
+    pub checkout: &'a Path,
+    pub python: &'a Path,
+    pub engine: DiffusionEngine,
+    pub kind: DiffusionKind,
+    pub format: DiffusionFormat,
+    pub samples: u32,
+}
+pub fn plan_diffusion(request: DiffusionPlanRequest<'_>) -> io::Result<DiffusionPlan> {
+    let DiffusionPlanRequest {
+        source,
+        output,
+        checkout,
+        python,
+        engine,
+        kind,
+        format,
+        samples,
+    } = request;
     if samples == 0 || samples > 256 {
         return Err(bad("calibration sample count must be 1..=256"));
     }
@@ -551,43 +564,43 @@ mod tests {
         fs::create_dir_all(checkout.join("examples/text_to_image")).unwrap();
         fs::write(checkout.join("examples/text_to_image/quantize_hf.py"), "").unwrap();
         let output = dir.0.join("denoiser-int4.safetensors");
-        let plan = plan_diffusion(
-            &source,
-            &output,
-            &checkout,
-            Path::new("python"),
-            DiffusionEngine::Svdq,
-            DiffusionKind::Image,
-            DiffusionFormat::Int4,
-            16,
-        )
+        let plan = plan_diffusion(DiffusionPlanRequest {
+            source: &source,
+            output: &output,
+            checkout: &checkout,
+            python: Path::new("python"),
+            engine: DiffusionEngine::Svdq,
+            kind: DiffusionKind::Image,
+            format: DiffusionFormat::Int4,
+            samples: 16,
+        })
         .unwrap();
         assert_eq!(plan.format, DiffusionFormat::Int4);
         assert!(!output.exists());
-        assert!(plan_diffusion(
-            &source,
-            &output,
-            &checkout,
-            Path::new("python"),
-            DiffusionEngine::Svdq,
-            DiffusionKind::Image,
-            DiffusionFormat::Int4,
-            0
-        )
+        assert!(plan_diffusion(DiffusionPlanRequest {
+            source: &source,
+            output: &output,
+            checkout: &checkout,
+            python: Path::new("python"),
+            engine: DiffusionEngine::Svdq,
+            kind: DiffusionKind::Image,
+            format: DiffusionFormat::Int4,
+            samples: 0,
+        },)
         .is_err());
     }
     #[test]
     fn invalid_samples_rejected_before_any_external_commands() {
-        let result = plan_diffusion(
-            Path::new("missing"),
-            Path::new("bad.safetensors"),
-            Path::new("missing"),
-            Path::new("python"),
-            DiffusionEngine::Svdq,
-            DiffusionKind::Image,
-            DiffusionFormat::Int4,
-            0,
-        );
+        let result = plan_diffusion(DiffusionPlanRequest {
+            source: Path::new("missing"),
+            output: Path::new("bad.safetensors"),
+            checkout: Path::new("missing"),
+            python: Path::new("python"),
+            engine: DiffusionEngine::Svdq,
+            kind: DiffusionKind::Image,
+            format: DiffusionFormat::Int4,
+            samples: 0,
+        });
         assert!(result.is_err());
     }
 }

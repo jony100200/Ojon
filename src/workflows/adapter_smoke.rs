@@ -101,18 +101,31 @@ fn manifest_path(value: &str) -> io::Result<PathBuf> {
     p.canonicalize()
 }
 
+/// Inputs for [`prepare_adapter_smoke`].
+#[derive(Clone, Copy, Debug)]
+pub struct AdapterSmokeRequest<'a> {
+    pub bundle: &'a Path,
+    pub report: &'a Path,
+    pub tool: &'a Path,
+    pub gpu_layers: i32,
+    pub device: Option<&'a str>,
+    pub image: Option<&'a Path>,
+    pub prompt: Option<&'a str>,
+    pub tokens: u32,
+}
 /// Verify the bundle's references, GGUF structure, LoRA architecture and tensor
 /// naming before a model/GPU allocation. Does not load original tensor payload.
-pub fn prepare_adapter_smoke(
-    bundle: &Path,
-    report: &Path,
-    tool: &Path,
-    gpu_layers: i32,
-    device: Option<&str>,
-    image: Option<&Path>,
-    prompt: Option<&str>,
-    tokens: u32,
-) -> io::Result<AdapterSmokePlan> {
+pub fn prepare_adapter_smoke(request: AdapterSmokeRequest<'_>) -> io::Result<AdapterSmokePlan> {
+    let AdapterSmokeRequest {
+        bundle,
+        report,
+        tool,
+        gpu_layers,
+        device,
+        image,
+        prompt,
+        tokens,
+    } = request;
     if !(-1..=512).contains(&gpu_layers) {
         return Err(invalid("gpu_layers must be -1..512"));
     }
@@ -412,31 +425,31 @@ mod tests {
         let edit_plan = prepare_compressed_edit(&base, &recipe, &bundle, None).unwrap();
         run_compressed_edit(&edit_plan, |_| {}).unwrap();
         let report = root.join("check.json");
-        let smoke = prepare_adapter_smoke(
-            &bundle,
-            &report,
-            Path::new("llama-cli"),
-            0,
-            None,
-            None,
-            None,
-            32,
-        )
+        let smoke = prepare_adapter_smoke(AdapterSmokeRequest {
+            bundle: &bundle,
+            report: &report,
+            tool: Path::new("llama-cli"),
+            gpu_layers: 0,
+            device: None,
+            image: None,
+            prompt: None,
+            tokens: 32,
+        })
         .unwrap();
         assert_eq!(smoke.as_json()["adapter_tensors"], 2);
         assert_eq!(smoke.as_json()["status"], "PREFLIGHT_ONLY");
         assert!(!report.exists());
         assert!(
-            prepare_adapter_smoke(
-                &bundle,
-                &report,
-                Path::new("llama-cli"),
-                0,
-                None,
-                Some(&recipe),
-                None,
-                32
-            )
+            prepare_adapter_smoke(AdapterSmokeRequest {
+                bundle: &bundle,
+                report: &report,
+                tool: Path::new("llama-cli"),
+                gpu_layers: 0,
+                device: None,
+                image: Some(&recipe),
+                prompt: None,
+                tokens: 32,
+            },)
             .is_err(),
             "image without mmproj must fail"
         );
@@ -445,27 +458,27 @@ mod tests {
     #[test]
     fn rejects_blank_tool_and_invalid_backend_device() {
         let nonexistent = Path::new("this-test-path-does-not-exist");
-        assert!(prepare_adapter_smoke(
-            nonexistent,
-            nonexistent,
-            Path::new(""),
-            0,
-            None,
-            None,
-            None,
-            32
-        )
+        assert!(prepare_adapter_smoke(AdapterSmokeRequest {
+            bundle: nonexistent,
+            report: nonexistent,
+            tool: Path::new(""),
+            gpu_layers: 0,
+            device: None,
+            image: None,
+            prompt: None,
+            tokens: 32,
+        },)
         .is_err());
-        assert!(prepare_adapter_smoke(
-            nonexistent,
-            nonexistent,
-            Path::new("llama-cli"),
-            0,
-            Some("GPU $BAD"),
-            None,
-            None,
-            32
-        )
+        assert!(prepare_adapter_smoke(AdapterSmokeRequest {
+            bundle: nonexistent,
+            report: nonexistent,
+            tool: Path::new("llama-cli"),
+            gpu_layers: 0,
+            device: Some("GPU $BAD"),
+            image: None,
+            prompt: None,
+            tokens: 32,
+        },)
         .is_err());
     }
 }

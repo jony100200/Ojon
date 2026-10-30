@@ -356,38 +356,42 @@ pub fn parse_iso_date_to_epoch(date_str: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::learn::knowledge::{apply_supersession, create_knowledge_item, KnowledgeSourceKind};
+    use crate::learn::knowledge::{
+        apply_supersession, create_knowledge_item, KnowledgeItemInput, KnowledgeSourceKind,
+    };
 
     #[test]
     fn test_temporal_retrieval_distinguishes_present_vs_past() {
         // 1. Fact valid from 2021 to 2026 (old Mesh API)
-        let old_doc = create_knowledge_item(
-            "doc-unity-mesh-2021",
-            KnowledgeSourceKind::SoftwareDocumentation,
-            "https://docs.unity.com/2021/mesh",
-            "Unity Mesh Generation",
-            "unity",
-            "In Unity 2021, use Mesh.SetVertices(List<Vector3>) with CPU allocation.",
-            1_609_459_200, // 2021-01-01
-            Some("2021.3"),
-            "Authoritative",
-            "Public",
-            vec!["Unity 2021 Manual".to_string()],
-        );
+        let old_doc = create_knowledge_item(KnowledgeItemInput {
+            item_id: "doc-unity-mesh-2021",
+            source_kind: KnowledgeSourceKind::SoftwareDocumentation,
+            source_url: "https://docs.unity.com/2021/mesh",
+            title: "Unity Mesh Generation",
+            domain: "unity",
+            raw_content: "In Unity 2021, use Mesh.SetVertices(List<Vector3>) with CPU allocation.",
+            published_epoch_s: 1_609_459_200, // 2021-01-01
+            software_version: Some("2021.3"),
+            reliability_tier: "Authoritative",
+            license: "Public",
+            citations: vec!["Unity 2021 Manual".to_string()],
+        });
 
         // 2. Fact valid from 2026 onwards (Unity 6 GPU direct buffer)
         let new_doc = create_knowledge_item(
-            "doc-unity-mesh-2026",
-            KnowledgeSourceKind::SoftwareDocumentation,
-            "https://docs.unity.com/6.0/mesh",
-            "Unity Mesh Generation",
-            "unity",
-            "In Unity 6 (2026), use Mesh.SetVertexBufferData with native GraphicsBuffer direct GPU upload.",
-            1_767_225_600, // 2026-01-01
-            Some("6.0"),
-            "Authoritative",
-            "Public",
-            vec!["Unity 6 Manual".to_string()],
+            KnowledgeItemInput {
+                item_id: "doc-unity-mesh-2026",
+                source_kind: KnowledgeSourceKind::SoftwareDocumentation,
+                source_url: "https://docs.unity.com/6.0/mesh",
+                title: "Unity Mesh Generation",
+                domain: "unity",
+                raw_content: "In Unity 6 (2026), use Mesh.SetVertexBufferData with native GraphicsBuffer direct GPU upload.",
+                published_epoch_s: 1_767_225_600, // 2026-01-01
+                software_version: Some("6.0"),
+                reliability_tier: "Authoritative",
+                license: "Public",
+                citations: vec!["Unity 6 Manual".to_string()],
+            },
         );
 
         let mut corpus = vec![old_doc, new_doc.clone()];
@@ -426,19 +430,19 @@ mod tests {
 
     #[test]
     fn test_augmented_prompt_synthesis_and_disclaimer() {
-        let doc = create_knowledge_item(
-            "doc-rust-2026",
-            KnowledgeSourceKind::SoftwareDocumentation,
-            "https://doc.rust-lang.org/edition-2024",
-            "Rust 2024 Edition",
-            "rust",
-            "Rust 2024 stabilizes gen blocks and async closures.",
-            1_735_689_600, // 2025-01-01
-            Some("1.85"),
-            "Authoritative",
-            "MIT/Apache",
-            vec!["The Rust Edition Guide".to_string()],
-        );
+        let doc = create_knowledge_item(KnowledgeItemInput {
+            item_id: "doc-rust-2026",
+            source_kind: KnowledgeSourceKind::SoftwareDocumentation,
+            source_url: "https://doc.rust-lang.org/edition-2024",
+            title: "Rust 2024 Edition",
+            domain: "rust",
+            raw_content: "Rust 2024 stabilizes gen blocks and async closures.",
+            published_epoch_s: 1_735_689_600, // 2025-01-01
+            software_version: Some("1.85"),
+            reliability_tier: "Authoritative",
+            license: "MIT/Apache",
+            citations: vec!["The Rust Edition Guide".to_string()],
+        });
 
         let engine = TemporalKnowledgeEngine::new(vec![doc]);
         let aug =

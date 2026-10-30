@@ -7,16 +7,29 @@ use crate::probe::{ModelCategory, ModelProbe};
 use serde_json::{json, Value};
 use std::io::{self, ErrorKind};
 
-fn candidate(
-    id: &str,
-    family: &str,
-    method: &str,
-    format: &str,
-    loader: &str,
-    state: &str,
-    reason: &str,
-    next_command: &str,
-) -> Value {
+/// One advisory quantization route row before JSON serialisation.
+#[derive(Clone, Copy, Debug)]
+struct Candidate<'a> {
+    pub id: &'a str,
+    pub family: &'a str,
+    pub method: &'a str,
+    pub format: &'a str,
+    pub loader: &'a str,
+    pub state: &'a str,
+    pub reason: &'a str,
+    pub next_command: &'a str,
+}
+fn candidate(row: Candidate<'_>) -> Value {
+    let Candidate {
+        id,
+        family,
+        method,
+        format,
+        loader,
+        state,
+        reason,
+        next_command,
+    } = row;
     json!({
         "id": id, "backend": family, "method": method,
         "output_format": format, "candidate_loader": loader,
@@ -91,16 +104,16 @@ fn plan_for(
                 "imatrix-plan / sweep-plan",
             ),
         ] {
-            let mut item = candidate(
+            let mut item = candidate(Candidate {
                 id,
-                "llama.cpp",
+                family: "llama.cpp",
                 method,
                 format,
-                "llama.cpp (runtime unverified)",
+                loader: "llama.cpp (runtime unverified)",
                 state,
                 reason,
-                command,
-            );
+                next_command: command,
+            });
             if multi {
                 item["multimodal_requirement"] =
                     json!("Vision encoder, processor and projector require separate validation");
@@ -122,59 +135,75 @@ fn plan_for(
             } else {
                 "Requires an installed convert_hf_to_gguf.py and llama-quantize; detected filenames are not capability proof"
             };
-            options.push(candidate(
+            options.push(candidate(Candidate {
                 id,
-                "llama.cpp",
-                "HF -> high-precision GGUF -> K-quant",
+                family: "llama.cpp",
+                method: "HF -> high-precision GGUF -> K-quant",
                 format,
-                "llama.cpp (runtime unverified)",
+                loader: "llama.cpp (runtime unverified)",
                 state,
                 reason,
-                "quantize-hf",
-            ));
+                next_command: "quantize-hf",
+            }));
         }
         let ar_reason = if autoround {
             "AutoRound CLI detected, but matching Python package, device kernels, GGUF export and loader must be verified"
         } else {
             "AutoRound CLI not detected; Python module, device kernels, output and inference loader must be checked separately"
         };
-        options.push(candidate(
-            "hf_autoround_4",
-            "intel_auto_round",
-            "optimized RTN or calibrated AutoRound (select --iters and local --dataset)",
-            "GGUF Q4_K_M or Q5_K_M (experimental upstream export)",
-            "compatible GGUF runtime, not yet verified",
-            if autoround {
+        options.push(candidate(Candidate {
+            id: "hf_autoround_4",
+            family: "intel_auto_round",
+            method: "optimized RTN or calibrated AutoRound (select --iters and local --dataset)",
+            format: "GGUF Q4_K_M or Q5_K_M (experimental upstream export)",
+            loader: "compatible GGUF runtime, not yet verified",
+            state: if autoround {
                 "requires_compatibility_test"
             } else {
                 "missing_tool"
             },
-            ar_reason,
-            "autoround-plan --bits 4|5 --format gguf:q4_k_m|gguf:q5_k_m",
-        ));
+            reason: ar_reason,
+            next_command: "autoround-plan --bits 4|5 --format gguf:q4_k_m|gguf:q5_k_m",
+        }));
         if !multi {
-            options.push(candidate("hf_exl3", "exllamav3",
-                "QTIP-inspired trellis-coded fractional-bitrate quantization",
-                "EXL3 (NOT GGUF)", "ExLlamaV3 CUDA runtime; NVIDIA only, not Intel Arc",
-                "external_python_unverified",
-                "Requires user-installed ExLlamaV3 checkout, original safetensors, local CUDA and memory preflight; output and loader are not verified",
-                "exl3-plan <source> <new-output> <new-work> --checkout <exllamav3> --bits 3.5"));
-            options.push(candidate("hf_hqq_q4", "dropbox_hqq",
-                "calibration-free half-quadratic weight quantization",
-                "HQQ native qmodel.pt (not GGUF)",
-                "HQQ AutoHQQHFModel loader only (unverified)",
-                "external_python_unverified",
-                "Needs installed torch, hqq and transformers; full HF checkpoint loaded; no GGUF converter or Intel XPU kernel compatibility implied",
-                "research-plan hqq <source> <new-output> --bits 4 --group 64"));
+            options.push(candidate(
+                Candidate {
+                    id: "hf_exl3",
+                    family: "exllamav3",
+                    method: "QTIP-inspired trellis-coded fractional-bitrate quantization",
+                    format: "EXL3 (NOT GGUF)",
+                    loader: "ExLlamaV3 CUDA runtime; NVIDIA only, not Intel Arc",
+                    state: "external_python_unverified",
+                    reason: "Requires user-installed ExLlamaV3 checkout, original safetensors, local CUDA and memory preflight; output and loader are not verified",
+                    next_command: "exl3-plan <source> <new-output> <new-work> --checkout <exllamav3> --bits 3.5",
+                },
+            ));
+            options.push(candidate(
+                Candidate {
+                    id: "hf_hqq_q4",
+                    family: "dropbox_hqq",
+                    method: "calibration-free half-quadratic weight quantization",
+                    format: "HQQ native qmodel.pt (not GGUF)",
+                    loader: "HQQ AutoHQQHFModel loader only (unverified)",
+                    state: "external_python_unverified",
+                    reason: "Needs installed torch, hqq and transformers; full HF checkpoint loaded; no GGUF converter or Intel XPU kernel compatibility implied",
+                    next_command: "research-plan hqq <source> <new-output> --bits 4 --group 64",
+                },
+            ));
             for (id, ratio) in [("hf_openvino_int4", "1.0"), ("hf_openvino_mixed", "0.8")] {
-                options.push(candidate(id, "openvino_nncf",
-                    "OpenVINO/NNCF weight-only INT4 with optional INT8 backup layers",
-                    "OpenVINO IR .xml/.bin (not GGUF)",
-                    "OpenVINO / Optimum Intel (loader unverified)",
-                    "external_python_unverified",
-                    "Requires installed optimum-cli and model-specific OpenVINO support; quantization can use significant CPU RAM",
-                    if ratio == "1.0" { "research-plan openvino <source> <new-output> --ratio 1.0" }
-                    else { "research-plan openvino <source> <new-output> --ratio 0.8" }));
+                options.push(candidate(
+                    Candidate {
+                        id,
+                        family: "openvino_nncf",
+                        method: "OpenVINO/NNCF weight-only INT4 with optional INT8 backup layers",
+                        format: "OpenVINO IR .xml/.bin (not GGUF)",
+                        loader: "OpenVINO / Optimum Intel (loader unverified)",
+                        state: "external_python_unverified",
+                        reason: "Requires installed optimum-cli and model-specific OpenVINO support; quantization can use significant CPU RAM",
+                        next_command: if ratio == "1.0" { "research-plan openvino <source> <new-output> --ratio 1.0" }
+                        else { "research-plan openvino <source> <new-output> --ratio 0.8" },
+                    },
+                ));
             }
         }
         if multi {
@@ -185,38 +214,60 @@ fn plan_for(
     } else if probe.category == ModelCategory::Diffusion && probe.format != "ojonq_packed_weights" {
         let is_pipeline = probe.format == "diffusers_pipeline_directory";
         let is_weights = probe.format == "safetensors_single_file";
-        options.push(candidate("diffusion_svdq", "diffuse-compressor",
-            "SVDQuant transformer INT4", "SVDQ INT4",
-            "specific supported Diffusers/CUDA runtime", if is_pipeline { "experimental" } else { "blocked_source_layout" },
-            if is_pipeline { "Separate CUDA checkout and model-specific quantization and low-bit loader tests required" }
-            else { "Requires an eligible complete Diffusers pipeline, not a bare weight file" },
-            "diffusion-plan"));
-        options.push(candidate("diffusion_native_packed", "ojon_native",
-            "groupwise scalar 4-bit weight packing", ".ojonq (storage only)",
-            "NONE: low-bit inference kernel not implemented", if is_weights { "storage_only" } else { "blocked_source_layout" },
-            if is_weights { "Native packing is implemented but unpacking restores standard-sized safetensors; this is not a GPU memory reduction" }
-            else { "Native packing accepts a standalone original safetensors weight file, not a Diffusers folder" },
-            "pack-plan"));
-        options.push(candidate("diffusion_gguf_sdcli", "stable-diffusion.cpp",
-            "model-specific image/video denoiser conversion via sd-cli", "GGUF",
-            "stable-diffusion.cpp image/video runtime",
-            if is_weights { "requires_compatibility_test" } else { "blocked_source_layout" },
-            if is_weights {
-                "Standalone safetensors weights can be planned and converted. Exact sd-cli architecture support, text encoder/VAE, runtime load and visual parity still require verification"
-            } else {
-                "Generic Diffusers folders are not accepted by this standalone GGUF route; select a valid standalone denoiser safetensors file"
+        options.push(candidate(
+            Candidate {
+                id: "diffusion_svdq",
+                family: "diffuse-compressor",
+                method: "SVDQuant transformer INT4",
+                format: "SVDQ INT4",
+                loader: "specific supported Diffusers/CUDA runtime",
+                state: if is_pipeline { "experimental" } else { "blocked_source_layout" },
+                reason: if is_pipeline { "Separate CUDA checkout and model-specific quantization and low-bit loader tests required" }
+                else { "Requires an eligible complete Diffusers pipeline, not a bare weight file" },
+                next_command: "diffusion-plan",
             },
-            "diffusion-gguf-plan /path/denoiser.safetensors /path/denoiser-Q4.gguf --kind image|video --format q4_0"));
+        ));
+        options.push(candidate(
+            Candidate {
+                id: "diffusion_native_packed",
+                family: "ojon_native",
+                method: "groupwise scalar 4-bit weight packing",
+                format: ".ojonq (storage only)",
+                loader: "NONE: low-bit inference kernel not implemented",
+                state: if is_weights { "storage_only" } else { "blocked_source_layout" },
+                reason: if is_weights { "Native packing is implemented but unpacking restores standard-sized safetensors; this is not a GPU memory reduction" }
+                else { "Native packing accepts a standalone original safetensors weight file, not a Diffusers folder" },
+                next_command: "pack-plan",
+            },
+        ));
+        options.push(candidate(
+            Candidate {
+                id: "diffusion_gguf_sdcli",
+                family: "stable-diffusion.cpp",
+                method: "model-specific image/video denoiser conversion via sd-cli",
+                format: "GGUF",
+                loader: "stable-diffusion.cpp image/video runtime",
+                state: if is_weights { "requires_compatibility_test" } else { "blocked_source_layout" },
+                reason: if is_weights {
+                "Standalone safetensors weights can be planned and converted. Exact sd-cli architecture support, text encoder/VAE, runtime load and visual parity still require verification"
+                } else {
+                "Generic Diffusers folders are not accepted by this standalone GGUF route; select a valid standalone denoiser safetensors file"
+                },
+                next_command: "diffusion-gguf-plan /path/denoiser.safetensors /path/denoiser-Q4.gguf --kind image|video --format q4_0",
+            },
+        ));
     } else if probe.format == "ojonq_packed_weights" {
         options.push(candidate(
-            "ojon_unpack",
-            "ojon_native",
-            "unpack storage container",
-            "safetensors (lossily reconstructed)",
-            "ordinary inference loader after unpack",
-            "storage_only",
-            "Unpack does not preserve the original model precision or achieve low-bit VRAM usage",
-            "unpack",
+            Candidate {
+                id: "ojon_unpack",
+                family: "ojon_native",
+                method: "unpack storage container",
+                format: "safetensors (lossily reconstructed)",
+                loader: "ordinary inference loader after unpack",
+                state: "storage_only",
+                reason: "Unpack does not preserve the original model precision or achieve low-bit VRAM usage",
+                next_command: "unpack",
+            },
         ));
     }
     // Other modalities are deliberately not advertised as compatible.
