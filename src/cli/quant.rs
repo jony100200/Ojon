@@ -2239,6 +2239,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let source = PathBuf::from(next_argument(&mut args, "original F16/BF16 GGUF model")?);
             let output_dir = PathBuf::from(next_argument(&mut args, "empty output directory")?);
             let mut corpus: Option<PathBuf> = None;
+            let mut eval_corpus: Option<PathBuf> = None;
             let mut base = String::from("q5_k");
             let mut floor = String::from("iq2_s");
             let mut budget = 0.01f64;
@@ -2262,7 +2263,8 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             };
             while let Some(option) = args.next() {
                 match option.to_str() {
-                    Some("--corpus") => corpus = Some(PathBuf::from(next_argument(&mut args, "held-out text corpus")?)),
+                    Some("--corpus") => corpus = Some(PathBuf::from(next_argument(&mut args, "calibration text corpus")?)),
+                    Some("--eval-corpus") => eval_corpus = Some(PathBuf::from(next_argument(&mut args, "held-out evaluation text")?)),
                     Some("--base") => base = text(next_argument(&mut args, "base level")?, "base")?,
                     Some("--floor") => floor = text(next_argument(&mut args, "floor level")?, "floor")?,
                     Some("--budget") => {
@@ -2325,6 +2327,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 keep_probes,
                 budget_p99,
                 resume,
+                eval_corpus,
             })?;
             let plan_path = plan.write_plan()?;
             if json {

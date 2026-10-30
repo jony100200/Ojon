@@ -155,3 +155,32 @@ that punish low bits hardest here, which is the same shape the old `_M` rules
 assumed but now with numbers attached. On a 39B MoE the expert classes carry
 97% of the bytes and a different answer is expected; that is exactly why the
 search measures instead of assuming.
+
+## 9. What the public state of the art does, and what Ojon took from it (R&D 2026-10-30)
+
+- **Unsloth Dynamic 2.0** picks a precision per *layer* (not per class), scores with
+  mean KL divergence, and calibrates on a hand-curated 300K to 1.5M token
+  chat-style set because wiki-style calibration overfits instruct models
+  ([docs](https://docs.unsloth.ai/basics/unsloth-dynamic-2.0-ggufs),
+  [blog](https://unsloth.ai/blog/dynamic-v2)). Taken: calibration and evaluation
+  text are now split so no probe is measured on the text that built its imatrix,
+  and the plan warns when the calibration text is under 1 MiB. Open: per-layer
+  granularity multiplies probes by the layer count; a block-group split (first
+  two, middle, last two) is the planned middle step.
+- **Community KLD practice** (bartowski's
+  [Sailor2 thread](https://huggingface.co/bartowski/Sailor2-20B-Chat-GGUF/discussions/1)):
+  hold calibration samples out of the KLD set; llama.cpp keeps some KLD internals
+  in fp16, so very small differences are noise; llama-gguf-optimize tunes recipes
+  against measured KLD. Taken: the hold-out rule above, and the receipt keeps the
+  95th/99th percentile so a tiny mean is not over-read.
+- **"Accuracy is Not All You Need"** (Dutta et al., NeurIPS 2024,
+  [arXiv](https://arxiv.org/html/2407.09141v1)): accuracy deltas of 0 to 2% hide
+  answer *flips* of up to 13.6%; flips correlate with KL divergence at Spearman
+  0.981. Taken: this is why the budget is on KLD and why no KLD cutoff is called
+  "negligible loss" in a receipt; the task suite measures flips.
+- **Diffusion quants** have no KLD equivalent in the wild; a self-published
+  FLUX-family card measured Q8_0 at about 34.6 dB PSNR / 0.011 LPIPS and Q4_K at
+  about 20.7 dB / 0.154 LPIPS against BF16
+  ([card](https://huggingface.co/Harsha001/flux-3-image-klein-ROCmFPX)). Taken:
+  `diffusion-parity` gates on PSNR with a 30 dB default and reports per-pixel
+  tails; LPIPS needs a network and is out of the stdlib-only script by design.

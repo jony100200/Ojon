@@ -83,6 +83,10 @@ pub struct RecipeJob {
     /// reference logits, the base candidate and a progress ledger. Finished
     /// probes are reused from `recipe-progress.jsonl`; failed ones are retried.
     pub resume: bool,
+    /// Held-out text for the KLD measurements. When None, `kld.corpus` is split
+    /// deterministically: the first half calibrates (imatrix), the second half
+    /// evaluates. Measuring on the calibration text overstates quality.
+    pub eval_corpus: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +122,31 @@ pub fn not_a_language_model(architecture: Option<&str>, present: &BTreeMap<Tenso
         return Some("no transformer attention/FFN blocks recognised; the recipe search needs a language model GGUF".to_string());
     }
     None
+}
+
+/// Bytes below which the calibration text is too thin for an importance
+/// matrix to mean much. Public dynamic-quant pipelines calibrate on hundreds
+/// of thousands to over a million tokens of chat-style text; a few kilobytes
+/// of README prose only demonstrates the mechanism.
+pub const SMALL_CORPUS_BYTES: u64 = 1024 * 1024;
+
+/// Deterministic half/half split on a paragraph boundary near the middle, so
+/// calibration and evaluation never share text. Returns (calibration, eval).
+pub fn split_corpus(text: &str) -> (String, String) {
+    let mut mid = text.len() / 2;
+    while mid < text.len() && !text.is_char_boundary(mid) {
+        mid += 1;
+    }
+    let cut = text[..mid].rfind("\n\n").map(|i| i + 2)
+        .or_else(|| text[..mid].rfind('\n').map(|i| i + 1))
+        .unwrap_or(mid);
+    let cut = if cut == 0 || cut >= text.len() { mid } else { cut };
+    // never cut inside a UTF-8 sequence
+    let mut c = cut;
+    while c < text.len() && !text.is_char_boundary(c) {
+        c += 1;
+    }
+    (text[..c].to_string(), text[c..].to_string())
 }
 
 pub fn prepare_recipe(job: RecipeJob) -> io::Result<RecipePlan> {
@@ -175,6 +204,14 @@ pub fn prepare_recipe(job: RecipeJob) -> io::Result<RecipePlan> {
             return Err(invalid("calibration.imatrix.gguf already exists in the output directory"));
         }
     }
+    if let Some(ec) = &job.eval_corpus {
+        if !ec.is_file() || ec.metadata()?.len() < 100 {
+            return Err(invalid("eval corpus must be a local readable text file of at least 100 bytes"));
+        }
+        if ec.canonicalize()? == job.kld.corpus.canonicalize()? {
+            return Err(invalid("eval corpus must differ from the calibration corpus; measuring on calibration text overstates quality"));
+        }
+    }
     if let Some(p99) = job.budget_p99 {
         if !(p99.is_finite() && (0.0..=10.0).contains(&p99)) {
             return Err(invalid("p99 budget must be a finite number in 0..=10"));
@@ -212,6 +249,11 @@ impl RecipePlan {
             "probes": self.probes.iter().map(|p| json!({"class": p.class.name(), "level": p.level})).collect::<Vec<_>>(),
             "quantizations_required": self.probes.len() + 2,
             "corpus": plain(&self.job.kld.corpus),
+            "eval_corpus": self.job.eval_corpus.as_ref().map(|p| plain(p)),
+            "corpus_policy": if self.job.eval_corpus.is_some() { "separate calibration and evaluation files" } else { "single file split in half: first half calibrates, second half evaluates" },
+            "corpus_warning": if fs::metadata(&self.job.kld.corpus).map(|m| m.len() < SMALL_CORPUS_BYTES).unwrap_or(false) {
+                Some(format!("calibration text under {} MiB; results demonstrate the mechanism, not a production-grade importance matrix", SMALL_CORPUS_BYTES / (1024 * 1024)))
+            } else { None },
             "context": self.job.kld.context,
             "chunks": self.job.kld.chunks,
             "quantize_tool": plain(&self.job.quantize_tool),
@@ -367,6 +409,26 @@ where
     // understate how low the classes can go.
     let mut plan_used = plan.clone();
     let mut imatrix_auto: Option<PathBuf> = None;
+    // Calibration and evaluation text must not overlap.
+    let (calibration_corpus, eval_corpus) = match &plan.job.eval_corpus {
+        Some(ec) => (plan.job.kld.corpus.clone(), ec.clone()),
+        None => {
+            let cal_path = dir.join("corpus-calibration.txt");
+            let eval_path = dir.join("corpus-eval.txt");
+            if !(plan.job.resume && cal_path.is_file() && eval_path.is_file()) {
+                let text = fs::read_to_string(&plan.job.kld.corpus)?;
+                let (cal, eval) = split_corpus(&text);
+                if cal.len() < 100 || eval.len() < 100 {
+                    return Err(invalid("corpus too small to split into calibration and evaluation halves; pass --eval-corpus"));
+                }
+                fs::write(&cal_path, cal)?;
+                fs::write(&eval_path, eval)?;
+            }
+            log("[ojon] corpus split: first half calibrates, second half evaluates (no overlap)");
+            (cal_path, eval_path)
+        }
+    };
+    plan_used.job.kld.corpus = eval_corpus.clone();
     if plan.job.imatrix.is_none() {
         if let Some(tool) = &plan.job.imatrix_tool {
             let out = dir.join("calibration.imatrix.gguf");
@@ -377,7 +439,7 @@ where
             } else {
             log(&format!("[ojon] importance matrix from the corpus with {}", plain(tool)));
             let im_plan = crate::quant::calibration::prepare_imatrix(
-                &plan.job.source, &plan.job.kld.corpus, &out, tool,
+                &plan.job.source, &calibration_corpus, &out, tool,
                 if plan.job.kld.fit { crate::quant::calibration::GPU_LAYERS_FIT } else { plan.job.kld.gpu_layers },
                 plan.job.kld.context)?;
             let saved = crate::quant::calibration::run_imatrix(&im_plan, |line| log(line))?;
@@ -490,6 +552,8 @@ where
                   "measured_within_budget": within},
         "imatrix": plan.job.imatrix.as_ref().map(|p| plain(p)),
         "imatrix_computed_by_this_run": imatrix_auto.as_ref().map(|p| plain(p)),
+        "calibration_corpus": plain(&calibration_corpus),
+        "eval_corpus": plain(&eval_corpus),
         "elapsed_seconds": started.elapsed().as_secs_f64(),
         "claim": if within {
             "measured mean KLD within budget on this corpus slice; run the task suite before any capability claim"
@@ -668,6 +732,21 @@ mod tests {
     }
 
     #[test]
+    fn corpus_split_is_deterministic_non_overlapping_and_paragraph_aligned() {
+        let text = "alpha one\nalpha two\n\nbeta one\nbeta two\n\ngamma one\ngamma two\n";
+        let (a, b) = split_corpus(text);
+        assert_eq!(format!("{a}{b}"), text);
+        assert!(a.ends_with("\n\n"), "{a:?}");
+        assert!(!b.is_empty());
+        let (a2, b2) = split_corpus(text);
+        assert_eq!((a, b), (a2, b2));
+        let (c, d) = split_corpus("no breaks at all here");
+        assert_eq!(c.len() + d.len(), "no breaks at all here".len());
+        let (e, f) = split_corpus("ééééééé");
+        assert!(e.is_char_boundary(e.len()) && !f.is_empty());
+    }
+
+    #[test]
     fn main_precision_maps_only_measurable_bases() {
         assert_eq!(main_precision_for("q5_k").unwrap().as_str(), "Q5_K_M");
         assert_eq!(main_precision_for("q4_k").unwrap().as_str(), "Q4_K_M");
@@ -712,7 +791,7 @@ mod tests {
         let job = RecipeJob {
             source: dir.join("missing.gguf"), output_dir: dir.clone(), base: "q5_k", floor: "iq2_s", budget_kld: 0.01,
             quantize_tool: PathBuf::from("llama-quantize"), imatrix: None, imatrix_tool: None, threads: 4, kld,
-            keep_probes: false, budget_p99: None, resume: false,
+            keep_probes: false, budget_p99: None, resume: false, eval_corpus: None,
         };
         assert!(prepare_recipe(RecipeJob { budget_p99: Some(-0.5), ..job.clone() }).is_err());
         assert!(prepare_recipe(RecipeJob { budget_kld: 2.0, ..job.clone() }).is_err());
