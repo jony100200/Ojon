@@ -412,6 +412,19 @@ fn append_progress(dir: &Path, entry: &Value) -> io::Result<()> {
     f.write_all(b"\n")
 }
 
+/// A budget is relative to the base, so a base that already moved the
+/// distribution a lot makes "within budget" a weak statement. Say so.
+pub fn base_advisory(base_level: &str, base_mean_kld: f64, budget_kld: f64) -> Option<String> {
+    if base_mean_kld > 0.05 || (budget_kld > 0.0 && base_mean_kld > 5.0 * budget_kld) {
+        let higher = match base_level { "q4_k" => "q5_k", "q5_k" => "q6_k", _ => "q8_0" };
+        Some(format!(
+            "the all-{base_level} base already measures mean KLD {base_mean_kld:.4}, {:.0}x the budget of {budget_kld};              the recipe is judged relative to that base, so consider --base {higher}, a larger/held-out corpus, or more --chunks before trusting the result",
+            if budget_kld > 0.0 { base_mean_kld / budget_kld } else { f64::INFINITY }))
+    } else {
+        None
+    }
+}
+
 /// Run the whole search. Returns the receipt path. Every step streams to `log`.
 pub fn run_recipe<F>(plan: &RecipePlan, mut log: F) -> io::Result<PathBuf>
 where
@@ -492,6 +505,10 @@ where
         }
     };
     log(&format!("[ojon] base: {:.2}% of source, mean KLD {:.6}", 100.0 * base.bytes as f64 / plan.source_bytes as f64, base_kld.mean));
+    let base_advisory = base_advisory(base_level, base_kld.mean, plan.job.budget_kld);
+    if let Some(note) = &base_advisory {
+        log(&format!("[ojon] advisory: {note}"));
+    }
 
     let mut rows = Vec::new();
     let mut measured = Vec::new();
@@ -615,6 +632,7 @@ where
                   "p99_within_budget": p99_within,
                   "measured_within_budget": within},
         "boundary_refinement": boundary_json,
+        "base_advisory": base_advisory,
         "imatrix": plan.job.imatrix.as_ref().map(|p| plain(p)),
         "imatrix_computed_by_this_run": imatrix_auto.as_ref().map(|p| plain(p)),
         "calibration_corpus": plain(&calibration_corpus),
@@ -809,6 +827,15 @@ mod tests {
         assert_eq!(c.len() + d.len(), "no breaks at all here".len());
         let (e, f) = split_corpus("ééééééé");
         assert!(e.is_char_boundary(e.len()) && !f.is_empty());
+    }
+
+    #[test]
+    fn base_advisory_fires_only_when_the_base_is_already_lossy() {
+        assert!(base_advisory("q5_k", 0.023, 0.01).is_none());
+        assert!(base_advisory("q5_k", 0.12, 0.01).unwrap().contains("--base q6_k"));
+        assert!(base_advisory("q4_k", 0.06, 0.05).unwrap().contains("--base q5_k"));
+        assert!(base_advisory("q6_k", 0.3, 0.0).unwrap().contains("--base q8_0"));
+        assert!(base_advisory("q5_k", 0.03, 0.01).is_none()); // 3x budget, under 0.05: fine
     }
 
     #[test]
