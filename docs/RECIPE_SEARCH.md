@@ -193,3 +193,26 @@ search measures instead of assuming.
   ([card](https://huggingface.co/Harsha001/flux-3-image-klein-ROCmFPX)). Taken:
   `diffusion-parity` gates on PSNR with a 30 dB default and reports per-pixel
   tails; LPIPS needs a network and is out of the stdlib-only script by design.
+
+## 10. Flint-BF16 (39B MoE) partial run, 2026-10-30
+
+Stopped by the host after 8 of 15 probes (system memory pressure, not the
+tool); the ledger in `E:\ojon-recipe-flint\out` holds the finished probes and
+`recipe-run ... --resume` continues. Settings: base q5_k, floor iq4_xs, 6
+chunks, `--ngl auto`, imatrix from the calibration half of a 50 KB corpus.
+
+| step | mean KLD |
+|---|---|
+| base, all q5_k (34.5% of source) | 0.1207 |
+| token_embd q4_k | 0.1116 (below base: noise) |
+| output q4_k | 0.1991 (+0.078, real) |
+| attn_qk q4_k / iq4_xs | 0.1277 / 0.1219 |
+| attn_vo q4_k / iq4_xs | 0.1432 / 0.1558 |
+| ffn_gate_up q4_k / iq4_xs | 0.1150 / 0.1157 (within noise) |
+
+Reading: with a 6-chunk slice and a 50 KB corpus the noise floor is about
+0.01, the same size as the budget, which is exactly what the noise advisory
+now reports. The two clear signals are the output head (do not lower it) and
+the dense FFN gate/up (free to lower). The expert classes, where 97% of the
+bytes are, had not been probed yet when the run stopped. Next run: 24 chunks
+and a 1 MiB+ corpus from `corpus-build`, then resume.
