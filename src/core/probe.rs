@@ -164,6 +164,7 @@ fn category_from(text: &str, has_vision_config: bool) -> (ModelCategory, &'stati
         "hunyuan_video",
         "z_image",
         "qwen_image",
+        "fibo",
     ]
     .iter()
     .any(|x| s.contains(x))
@@ -228,7 +229,10 @@ fn inspect_safetensors(path: &Path) -> io::Result<ModelProbe> {
     let tensor_names: Vec<&str> = map
         .keys()
         .filter(|k| k.as_str() != "__metadata__")
-        .take(32)
+        // Keys arrive sorted; a 32-key sample of a model with 568 `layers.*`
+        // keys never reaches `noise_refiner.` or `perceiver.`, so classify on
+        // the whole (bounded) key set and only print the first few.
+        .take(8192)
         .map(String::as_str)
         .collect();
     let count = map
@@ -260,30 +264,50 @@ fn inspect_safetensors(path: &Path) -> io::Result<ModelProbe> {
             return Err(invalid("tensor offset outside source file"));
         }
     }
-    let joined = tensor_names.join(" ").to_ascii_lowercase();
-    let (category, confidence) = if joined.contains("diffusion_model.")
-        || joined.contains("transformer_blocks.")
-        || joined.contains("double_blocks.")
-        || joined.contains("model.diffusion_model.")
-    {
-        (ModelCategory::Diffusion, "heuristic")
-    } else if joined.contains("vision_tower.") || joined.contains("vision_model.") {
-        (ModelCategory::VisionLanguage, "heuristic")
-    } else {
-        (ModelCategory::Unknown, "unknown")
-    };
+    let (category, confidence, family) = classify_safetensors_keys(&tensor_names);
     Ok(ModelProbe {
         path: path.to_path_buf(), format:"safetensors_single_file", category,
         identification: if tensor_names.is_empty() { "unknown".into() } else {
             format!("{} tensors; first keys: {}", count, tensor_names.iter().take(3).copied().collect::<Vec<_>>().join(", "))
         }, confidence, bytes:file_size, tensor_count:Some(count as u64),
-        conversion_route:if category==ModelCategory::Diffusion{"stable_diffusion_cpp_gguf_candidate"}else{"none"},
-        conversion_status:if category==ModelCategory::Diffusion{"sd_cli_conversion_requires_model_specific_runtime_test"}else{"not_implemented_for_this_standalone_safetensors"},
+        conversion_route: match (category, family) {
+            (ModelCategory::Diffusion, Some("fibo2")) => "comfyui_gguf_convert_py (diffusion-sweep --converter comfy-gguf)",
+            (ModelCategory::Diffusion, _) => "stable_diffusion_cpp_gguf_candidate",
+            _ => "none",
+        },
+        conversion_status: match (category, family) {
+            (ModelCategory::Diffusion, Some("fibo2")) => "fibo2 is not a stable-diffusion.cpp architecture; use the ComfyUI-GGUF converter and the fixed-seed parity gate",
+            (ModelCategory::Diffusion, _) => "sd_cli_conversion_requires_model_specific_runtime_test",
+            _ => "not_implemented_for_this_standalone_safetensors",
+        },
         notes:vec![
             "Standalone diffusion safetensors may be eligible for stable-diffusion.cpp GGUF conversion; installed backend support and real image/video generation must be checked.".into(),
             "Classification from tensor names is advisory; preserve architecture-specific metadata and sensitive tensors.".into(),
         ],
     })
+}
+
+/// Category from standalone safetensors tensor names, plus a family tag when
+/// the key layout is unmistakable. FIBO 2 (Bria): a `perceiver.` prompt
+/// perceiver with `latent_queries`, `noise_refiner.` blocks, `layers.N.` with
+/// `adaLN_modulation`, `final_layer.`; no `double_blocks`, no `diffusion_model.`
+/// prefix, so the generic rules miss it.
+pub fn classify_safetensors_keys(tensor_names: &[&str]) -> (ModelCategory, &'static str, Option<&'static str>) {
+    let joined = tensor_names.join(" ").to_ascii_lowercase();
+    if joined.contains("perceiver.latent_queries") && joined.contains("noise_refiner.") && joined.contains("final_layer.") {
+        return (ModelCategory::Diffusion, "heuristic", Some("fibo2"));
+    }
+    if joined.contains("diffusion_model.")
+        || joined.contains("transformer_blocks.")
+        || joined.contains("double_blocks.")
+        || joined.contains("model.diffusion_model.")
+    {
+        (ModelCategory::Diffusion, "heuristic", None)
+    } else if joined.contains("vision_tower.") || joined.contains("vision_model.") {
+        (ModelCategory::VisionLanguage, "heuristic", None)
+    } else {
+        (ModelCategory::Unknown, "unknown", None)
+    }
 }
 
 /// Diffusers pipelines use model_index.json instead of HF language config.json.
@@ -715,5 +739,20 @@ mod tests {
         fs::write(&other, b"PK................").unwrap();
         assert!(probe_model(&other).is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fibo2_safetensors_keys_are_diffusion_with_the_comfy_route() {
+        let keys = ["perceiver.latent_queries", "perceiver.layers.0.cross_attention.norm_k.weight",
+                    "noise_refiner.0.attn.qkv.weight", "layers.0.adaLN_modulation.0.weight", "final_layer.linear.weight",
+                    "t_embedder.mlp.0.weight", "x_embedder.weight"];
+        let (cat, conf, fam) = classify_safetensors_keys(&keys);
+        assert_eq!(cat, ModelCategory::Diffusion);
+        assert_eq!(conf, "heuristic");
+        assert_eq!(fam, Some("fibo2"));
+        let flux = ["double_blocks.0.img_attn.qkv.weight", "final_layer.linear.weight"];
+        assert_eq!(classify_safetensors_keys(&flux), (ModelCategory::Diffusion, "heuristic", None));
+        assert_eq!(classify_safetensors_keys(&["lm_head.weight"]).0, ModelCategory::Unknown);
+        assert_eq!(category_from("fibo2_dev_bf16", false).0, ModelCategory::Diffusion);
     }
 }
