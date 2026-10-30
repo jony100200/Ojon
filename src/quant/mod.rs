@@ -10,6 +10,7 @@ pub mod ppl;
 pub mod quant_compare;
 pub mod quant_parity;
 pub mod recipe;
+pub mod recipe_run;
 pub mod sweep;
 
 pub use adaptive::*;
@@ -24,4 +25,5 @@ pub use ppl::*;
 pub use quant_compare::*;
 pub use quant_parity::*;
 pub use recipe::*;
+pub use recipe_run::*;
 pub use sweep::*;

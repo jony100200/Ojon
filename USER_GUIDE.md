@@ -57,6 +57,42 @@ ojon autoround-plan "./models/hf-original" "./models/out\q5-calibrated" --bits 5
 
 To execute, use `autoround-run` with the same options and `--confirm`. Ojon checks that GGUF output metadata exists, not that the model runs or meets a quality threshold. Compare against existing llama.cpp K/IQ conversions using held-out data and a verified target loader. See Intel's upstream AutoRound step-by-step guide.
 
+## Measured mixed-precision recipe: smallest size within a KL-divergence budget
+
+`sweep-*` picks one whole-model format. `recipe-*` goes further: it measures, per
+tensor class, how low the precision can go before the model's output
+distribution moves more than you allow, then assembles the smallest recipe that
+stays inside that budget. Nothing is assumed about which tensors are sensitive;
+every number comes from quantizing and measuring this model.
+
+```sh
+# Plan only: lists the classes present, every probe, and the quantization count
+ojon recipe-plan original-F16.gguf ./recipe-out --corpus data/calibration.txt
+
+# Execute (one quantization per probe; keeps one probe file on disk at a time)
+ojon recipe-run original-F16.gguf ./recipe-out --corpus data/calibration.txt      --base q5_k --floor iq2_s --budget 0.01 --imatrix model.imatrix --confirm
+```
+
+Protocol, all through public `llama-quantize` and `llama-perplexity`:
+
+1. Reference logits of the original over a fixed corpus slice (`--chunks`, default 40).
+2. Base candidate: every searched class pinned to `--base` (q4_k, q5_k or q6_k).
+3. Probes: for each class (embeddings, output head, attention q/k, attention
+   v/out, dense FFN gate/up, dense FFN down, expert gate/up, expert down, shared
+   expert) and each ladder level below the base down to the class floor, one
+   quantization with only that class lowered, measured as mean KLD against the
+   reference. Routers and 1-D tensors are never touched.
+4. Greedy selection by bytes saved per unit of added KLD until the summed deltas
+   reach `--budget`; the final recipe is quantized and measured again.
+5. `recipe-receipt.json` records every probe, the recipe, the final measured KLD,
+   and `measured_within_budget`. A recipe over budget is reported as rejected and
+   the base candidate stays the accepted output.
+
+Mean KLD is a distance between output distributions, not a task score. A recipe
+within budget still goes through the task suite before any capability claim.
+Typical budgets: 0.005 strict, 0.01 default, 0.02 relaxed; the receipt also
+carries the 99th percentile and maximum per-token KLD for the tails.
+
 ## Plan several quantization options before choosing
 
 ```powershell

@@ -31,6 +31,7 @@ pub use self::quant::ppl;
 pub use self::quant::quant_compare;
 pub use self::quant::quant_parity;
 pub use self::quant::recipe;
+pub use self::quant::recipe_run;
 pub use self::quant::sweep;
 
 // Uncensor

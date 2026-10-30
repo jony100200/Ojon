@@ -2172,6 +2172,99 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             }
             Ok(true)
         }
+        "recipe-plan" | "recipe-run" => {
+            // KLD-gated mixed-precision recipe search: measure how low each tensor
+            // class can go before the output distribution moves past a budget.
+            let execute = cmd == "recipe-run";
+            let source = PathBuf::from(next_argument(&mut args, "original F16/BF16 GGUF model")?);
+            let output_dir = PathBuf::from(next_argument(&mut args, "empty output directory")?);
+            let mut corpus: Option<PathBuf> = None;
+            let mut base = String::from("q5_k");
+            let mut floor = String::from("iq2_s");
+            let mut budget = 0.01f64;
+            let mut imatrix: Option<PathBuf> = None;
+            let mut quantize_tool = ojon_backend::discovery::resolve_backend_command(
+                BackendId::LlamaQuantize,
+                "llama-quantize",
+            )?;
+            let mut perplexity_tool = ojon_backend::discovery::resolve_backend_command(
+                BackendId::LlamaPerplexity,
+                "llama-perplexity",
+            )?;
+            let (mut context, mut gpu_layers, mut chunks) = (512u32, 99u32, 40u32);
+            let mut threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(4);
+            let (mut keep_probes, mut confirm, mut json) = (false, false, false);
+            let text = |v: std::ffi::OsString, what: &str| -> io::Result<String> {
+                v.to_str().map(str::to_owned).ok_or_else(|| invalid(format!("{what} requires UTF-8")))
+            };
+            while let Some(option) = args.next() {
+                match option.to_str() {
+                    Some("--corpus") => corpus = Some(PathBuf::from(next_argument(&mut args, "held-out text corpus")?)),
+                    Some("--base") => base = text(next_argument(&mut args, "base level")?, "base")?,
+                    Some("--floor") => floor = text(next_argument(&mut args, "floor level")?, "floor")?,
+                    Some("--budget") => {
+                        budget = text(next_argument(&mut args, "KLD budget")?, "budget")?
+                            .parse::<f64>()
+                            .map_err(|_| invalid("budget must be a number (mean KLD delta over base)"))?
+                    }
+                    Some("--imatrix") => imatrix = Some(PathBuf::from(next_argument(&mut args, "importance matrix file")?)),
+                    Some("--quantize-tool") => quantize_tool = PathBuf::from(next_argument(&mut args, "llama-quantize executable")?),
+                    Some("--perplexity-tool") => perplexity_tool = PathBuf::from(next_argument(&mut args, "llama-perplexity executable")?),
+                    Some("--ctx") => context = text(next_argument(&mut args, "context")?, "ctx")?.parse().map_err(|_| invalid("ctx must be a number"))?,
+                    Some("--ngl") => gpu_layers = text(next_argument(&mut args, "gpu layers")?, "ngl")?.parse().map_err(|_| invalid("ngl must be a number"))?,
+                    Some("--chunks") => chunks = text(next_argument(&mut args, "chunk limit")?, "chunks")?.parse().map_err(|_| invalid("chunks must be a number"))?,
+                    Some("--threads") => threads = text(next_argument(&mut args, "thread count")?, "threads")?.parse().map_err(|_| invalid("threads must be a number"))?,
+                    Some("--keep-probes") => keep_probes = true,
+                    Some("--json") => json = true,
+                    Some("--confirm") if execute => confirm = true,
+                    _ => return Err(invalid(format!("unknown recipe option: {}", option.to_string_lossy()))),
+                }
+            }
+            let corpus = corpus.ok_or_else(|| invalid("--corpus <held-out text file> is required"))?;
+            let base = ojon_backend::recipe::ladder_index(&base)
+                .map(|i| ojon_backend::recipe::LADDER[i].0)
+                .ok_or_else(|| invalid(format!("unknown base level '{base}'")))?;
+            let floor = ojon_backend::recipe::ladder_index(&floor)
+                .map(|i| ojon_backend::recipe::LADDER[i].0)
+                .ok_or_else(|| invalid(format!("unknown floor level '{floor}'")))?;
+            let plan = ojon_backend::recipe_run::prepare_recipe(ojon_backend::recipe_run::RecipeJob {
+                source,
+                output_dir,
+                base,
+                floor,
+                budget_kld: budget,
+                quantize_tool,
+                imatrix,
+                threads,
+                kld: ojon_backend::kld::KldSettings { tool: perplexity_tool, corpus, gpu_layers, context, chunks },
+                keep_probes,
+            })?;
+            let plan_path = plan.write_plan()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&plan.plan_json())?);
+            } else {
+                println!("plan: {}", plan_path.display());
+                println!(
+                    "classes: {} | probes: {} | quantizations: {} | base {} floor {} budget +{} mean KLD",
+                    plan.present.len(),
+                    plan.probes.len(),
+                    plan.probes.len() + 2,
+                    plan.job.base,
+                    plan.job.floor,
+                    plan.job.budget_kld
+                );
+            }
+            if !execute {
+                println!("next_step: ojon recipe-run <same arguments> --confirm");
+                return Ok(true);
+            }
+            if !confirm {
+                return Err(invalid("recipe-run quantizes the model once per probe; add --confirm to execute"));
+            }
+            let receipt = ojon_backend::recipe_run::run_recipe(&plan, |line| eprintln!("{line}"))?;
+            println!("receipt: {}", receipt.display());
+            Ok(true)
+        }
         _ => Ok(false),
     }
 }
