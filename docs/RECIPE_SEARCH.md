@@ -134,7 +134,7 @@ MoE with 31 probes it is hours and tens of GB of transient disk. Narrow it with
 `--floor`, a higher `--base`, or fewer `--chunks`, and reuse the result on
 sibling models with `recipe-apply`.
 
-Measured on the owner's box (RTX 4060 Ti 16 GB + Arc Pro B60 24 GB, 31 GiB
+Measured on one test machine (RTX 4060 Ti 16 GB + Arc Pro B60 24 GB, 31 GiB
 RAM, model on a ~400 MB/s drive): Flint-BF16 (74 GB, 39B MoE) loads in fit
 mode in about 2.5 minutes with its experts mapped on the CPU, and the imatrix
 pass over 21 chunks of 512 tokens reports an estimate of about 53 minutes. At
@@ -197,7 +197,7 @@ search measures instead of assuming.
 ## 10. Flint-BF16 (39B MoE) partial run, 2026-10-30
 
 Stopped by the host after 8 of 15 probes (system memory pressure, not the
-tool); the ledger in `E:\ojon-recipe-flint\out` holds the finished probes and
+tool); the ledger in the output directory holds the finished probes and
 `recipe-run ... --resume` continues. Settings: base q5_k, floor iq4_xs, 6
 chunks, `--ngl auto`, imatrix from the calibration half of a 50 KB corpus.
 

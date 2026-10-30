@@ -504,7 +504,7 @@ fn xpu_devices() -> Vec<Value> {
     }
 }
 
-/// Used as an isolated fixture test, not a claim that the owner's driver works.
+/// Used as an isolated fixture test, not a claim that any particular driver works.
 fn parse_xpu_csv(text: &str) -> Vec<Value> {
     let mut out = Vec::new();
     for line in text.lines().take(32) {
