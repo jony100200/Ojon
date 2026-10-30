@@ -194,6 +194,25 @@ Local agents may call the JSON commands. They cannot control your computer throu
 
 ---
 
+## Measured image parity for diffusion GGUF quants
+
+The language side gates a quant on KL divergence. For image and video models the
+equivalent is pixel parity on a fixed seed: the same API-format ComfyUI workflow
+runs twice, once with the reference weights and once with the candidate GGUF,
+and the decoded PNG outputs are compared.
+
+```sh
+ojon diffusion-parity --workflow flux_api.json --reference-name flux-dev-F16.gguf      --candidate-name flux-dev-Q4_K_S.gguf --min-psnr 30 --confirm
+```
+
+The receipt (`ojon.diffusion_parity.v1`) reports PSNR, mean absolute pixel
+difference and the fraction of pixels over `--pixel-tolerance` per image, and
+`passed` against `--min-psnr` on the worst image. The workflow must carry an
+explicit integer seed on every sampler; a video workflow must export PNG frames
+(SaveImage on the decoded frames), GIF/MP4 outputs are refused rather than
+guessed at. A pass is a statement about this workflow and seed, not about every
+prompt.
+
 ## Native image/video model weight compression (experimental)
 
 Ojon ships its **own Rust quantizer** for eligible 2D weight matrices in original F16, BF16 or F32 safetensors checkpoints. It uses bounded-memory per-group affine uniform quantization (2/3/4-bit); unrecognized and sensitive tensors are preserved without modification. There is no dependency on RebelUI, PyTorch or GPU drivers for this converter.

@@ -275,6 +275,94 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             }
             Ok(true)
         }
+        "diffusion-parity" => {
+            // Measured image parity: reference vs candidate on one fixed-seed ComfyUI workflow.
+            let mut workflow: Option<PathBuf> = None;
+            let mut reference: Option<String> = None;
+            let mut candidate: Option<String> = None;
+            let mut node_id: Option<String> = None;
+            let mut server: Option<String> = None;
+            let mut receipt: Option<PathBuf> = None;
+            let mut python = PathBuf::from("python");
+            let mut min_psnr: Option<String> = None;
+            let mut pixel_tolerance: Option<String> = None;
+            let mut timeout: Option<u32> = None;
+            let mut confirmed = false;
+            let utf8 = |v: std::ffi::OsString, what: &str| -> io::Result<String> {
+                v.to_str().map(str::to_owned).ok_or_else(|| invalid(format!("{what} must be UTF-8")))
+            };
+            while let Some(opt) = args.next() {
+                match opt.to_str() {
+                    Some("--workflow") => workflow = Some(PathBuf::from(next_argument(&mut args, "API-format workflow JSON")?)),
+                    Some("--reference-name") => reference = Some(utf8(next_argument(&mut args, "reference weights name")?, "reference name")?),
+                    Some("--candidate-name") => candidate = Some(utf8(next_argument(&mut args, "candidate GGUF name")?, "candidate name")?),
+                    Some("--node-id") => node_id = Some(utf8(next_argument(&mut args, "loader node id")?, "node id")?),
+                    Some("--server") => server = Some(utf8(next_argument(&mut args, "ComfyUI server URL")?, "server")?),
+                    Some("--receipt") => receipt = Some(PathBuf::from(next_argument(&mut args, "receipt JSON path")?)),
+                    Some("--python") => python = PathBuf::from(next_argument(&mut args, "Python executable")?),
+                    Some("--min-psnr") => {
+                        let v = utf8(next_argument(&mut args, "minimum PSNR dB")?, "min-psnr")?;
+                        v.parse::<f64>().map_err(|_| invalid("min-psnr must be a number"))?;
+                        min_psnr = Some(v);
+                    }
+                    Some("--pixel-tolerance") => {
+                        let v = utf8(next_argument(&mut args, "pixel tolerance")?, "pixel-tolerance")?;
+                        v.parse::<u32>().map_err(|_| invalid("pixel-tolerance must be an integer"))?;
+                        pixel_tolerance = Some(v);
+                    }
+                    Some("--timeout") => {
+                        timeout = Some(
+                            utf8(next_argument(&mut args, "timeout seconds")?, "timeout")?
+                                .parse()
+                                .map_err(|_| invalid("timeout must be integer seconds"))?,
+                        )
+                    }
+                    Some("--confirm") => confirmed = true,
+                    _ => return Err(invalid(format!("unknown diffusion-parity option: {}", opt.to_string_lossy()))),
+                }
+            }
+            let workflow = workflow.ok_or_else(|| invalid("--workflow is required"))?;
+            let reference = reference.ok_or_else(|| invalid("--reference-name is required"))?;
+            let candidate = candidate.ok_or_else(|| invalid("--candidate-name is required"))?;
+            if !workflow.is_file() {
+                return Err(invalid("workflow JSON not found"));
+            }
+            if !confirmed {
+                return Err(invalid("diffusion-parity generates twice on the ComfyUI server; add --confirm"));
+            }
+            // Same embedding approach as the smoke gate: stdlib-only adapter, no shell,
+            // loopback-only server enforced inside the script.
+            let mut command = std::process::Command::new(python);
+            command
+                .arg("-c")
+                .arg(include_str!("../../scripts/comfy_gguf_parity.py"))
+                .arg("--workflow")
+                .arg(workflow)
+                .arg("--reference-name")
+                .arg(reference)
+                .arg("--candidate-name")
+                .arg(candidate);
+            if let Some(v) = node_id {
+                command.arg("--node-id").arg(v);
+            }
+            if let Some(v) = server {
+                command.arg("--server").arg(v);
+            }
+            if let Some(v) = receipt {
+                command.arg("--receipt").arg(v);
+            }
+            if let Some(v) = min_psnr {
+                command.arg("--min-psnr").arg(v);
+            }
+            if let Some(v) = pixel_tolerance {
+                command.arg("--pixel-tolerance").arg(v);
+            }
+            if let Some(v) = timeout {
+                command.arg("--timeout").arg(v.to_string());
+            }
+            ojon_backend::jobs::run_with_log(&mut command, |line| println!("{line}"))?;
+            Ok(true)
+        }
         "diffusion-gguf-smoke-plan" | "diffusion-gguf-smoke-run" => {
             let execute = cmd == "diffusion-gguf-smoke-run";
             let model = PathBuf::from(next_argument(&mut args, "converted GGUF denoiser")?);
