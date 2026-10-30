@@ -72,6 +72,21 @@ string values), drops exact-duplicate paragraphs and control characters, refuses
 to overwrite, and writes `calibration.txt.report.json` with byte and approximate
 token counts and whether the result reaches the recommended 1 MiB.
 
+## One command: `auto-quant`
+
+```sh
+ojon auto-quant original-F16.gguf ./out --preset balanced --corpus my-calibration.txt --confirm
+```
+
+Presets answer the only question that matters, "how much loss is acceptable":
+`smallest` (q4_k base, down to iq2_s, +0.02 mean KLD), `balanced` (default: q5_k
+base, down to iq3_s, +0.01), `safest` (q6_k base, down to q4_k, +0.005). Everything
+else is a measured default: importance matrix from a hold-out split of the
+corpus, GPU fit chosen by the tools, 24 chunks, p99 tail gate, boundary
+refinement, resumable. Without `--confirm` it prints the plan and every default
+it would use. The result line says plainly whether the final file is within
+budget or whether the base candidate is the one to keep.
+
 ## From original to accepted quant, in order
 
 1. `imatrix-run` (or `recipe-run --imatrix auto`) on chat-style calibration text.

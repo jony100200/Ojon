@@ -1,5 +1,6 @@
 //! Ojon CLI dispatch router and domain submodules.
 
+pub mod auto;
 pub mod common;
 pub mod diffusion;
 pub mod flint;
@@ -20,6 +21,9 @@ pub fn run() -> io::Result<()> {
         None => return Err(common::invalid("command must be valid Unicode")),
     };
 
+    if auto::handle(cmd, &mut args)? {
+        return Ok(());
+    }
     if inspect::handle(cmd, &mut args)? {
         return Ok(());
     }

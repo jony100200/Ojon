@@ -110,3 +110,24 @@ No embedding, reranker, ONNX, detection or segmentation command.
    `diffusion-parity --kind video`.
 7. (deferred) ONNX/OpenVINO utility routes beyond text generation, with cosine
    / IoU / mIoU gates. Highest effort: needs a new loader and eval harness.
+
+## Product direction (owner, 2026-10-30)
+
+Ojon is the easy layer; the quant backends (llama.cpp, sd.cpp, whisper.cpp) are
+engines. Load a model, pick a preset, press, get the smallest quant that
+measurably keeps quality, with uncensoring and the other features in the same
+flow. Two items this adds to the list above:
+
+- **Uncensoring for image models.** Today the directional-edit uncensor path is
+  LLM-only (`src/uncensor/*`, exact float matrices in `attn_output` / `ffn_down`).
+  Diffusion safety tuning lives in the text encoder's concept space and in the
+  denoiser; the honest routes are (a) concept re-enablement via a LoRA trained on
+  paired prompts, (b) text-encoder swap/edit, (c) negative-concept erasure undo.
+  Needs a measured gate (prompt-set pass rate plus parity on unrelated prompts).
+  Start: a `diffusion-uncensor-plan` that only audits which route the model
+  allows, no weights touched.
+- **LoRA that makes the original better, then quant.** The `learn/` fine-tune
+  path is planned; the recipe search already accepts any original GGUF, so the
+  order is: merge LoRA into the original (llama.cpp `llama-export-lora`), then
+  `auto-quant`. Gate the merged original against the base original with the
+  task suite before quantizing, or the quant inherits an unmeasured change.
