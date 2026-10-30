@@ -95,6 +95,11 @@ have, and `--budget-p99 <x>` adds a tail gate so the 99th-percentile per-token K
 may not rise more than `x` over the base either. Mean KLD alone can hide rare,
 large divergences on individual tokens.
 
+In the Kathamo GUI, **Manual Tools > Plan KLD Recipe Search (read-only)** writes
+the same `recipe-plan.json` for the loaded original (it uses the Optimize tab's
+held-out perplexity corpus) and prints the probe count; executing the search
+stays a deliberate CLI step with `--confirm`.
+
 To reuse a measured recipe on another original of the same family (a new
 fine-tune, an uncensored variant) without re-probing:
 

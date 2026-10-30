@@ -125,6 +125,13 @@ MoE with 31 probes it is hours and tens of GB of transient disk. Narrow it with
 `--floor`, a higher `--base`, or fewer `--chunks`, and reuse the result on
 sibling models with `recipe-apply`.
 
+Measured on the owner's box (RTX 4060 Ti 16 GB + Arc Pro B60 24 GB, 31 GiB
+RAM, model on a ~400 MB/s drive): Flint-BF16 (74 GB, 39B MoE) loads in fit
+mode in about 2.5 minutes with its experts mapped on the CPU, and the imatrix
+pass over 21 chunks of 512 tokens reports an estimate of about 53 minutes. At
+that rate a 20-quantization search is an overnight job; the limiting factor is
+reading 74 GB from disk per quantization, not the GPUs.
+
 ## 8. Worked example (measured 2026-10-30)
 
 Qwen3-0.6B BF16 (1.2 GB), 50 KB held-out corpus, 12 chunks of 512 tokens,

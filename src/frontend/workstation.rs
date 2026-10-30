@@ -855,6 +855,68 @@ impl Workstation {
             }
         });
     }
+    /// KLD recipe search, plan mode. Uses the manual-tools source/output/quantizer
+    /// and the Optimize tab's held-out perplexity corpus. Writes recipe-plan.json
+    /// and reports the probe count; executing is a deliberate CLI step.
+    fn start_recipe_plan(&mut self) {
+        if self.busy {
+            return;
+        }
+        let corpus = self.opt_ppl.trim().to_owned();
+        if corpus.is_empty() {
+            self.status = "Set the held-out perplexity corpus (Optimize Model > settings) first; the recipe search measures KL divergence over it.".into();
+            self.needs_redraw = true;
+            return;
+        }
+        let (source, output, tool) = (self.source.clone(), self.output.clone(), self.quantizer.clone());
+        let tx = self.tx.clone();
+        self.busy = true;
+        self.started_at = Some(Instant::now());
+        self.status = "Reading the original GGUF and listing the recipe probes (no quantization)...".into();
+        self.needs_redraw = true;
+        std::thread::spawn(move || {
+            let threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(4);
+            let res = (|| -> Result<String, String> {
+                let perplexity = ojon_backend::discovery::resolve_backend_command(
+                    ojon_backend::discovery::BackendId::LlamaPerplexity,
+                    "llama-perplexity",
+                )
+                .map_err(|e| e.to_string())?;
+                let plan = ojon_backend::recipe_run::prepare_recipe(ojon_backend::recipe_run::RecipeJob {
+                    source: PathBuf::from(source.trim()),
+                    output_dir: PathBuf::from(output.trim()),
+                    base: "q5_k",
+                    floor: "iq2_s",
+                    budget_kld: 0.01,
+                    quantize_tool: PathBuf::from(tool.trim()),
+                    imatrix: None,
+                    imatrix_tool: None,
+                    threads,
+                    kld: ojon_backend::kld::KldSettings {
+                        tool: perplexity,
+                        corpus: PathBuf::from(corpus),
+                        gpu_layers: 99,
+                        fit: true,
+                        context: 512,
+                        chunks: 40,
+                    },
+                    keep_probes: false,
+                    budget_p99: None,
+                })
+                .map_err(|e| e.to_string())?;
+                let path = plan.write_plan().map_err(|e| e.to_string())?;
+                Ok(format!(
+                    "Recipe plan written: {} classes, {} probes, {} quantizations at base q5_k / floor iq2_s / budget 0.01 mean KLD.                      Run it with: ojon recipe-run <source> <output> --corpus <corpus> --imatrix auto --ngl auto --confirm. Plan: {}",
+                    plan.present.len(),
+                    plan.probes.len(),
+                    plan.probes.len() + 2,
+                    ojon_backend::recipe_run::plain(&path)
+                ))
+            })();
+            let _ = tx.send(WorkerEvent::Planned(res));
+        });
+    }
+
     fn start_plan(&mut self) {
         if self.busy {
             return;
@@ -2229,6 +2291,7 @@ impl Workstation {
         let mut open_folder_target: Option<PathBuf> = None;
         let mut load_candidate_target: Option<PathBuf> = None;
         let mut export_report_json: Option<(PathBuf, serde_json::Value)> = None;
+        let mut recipe_plan = false;
         let (
             mut inspect,
             mut plan,
@@ -2898,6 +2961,9 @@ impl Workstation {
                                 if actions.button("Quantize Model").clicked() { convert = true; }
                             });
                             if card.button_secondary("Recommend Best Route (No GPU)").clicked() { advise = true; }
+                            // Measured mixed precision: plan only here; the run is the CLI's
+                            // recipe-run with --confirm because it quantizes once per probe.
+                            if !busy && card.button_secondary("Plan KLD Recipe Search (read-only)").clicked() { recipe_plan = true; }
                         });
 
                         col.glass_card(330.0, |card| {
@@ -3344,6 +3410,8 @@ impl Workstation {
             self.start_one_click_uncensor();
         } else if plan {
             self.start_plan();
+        } else if recipe_plan {
+            self.start_recipe_plan();
         } else if advise {
             self.start_optimizer_advice();
         } else if opt_run {
