@@ -250,15 +250,21 @@ pub fn run_existing_quant_comparison(
         if text_pass {
             if let Some(vsuite) = &plan.vision {
                 let test = (|| {
+                    let mmproj = plan
+                        .options
+                        .mmproj
+                        .as_deref()
+                        .ok_or_else(|| invalid("mmproj missing"))?;
                     if baseline_vis.is_none() {
                         baseline_vis = Some(vision_score(
                             &plan.options,
                             vsuite,
                             &plan.baseline,
+                            mmproj,
                             &mut log,
                         )?);
                     }
-                    vision_score(&plan.options, vsuite, path, &mut log)
+                    vision_score(&plan.options, vsuite, path, mmproj, &mut log)
                 })();
                 match test {
                     Ok(candidate) => {
