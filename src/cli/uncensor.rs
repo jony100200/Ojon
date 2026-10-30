@@ -63,8 +63,6 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     println!("vision_qa: NOT_EVALUATED");
                     println!("runtime: llama-cli -m <base.gguf> --lora <adapter.gguf> [--mmproj <vision.gguf>]");
                 }
-            } else if json {
-                println!("{}", plan.as_json());
             } else {
                 println!("{}", plan.as_json());
             }
@@ -128,9 +126,16 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     "model build requires --converter <installed llama.cpp convert_hf_to_gguf.py>",
                 )
             })?;
-            let plan = ojon_backend::prepare_model_build(
-                &source, &recipe, &output, &converter, &python, &quantizer, precision, threads,
-            )?;
+            let plan = ojon_backend::prepare_model_build(ojon_backend::ModelBuildRequest {
+                source: &source,
+                recipe: &recipe,
+                output: &output,
+                converter: &converter,
+                python: &python,
+                quantizer: &quantizer,
+                precision,
+                threads,
+            })?;
             if execute {
                 if !confirmed {
                     return Err(invalid("model-build-run requires --confirm"));
@@ -154,8 +159,6 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     println!("image_quality: NOT_TESTED");
                     println!("refusal_quality: NOT_TESTED");
                 }
-            } else if json {
-                println!("{}", plan.as_json());
             } else {
                 println!("{}", plan.as_json());
             }
@@ -472,8 +475,6 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     println!("vision_qa: NOT_EVALUATED");
                     println!("artifact: single safetensors shard, not a complete HF checkpoint");
                 }
-            } else if json {
-                println!("{}", plan.as_json());
             } else {
                 println!("{}", plan.as_json());
             }
@@ -648,14 +649,16 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 .or_else(|| discovered_path(BackendId::LlamaCli))
                 .ok_or_else(|| invalid("no llama-cli discovered; pass --tool"))?;
             let plan = ojon_backend::refusal::prepare_refusal_eval_with_server(
-                &model,
-                &suite,
-                &tool,
-                server.as_deref(),
-                gpu_layers,
-                device.as_deref(),
-                tokens,
-                &report,
+                ojon_backend::refusal::RefusalEvalRequest {
+                    model: &model,
+                    suite: &suite,
+                    tool: &tool,
+                    server_tool: server.as_deref(),
+                    gpu_layers,
+                    device: device.as_deref(),
+                    tokens,
+                    report: &report,
+                },
             )?;
             if execute {
                 let result =

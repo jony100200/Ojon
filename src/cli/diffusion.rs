@@ -681,7 +681,16 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 .or_else(|| std::env::var_os("OJON_SVDQ_DIR").map(PathBuf::from))
                 .ok_or_else(|| invalid("set --checkout to diffuse-compressor or OJON_SVDQ_DIR"))?;
             let plan = plan_diffusion(
-                &source, &output, &checkout, &python, engine, kind, precision, samples,
+                DiffusionPlanRequest {
+                    source: &source,
+                    output: &output,
+                    checkout: &checkout,
+                    python: &python,
+                    engine,
+                    kind,
+                    format: precision,
+                    samples,
+                },
             )?;
             if stage == "diffusion-plan" {
                 println!("{}", plan.json());

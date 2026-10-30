@@ -99,18 +99,31 @@ impl ResearchPlan {
     }
 }
 
+/// Inputs for [`prepare_research`].
+#[derive(Clone, Copy, Debug)]
+pub struct ResearchRequest<'a> {
+    pub kind: ResearchKind,
+    pub source: &'a Path,
+    pub output: &'a Path,
+    pub executable: &'a Path,
+    pub bits: u32,
+    pub group: u32,
+    pub ratio: f64,
+    pub device: &'a str,
+}
 /// Inspect an ORIGINAL local Hugging Face checkpoint; never load the model.
 /// The caller must provide a new external destination. Avoid overwriting source.
-pub fn prepare_research(
-    kind: ResearchKind,
-    source: &Path,
-    output: &Path,
-    executable: &Path,
-    bits: u32,
-    group: u32,
-    ratio: f64,
-    device: &str,
-) -> io::Result<ResearchPlan> {
+pub fn prepare_research(request: ResearchRequest<'_>) -> io::Result<ResearchPlan> {
+    let ResearchRequest {
+        kind,
+        source,
+        output,
+        executable,
+        bits,
+        group,
+        ratio,
+        device,
+    } = request;
     let source = inspect_hf_folder(source)?;
     // This first bridge is causal-LM only. Refuse to drop a VLM's processor
     // or vision tower while exporting what looks like a complete model.
@@ -137,7 +150,7 @@ pub fn prepare_research(
     if !output.is_absolute() {
         return Err(bad("output directory must be absolute"));
     }
-    if !output.file_name().is_some_and(|n| !n.is_empty()) {
+    if output.file_name().is_none_or(|n| n.is_empty()) {
         return Err(bad("output directory needs a name"));
     }
     if output.symlink_metadata().is_ok() {
@@ -361,80 +374,80 @@ mod tests {
     fn independent_routes_and_strict_output_contract() {
         let (root, source) = fixture();
         let out = root.join("hqq-output");
-        let hqq = prepare_research(
-            ResearchKind::Hqq,
-            &source,
-            &out,
-            Path::new("python"),
-            4,
-            64,
-            1.0,
-            "xpu",
-        )
+        let hqq = prepare_research(ResearchRequest {
+            kind: ResearchKind::Hqq,
+            source: &source,
+            output: &out,
+            executable: Path::new("python"),
+            bits: 4,
+            group: 64,
+            ratio: 1.0,
+            device: "xpu",
+        })
         .unwrap();
         assert_eq!(
             hqq.as_json()["output_format"],
             "HQQ native qmodel.pt (NOT GGUF)"
         );
         assert_eq!(hqq.as_json()["runtime_load_verified"], false);
-        assert!(prepare_research(
-            ResearchKind::Hqq,
-            &source,
-            &source.join("packed"),
-            Path::new("python"),
-            4,
-            64,
-            1.0,
-            "cpu"
-        )
+        assert!(prepare_research(ResearchRequest {
+            kind: ResearchKind::Hqq,
+            source: &source,
+            output: &source.join("packed"),
+            executable: Path::new("python"),
+            bits: 4,
+            group: 64,
+            ratio: 1.0,
+            device: "cpu",
+        },)
         .is_err());
-        assert!(prepare_research(
-            ResearchKind::Hqq,
-            &source,
-            &out,
-            Path::new("python"),
-            5,
-            64,
-            1.0,
-            "cpu"
-        )
+        assert!(prepare_research(ResearchRequest {
+            kind: ResearchKind::Hqq,
+            source: &source,
+            output: &out,
+            executable: Path::new("python"),
+            bits: 5,
+            group: 64,
+            ratio: 1.0,
+            device: "cpu",
+        },)
         .is_err());
-        let ov = prepare_research(
-            ResearchKind::OpenVino,
-            &source,
-            &out,
-            Path::new("optimum-cli"),
-            4,
-            128,
-            0.8,
-            "cpu",
-        )
+        let ov = prepare_research(ResearchRequest {
+            kind: ResearchKind::OpenVino,
+            source: &source,
+            output: &out,
+            executable: Path::new("optimum-cli"),
+            bits: 4,
+            group: 128,
+            ratio: 0.8,
+            device: "cpu",
+        })
         .unwrap();
         assert_eq!(
             ov.as_json()["output_format"],
             "OpenVINO IR .xml/.bin (NOT GGUF)"
         );
-        assert!(prepare_research(
-            ResearchKind::OpenVino,
-            &source,
-            &out,
-            Path::new("optimum-cli"),
-            4,
-            128,
-            1.3,
-            "cpu"
-        )
+        assert!(prepare_research(ResearchRequest {
+            kind: ResearchKind::OpenVino,
+            source: &source,
+            output: &out,
+            executable: Path::new("optimum-cli"),
+            bits: 4,
+            group: 128,
+            ratio: 1.3,
+            device: "cpu",
+        },)
         .is_err());
-        assert!(prepare_research(
-            ResearchKind::OpenVino,
-            &source,
-            &out,
-            Path::new("optimum-cli"),
-            4,
-            128,
-            1.0,
-            "xpu"
-        )
+        assert!(prepare_research(ResearchRequest {
+            kind: ResearchKind::OpenVino,
+            source: &source,
+            output: &out,
+            executable: Path::new("optimum-cli"),
+            bits: 4,
+            group: 128,
+            ratio: 1.0,
+            device: "xpu",
+        },)
         .is_err());
         fs::remove_dir_all(root).unwrap();
     }

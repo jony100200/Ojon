@@ -58,10 +58,10 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
         }
         "method-select" => {
             let path = PathBuf::from(next_argument(&mut args, "measured quality evidence JSON")?);
-            let mut json = false;
             for option in args {
                 match option.to_str() {
-                    Some("--json") => json = true,
+                    // Output is always the JSON receipt; the flag stays accepted for CLI parity.
+                    Some("--json") => {}
                     _ => {
                         return Err(invalid(format!(
                             "unknown selection option: {}",
@@ -71,11 +71,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 }
             }
             let result = ojon_backend::choose_edit_method_file(&path)?;
-            if json {
-                println!("{}", result.as_json());
-            } else {
-                println!("{}", result.as_json());
-            }
+            println!("{}", result.as_json());
             Ok(true)
         }
         "adapter-smoke-plan" | "adapter-smoke-run" => {
@@ -141,14 +137,16 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 return Err(invalid("--confirm may only be used with adapter-smoke-run"));
             }
             let plan = ojon_backend::prepare_adapter_smoke(
-                &bundle,
-                &report,
-                &tool,
-                gpu_layers,
-                device.as_deref(),
-                image.as_deref(),
-                prompt.as_deref(),
-                tokens,
+                ojon_backend::AdapterSmokeRequest {
+                    bundle: &bundle,
+                    report: &report,
+                    tool: &tool,
+                    gpu_layers,
+                    device: device.as_deref(),
+                    image: image.as_deref(),
+                    prompt: prompt.as_deref(),
+                    tokens,
+                },
             )?;
             if execute {
                 if !confirmed {
@@ -164,8 +162,6 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     println!("refusal_rate: NOT_EVALUATED");
                     println!("vision_quality: NOT_EVALUATED");
                 }
-            } else if json {
-                println!("{}", plan.as_json());
             } else {
                 println!("{}", plan.as_json());
             }
@@ -799,18 +795,22 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let suite = PathBuf::from(next_argument(&mut args, "held-out task suite JSON")?);
             let report = PathBuf::from(next_argument(&mut args, "new comparison report JSON")?);
             let mut candidates = Vec::<(String, PathBuf)>::new();
-            let mut options = ojon_backend::QuantParityOptions::default();
-            options.quantizer = ojon_backend::discovery::resolve_backend_command(
-                BackendId::LlamaQuantize,
-                "llama-quantize",
-            )?;
-            options.eval_tool =
-                ojon_backend::discovery::resolve_backend_command(BackendId::LlamaCli, "llama-cli")?;
-            options.server_tool = ojon_backend::discovered_path(BackendId::LlamaServer);
-            options.ppl_tool = ojon_backend::discovery::resolve_backend_command(
-                BackendId::LlamaPerplexity,
-                "llama-perplexity",
-            )?;
+            let mut options = ojon_backend::QuantParityOptions {
+                quantizer: ojon_backend::discovery::resolve_backend_command(
+                    BackendId::LlamaQuantize,
+                    "llama-quantize",
+                )?,
+                eval_tool: ojon_backend::discovery::resolve_backend_command(
+                    BackendId::LlamaCli,
+                    "llama-cli",
+                )?,
+                server_tool: ojon_backend::discovered_path(BackendId::LlamaServer),
+                ppl_tool: ojon_backend::discovery::resolve_backend_command(
+                    BackendId::LlamaPerplexity,
+                    "llama-perplexity",
+                )?,
+                ..ojon_backend::QuantParityOptions::default()
+            };
             let (mut confirmed, mut json) = (false, false);
             while let Some(option) = args.next() {
                 match option.to_str() {
@@ -936,8 +936,6 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     );
                     println!("global_quality_loss_proven_absent: NO");
                 }
-            } else if json {
-                println!("{}", plan.as_json());
             } else {
                 println!("{}", plan.as_json());
             }
@@ -955,18 +953,22 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 "held-out coding/reasoning/tool suite JSON",
             )?);
             let output_dir = PathBuf::from(next_argument(&mut args, "existing output directory")?);
-            let mut options = ojon_backend::QuantParityOptions::default();
-            options.quantizer = ojon_backend::discovery::resolve_backend_command(
-                BackendId::LlamaQuantize,
-                "llama-quantize",
-            )?;
-            options.eval_tool =
-                ojon_backend::discovery::resolve_backend_command(BackendId::LlamaCli, "llama-cli")?;
-            options.server_tool = ojon_backend::discovered_path(BackendId::LlamaServer);
-            options.ppl_tool = ojon_backend::discovery::resolve_backend_command(
-                BackendId::LlamaPerplexity,
-                "llama-perplexity",
-            )?;
+            let mut options = ojon_backend::QuantParityOptions {
+                quantizer: ojon_backend::discovery::resolve_backend_command(
+                    BackendId::LlamaQuantize,
+                    "llama-quantize",
+                )?,
+                eval_tool: ojon_backend::discovery::resolve_backend_command(
+                    BackendId::LlamaCli,
+                    "llama-cli",
+                )?,
+                server_tool: ojon_backend::discovered_path(BackendId::LlamaServer),
+                ppl_tool: ojon_backend::discovery::resolve_backend_command(
+                    BackendId::LlamaPerplexity,
+                    "llama-perplexity",
+                )?,
+                ..ojon_backend::QuantParityOptions::default()
+            };
             let (mut confirmed, mut json) = (false, false);
             while let Some(opt) = args.next() {
                 match opt.to_str() {
@@ -1118,8 +1120,6 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     );
                     println!("proof_of_lossless_quality: NO (limited tests only)");
                 }
-            } else if json {
-                println!("{}", plan.as_json());
             } else {
                 println!("{}", plan.as_json());
             }
@@ -1220,19 +1220,21 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 }
             }
             let mut plan = prepare_adaptive(
-                &source,
-                &scores,
-                &output,
-                &suite,
-                &quantizer,
-                &eval_tool,
-                imatrix.as_deref(),
-                &targets,
-                threads,
-                gpu_layers,
-                device.as_deref(),
-                tokens,
-                max_loss,
+                AdaptiveRequest {
+                    source: &source,
+                    scores: &scores,
+                    output_dir: &output,
+                    suite: &suite,
+                    quantizer: &quantizer,
+                    eval_tool: &eval_tool,
+                    imatrix: imatrix.as_deref(),
+                    targets: &targets,
+                    threads,
+                    gpu_layers,
+                    device: device.as_deref(),
+                    tokens,
+                    max_absolute_loss_pct: max_loss,
+                },
             )?;
             plan.server_tool = server_tool;
             if execute {
@@ -1358,15 +1360,17 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             }
             let baseline = baseline.ok_or_else(|| invalid("--baseline is required"))?;
             let plan = ojon_backend::task_eval::prepare_eval_with_server(
-                &suite,
-                &baseline,
-                &candidates,
-                &tool,
-                server_tool.as_deref(),
-                gpu_layers,
-                device.as_deref(),
-                tokens,
-                &output,
+                ojon_backend::task_eval::EvalRequest {
+                    suite: &suite,
+                    baseline: &baseline,
+                    candidates: &candidates,
+                    tool: &tool,
+                    server_tool: server_tool.as_deref(),
+                    gpu_layers,
+                    device: device.as_deref(),
+                    tokens,
+                    report: &output,
+                },
             )?;
             if execute {
                 if !confirm {
@@ -1517,14 +1521,16 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             }
             let checkout = checkout.ok_or_else(|| invalid("EXL3 --checkout is required"))?;
             let plan = prepare_exl3(
-                &source,
-                &output,
-                &work_dir,
-                &checkout,
-                &python,
-                bits,
-                high_quality,
-                resume,
+                Exl3Request {
+                    source: &source,
+                    output: &output,
+                    work_dir: &work_dir,
+                    checkout: &checkout,
+                    python: &python,
+                    bits,
+                    high_quality,
+                    resume,
+                },
             )?;
             if !execute {
                 if json {
@@ -1616,7 +1622,18 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 }
             }
             let plan =
-                prepare_research(kind, &source, &output, &tool, bits, group, ratio, &device)?;
+                prepare_research(
+                    ResearchRequest {
+                        kind,
+                        source: &source,
+                        output: &output,
+                        executable: &tool,
+                        bits,
+                        group,
+                        ratio,
+                        device: &device,
+                    },
+                )?;
             if !execute {
                 if json {
                     println!("{}", plan.as_json());
@@ -1722,16 +1739,18 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 }
             }
             let plan = ojon_backend::autoround::prepare_autoround_recipe_plan(
-                &model_dir,
-                &output_dir,
-                bits,
-                &device,
-                &python,
-                nsamples,
-                seqlen,
-                format.as_deref(),
-                iters,
-                dataset.as_deref(),
+                ojon_backend::autoround::AutoRoundRecipeRequest {
+                    model_dir: &model_dir,
+                    output_dir: &output_dir,
+                    bits,
+                    device_str: &device,
+                    python: &python,
+                    nsamples,
+                    seqlen,
+                    requested_format: format.as_deref(),
+                    iters,
+                    dataset: dataset.as_deref(),
+                },
             )?;
             if !execute {
                 if json {

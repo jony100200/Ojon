@@ -7,7 +7,9 @@ use crate::ppl::{measure as measure_perplexity, PplSettings};
 use crate::quant_parity::{
     task_parity, vision_score, vision_suite, QuantParityOptions, VisionSuite,
 };
-use crate::task_eval::{parse_eval_suite, prepare_eval_with_server, run_eval_reusing_baseline};
+use crate::task_eval::{
+    parse_eval_suite, prepare_eval_with_server, run_eval_reusing_baseline, EvalRequest,
+};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::OpenOptions;
@@ -218,17 +220,17 @@ pub fn run_existing_quant_comparison(
         ));
         let test = (|| {
             let v = vec![(label.clone(), path.clone())];
-            let prep = prepare_eval_with_server(
-                &plan.suite,
-                &plan.baseline,
-                &v,
-                &plan.options.eval_tool,
-                plan.options.server_tool.as_deref(),
-                plan.options.gpu_layers,
-                plan.options.device.as_deref(),
-                plan.options.tokens,
-                &evidence,
-            )?;
+            let prep = prepare_eval_with_server(EvalRequest {
+                suite: &plan.suite,
+                baseline: &plan.baseline,
+                candidates: &v,
+                tool: &plan.options.eval_tool,
+                server_tool: plan.options.server_tool.as_deref(),
+                gpu_layers: plan.options.gpu_layers,
+                device: plan.options.device.as_deref(),
+                tokens: plan.options.tokens,
+                report: &evidence,
+            })?;
             run_eval_reusing_baseline(&prep, baseline_tasks.as_ref(), |msg| log(msg))
         })();
         let scored = match test {

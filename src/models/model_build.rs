@@ -59,18 +59,31 @@ impl ModelBuildPlan {
     }
 }
 
+/// Inputs for [`prepare_model_build`].
+#[derive(Clone, Copy, Debug)]
+pub struct ModelBuildRequest<'a> {
+    pub source: &'a Path,
+    pub recipe: &'a Path,
+    pub output: &'a Path,
+    pub converter: &'a Path,
+    pub python: &'a Path,
+    pub quantizer: &'a Path,
+    pub precision: Precision,
+    pub threads: usize,
+}
 /// Folder must contain local HF model files and original safetensors. This
 /// preview does not mutate source, download weights, or start any subprocess.
-pub fn prepare_model_build(
-    source: &Path,
-    recipe: &Path,
-    output: &Path,
-    converter: &Path,
-    python: &Path,
-    quantizer: &Path,
-    precision: Precision,
-    threads: usize,
-) -> io::Result<ModelBuildPlan> {
+pub fn prepare_model_build(request: ModelBuildRequest<'_>) -> io::Result<ModelBuildPlan> {
+    let ModelBuildRequest {
+        source,
+        recipe,
+        output,
+        converter,
+        python,
+        quantizer,
+        precision,
+        threads,
+    } = request;
     if threads == 0 {
         return Err(invalid("threads must be positive"));
     }

@@ -186,16 +186,28 @@ pub(crate) fn normalized_direction(value: &Value, rows: usize) -> io::Result<Vec
     unit_direction(value, rows)
 }
 
+/// Byte location and shape of one float matrix inside a GGUF tensor payload.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MatrixRegion<'a> {
+    pub offset: u64,
+    pub rows: usize,
+    pub cols: usize,
+    pub dtype: &'a str,
+}
+
 pub(crate) fn apply_directional_matrix(
     file: &mut File,
-    offset: u64,
-    rows: usize,
-    cols: usize,
-    dtype: &str,
+    region: MatrixRegion<'_>,
     direction: &[f64],
     strength: f64,
     preserve_row_norms: bool,
 ) -> io::Result<()> {
+    let MatrixRegion {
+        offset,
+        rows,
+        cols,
+        dtype,
+    } = region;
     if direction.len() != rows
         || !strength.is_finite()
         || !(0.0..=1.0).contains(&strength)

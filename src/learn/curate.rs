@@ -570,55 +570,55 @@ mod tests {
 
     #[test]
     fn test_dual_buffer_partitioning() {
-        let mut episodes = Vec::new();
-
-        // Older session 1 (failed)
-        episodes.push(dummy_ep(
-            "ep-01",
-            "session-1",
-            EpisodeOutcome::FailedRetry,
-            100,
-            false,
-        ));
-        // Older session 2 (verified)
-        episodes.push(dummy_ep(
-            "ep-02",
-            "session-2",
-            EpisodeOutcome::VerifiedSuccess,
-            200,
-            false,
-        ));
-        // Recent session 3 (verified)
-        episodes.push(dummy_ep(
-            "ep-03",
-            "session-3",
-            EpisodeOutcome::VerifiedSuccess,
-            300,
-            false,
-        ));
-        // Recent session 4 (verified + failed retry)
-        episodes.push(dummy_ep(
-            "ep-04-fail",
-            "session-4",
-            EpisodeOutcome::FailedRetry,
-            400,
-            false,
-        ));
-        episodes.push(dummy_ep(
-            "ep-04-succ",
-            "session-4",
-            EpisodeOutcome::VerifiedSuccess,
-            401,
-            false,
-        ));
-        // Recent session 5 (verified)
-        episodes.push(dummy_ep(
-            "ep-05",
-            "session-5",
-            EpisodeOutcome::VerifiedSuccess,
-            500,
-            false,
-        ));
+        let episodes = vec![
+            // Older session 1 (failed)
+            dummy_ep(
+                "ep-01",
+                "session-1",
+                EpisodeOutcome::FailedRetry,
+                100,
+                false,
+            ),
+            // Older session 2 (verified)
+            dummy_ep(
+                "ep-02",
+                "session-2",
+                EpisodeOutcome::VerifiedSuccess,
+                200,
+                false,
+            ),
+            // Recent session 3 (verified)
+            dummy_ep(
+                "ep-03",
+                "session-3",
+                EpisodeOutcome::VerifiedSuccess,
+                300,
+                false,
+            ),
+            // Recent session 4 (verified + failed retry)
+            dummy_ep(
+                "ep-04-fail",
+                "session-4",
+                EpisodeOutcome::FailedRetry,
+                400,
+                false,
+            ),
+            dummy_ep(
+                "ep-04-succ",
+                "session-4",
+                EpisodeOutcome::VerifiedSuccess,
+                401,
+                false,
+            ),
+            // Recent session 5 (verified)
+            dummy_ep(
+                "ep-05",
+                "session-5",
+                EpisodeOutcome::VerifiedSuccess,
+                500,
+                false,
+            ),
+        ];
 
         let config = DualBufferConfig {
             anchor_ratio: 0.10,
@@ -648,21 +648,22 @@ mod tests {
 
     #[test]
     fn test_llamafactory_export() {
-        let mut episodes = Vec::new();
-        episodes.push(dummy_ep(
-            "ep-succ",
-            "session-dpo",
-            EpisodeOutcome::VerifiedSuccess,
-            10,
-            false,
-        ));
-        episodes.push(dummy_ep(
-            "ep-fail",
-            "session-dpo",
-            EpisodeOutcome::FailedRetry,
-            11,
-            false,
-        ));
+        let episodes = vec![
+            dummy_ep(
+                "ep-succ",
+                "session-dpo",
+                EpisodeOutcome::VerifiedSuccess,
+                10,
+                false,
+            ),
+            dummy_ep(
+                "ep-fail",
+                "session-dpo",
+                EpisodeOutcome::FailedRetry,
+                11,
+                false,
+            ),
+        ];
 
         let config = DualBufferConfig::default();
         let batch = partition_dual_buffer(&episodes, &config);

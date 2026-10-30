@@ -3,7 +3,7 @@
 //! no heuristic guess is described as observed activation sensitivity.
 use crate::gguf::{inspect_gguf, inspect_gguf_tensors, read_imatrix_energy};
 use crate::llama::{prepare_gguf, quantize_gguf_with_log, Precision};
-use crate::task_eval::{prepare_eval_with_server, run_eval_reusing_baseline};
+use crate::task_eval::{prepare_eval_with_server, run_eval_reusing_baseline, EvalRequest};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -533,21 +533,39 @@ pub fn sensitive_spine_pinning_recipe(tensors: &[crate::gguf::GgufTensor]) -> St
     extra
 }
 
-pub fn prepare_adaptive(
-    source: &Path,
-    scores: &Path,
-    output_dir: &Path,
-    suite: &Path,
-    quantizer: &Path,
-    eval_tool: &Path,
-    imatrix: Option<&Path>,
-    targets: &[f64],
-    threads: usize,
-    gpu_layers: i32,
-    device: Option<&str>,
-    tokens: u32,
-    max_absolute_loss_pct: f64,
-) -> io::Result<AdaptivePlan> {
+/// Inputs for [`prepare_adaptive`] and [`prepare_adaptive_against_reference`].
+#[derive(Clone, Copy, Debug)]
+pub struct AdaptiveRequest<'a> {
+    pub source: &'a Path,
+    pub scores: &'a Path,
+    pub output_dir: &'a Path,
+    pub suite: &'a Path,
+    pub quantizer: &'a Path,
+    pub eval_tool: &'a Path,
+    pub imatrix: Option<&'a Path>,
+    pub targets: &'a [f64],
+    pub threads: usize,
+    pub gpu_layers: i32,
+    pub device: Option<&'a str>,
+    pub tokens: u32,
+    pub max_absolute_loss_pct: f64,
+}
+pub fn prepare_adaptive(request: AdaptiveRequest<'_>) -> io::Result<AdaptivePlan> {
+    let AdaptiveRequest {
+        source,
+        scores,
+        output_dir,
+        suite,
+        quantizer,
+        eval_tool,
+        imatrix,
+        targets,
+        threads,
+        gpu_layers,
+        device,
+        tokens,
+        max_absolute_loss_pct,
+    } = request;
     let source = source.canonicalize()?;
     let scores_file = scores.canonicalize()?;
     let parsed = parse_tensor_sensitivity(&source, &scores_file)?;
@@ -627,37 +645,12 @@ pub fn prepare_adaptive(
 
 /// Guided searches use the existing quantized Q4 benchmark reference.
 pub fn prepare_adaptive_against_reference(
-    source: &Path,
+    request: AdaptiveRequest<'_>,
     reference: &Path,
-    scores: &Path,
-    output_dir: &Path,
-    suite: &Path,
-    quantizer: &Path,
-    eval_tool: &Path,
-    imatrix: Option<&Path>,
-    targets: &[f64],
-    threads: usize,
-    gpu_layers: i32,
-    device: Option<&str>,
-    tokens: u32,
-    max_absolute_loss_pct: f64,
 ) -> io::Result<AdaptivePlan> {
-    let mut plan = prepare_adaptive(
-        source,
-        scores,
-        output_dir,
-        suite,
-        quantizer,
-        eval_tool,
-        imatrix,
-        targets,
-        threads,
-        gpu_layers,
-        device,
-        tokens,
-        max_absolute_loss_pct,
-    )?;
-    let (_, matched, _) = crate::quant_parity::inspect_compatible_models(source, reference)?;
+    let mut plan = prepare_adaptive(request)?;
+    let (_, matched, _) =
+        crate::quant_parity::inspect_compatible_models(request.source, reference)?;
     plan.reference = matched;
     Ok(plan)
 }
@@ -821,17 +814,17 @@ pub fn run_adaptive(plan: &AdaptivePlan, mut log: impl FnMut(&str)) -> io::Resul
         } else {
             (|| {
                 let candidate = vec![(label.clone(), output.clone())];
-                let test = prepare_eval_with_server(
-                    &plan.suite,
-                    &plan.reference,
-                    &candidate,
-                    &plan.eval_tool,
-                    plan.server_tool.as_deref(),
-                    plan.gpu_layers,
-                    plan.device.as_deref(),
-                    plan.tokens,
-                    &evidence,
-                )?;
+                let test = prepare_eval_with_server(EvalRequest {
+                    suite: &plan.suite,
+                    baseline: &plan.reference,
+                    candidates: &candidate,
+                    tool: &plan.eval_tool,
+                    server_tool: plan.server_tool.as_deref(),
+                    gpu_layers: plan.gpu_layers,
+                    device: plan.device.as_deref(),
+                    tokens: plan.tokens,
+                    report: &evidence,
+                })?;
                 run_eval_reusing_baseline(&test, baseline_tasks.as_ref(), |line| log(line))
             })()
         };
@@ -937,7 +930,7 @@ mod tests {
         assert_eq!(strats.len(), 3);
         for s in strats {
             let bpw = s["estimated_measured_tensor_bpw"].as_f64().unwrap();
-            assert!(bpw <= 4.0 + 1e-6 && bpw >= 2.5625);
+            assert!((2.5625..=4.0 + 1e-6).contains(&bpw));
         }
     }
     #[test]

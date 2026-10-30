@@ -9,7 +9,9 @@
 use crate::gguf::{inspect_gguf, inspect_gguf_tensors};
 use crate::llama::{prepare_gguf, quantize_gguf_with_log, Precision};
 use crate::ppl::{measure as measure_perplexity, PplSettings};
-use crate::task_eval::{parse_eval_suite, prepare_eval_with_server, run_eval_reusing_baseline};
+use crate::task_eval::{
+    parse_eval_suite, prepare_eval_with_server, run_eval_reusing_baseline, EvalRequest,
+};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -711,17 +713,17 @@ pub fn run_quant_parity(plan: &QuantParityPlan, mut log: impl FnMut(&str)) -> io
         } else {
             let results = (|| {
                 let candidates = vec![(format!("smaller_{ordinal}"), output.clone())];
-                let eval = prepare_eval_with_server(
-                    &plan.suite,
-                    &plan.baseline,
-                    &candidates,
-                    &plan.options.eval_tool,
-                    plan.options.server_tool.as_deref(),
-                    plan.options.gpu_layers,
-                    plan.options.device.as_deref(),
-                    plan.options.tokens,
-                    &evidence,
-                )?;
+                let eval = prepare_eval_with_server(EvalRequest {
+                    suite: &plan.suite,
+                    baseline: &plan.baseline,
+                    candidates: &candidates,
+                    tool: &plan.options.eval_tool,
+                    server_tool: plan.options.server_tool.as_deref(),
+                    gpu_layers: plan.options.gpu_layers,
+                    device: plan.options.device.as_deref(),
+                    tokens: plan.options.tokens,
+                    report: &evidence,
+                })?;
                 run_eval_reusing_baseline(&eval, baseline_tasks.as_ref(), |line| log(line))
             })();
             match results {

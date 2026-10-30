@@ -99,8 +99,8 @@ pub fn parse_eval_suite(path: &Path) -> io::Result<EvalSuite> {
 }
 
 /// Read-only suite preflight shared by humans and agent orchestrators.
-//// Schema validity is intentionally NOT an assertion that the data is held out,
-//// representative, independent of calibration, or sufficient to judge writing.
+/// Schema validity is intentionally NOT an assertion that the data is held out,
+/// representative, independent of calibration, or sufficient to judge writing.
 pub fn inspect_task_suite(path: &Path) -> io::Result<Value> {
     let suite = parse_eval_suite(path)?;
     let count = |category: &str| {
@@ -184,31 +184,38 @@ fn checked_model(path: &Path) -> io::Result<PathBuf> {
     }
     Ok(path)
 }
-pub fn prepare_eval(
-    suite: &Path,
-    baseline: &Path,
-    candidates: &[(String, PathBuf)],
-    tool: &Path,
-    gpu_layers: i32,
-    device: Option<&str>,
-    tokens: u32,
-    report: &Path,
-) -> io::Result<EvalPlan> {
-    prepare_eval_with_server(
-        suite, baseline, candidates, tool, None, gpu_layers, device, tokens, report,
-    )
+/// Inputs for [`prepare_eval`] and [`prepare_eval_with_server`].
+#[derive(Clone, Copy, Debug)]
+pub struct EvalRequest<'a> {
+    pub suite: &'a Path,
+    pub baseline: &'a Path,
+    pub candidates: &'a [(String, PathBuf)],
+    pub tool: &'a Path,
+    /// Optional persistent llama-server executable; `None` runs llama-cli per task.
+    pub server_tool: Option<&'a Path>,
+    pub gpu_layers: i32,
+    pub device: Option<&'a str>,
+    pub tokens: u32,
+    pub report: &'a Path,
 }
-pub fn prepare_eval_with_server(
-    suite: &Path,
-    baseline: &Path,
-    candidates: &[(String, PathBuf)],
-    tool: &Path,
-    server_tool: Option<&Path>,
-    gpu_layers: i32,
-    device: Option<&str>,
-    tokens: u32,
-    report: &Path,
-) -> io::Result<EvalPlan> {
+pub fn prepare_eval(request: EvalRequest<'_>) -> io::Result<EvalPlan> {
+    prepare_eval_with_server(EvalRequest {
+        server_tool: None,
+        ..request
+    })
+}
+pub fn prepare_eval_with_server(request: EvalRequest<'_>) -> io::Result<EvalPlan> {
+    let EvalRequest {
+        suite,
+        baseline,
+        candidates,
+        tool,
+        server_tool,
+        gpu_layers,
+        device,
+        tokens,
+        report,
+    } = request;
     let suite = parse_eval_suite(suite)?;
     if candidates.is_empty() || candidates.len() > 12 {
         return Err(invalid("require 1..=12 candidates"));

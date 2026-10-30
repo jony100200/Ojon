@@ -668,27 +668,6 @@ pub fn bundled_data_file(name: &str) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
-#[cfg(test)]
-mod capability_tests {
-    use super::*;
-    #[test]
-    fn quantizer_only_accepts_advertised_format_table() {
-        let output="usage: llama-quantize\n  11 or Q3_K_M : mixed\n  13 or Q3_K_L : mixed\n  30 or IQ4_XS : mixed\n Q3_K_S mentioned in a random message";
-        assert_eq!(
-            quantizer_formats_from_help(output),
-            vec!["Q3_K_M", "Q3_K_L", "IQ4_XS"]
-        );
-    }
-    #[test]
-    fn device_list_does_not_infer_vendor_from_prose() {
-        let list="Available devices:\n CUDA0: NVIDIA GPU\n SYCL0: Intel Arc GPU\n Vulkan2: adapter\n CUDA0: same again\n Please try CUDA1 in a sample\n";
-        assert_eq!(
-            runtime_devices_from_list(list),
-            vec!["CUDA0", "SYCL0", "Vulkan2"]
-        );
-    }
-}
-
 /// Open the publisher's trusted website, only following an explicit user action.
 /// Never forms a URL from a model name, file path or untrusted model metadata.
 pub fn open_official_download_page(id: BackendId) -> std::io::Result<()> {
@@ -720,4 +699,25 @@ pub fn open_official_download_page(id: BackendId) -> std::io::Result<()> {
     // Browser helpers may launch in a separate process; successful spawn is not a download.
     drop(status);
     Ok(())
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+    #[test]
+    fn quantizer_only_accepts_advertised_format_table() {
+        let output="usage: llama-quantize\n  11 or Q3_K_M : mixed\n  13 or Q3_K_L : mixed\n  30 or IQ4_XS : mixed\n Q3_K_S mentioned in a random message";
+        assert_eq!(
+            quantizer_formats_from_help(output),
+            vec!["Q3_K_M", "Q3_K_L", "IQ4_XS"]
+        );
+    }
+    #[test]
+    fn device_list_does_not_infer_vendor_from_prose() {
+        let list="Available devices:\n CUDA0: NVIDIA GPU\n SYCL0: Intel Arc GPU\n Vulkan2: adapter\n CUDA0: same again\n Please try CUDA1 in a sample\n";
+        assert_eq!(
+            runtime_devices_from_list(list),
+            vec!["CUDA0", "SYCL0", "Vulkan2"]
+        );
+    }
 }

@@ -39,12 +39,14 @@ pub use eval::{
 pub use knowledge::{
     apply_supersession, compute_content_hash, create_knowledge_item, extract_clean_text,
     fetch_online_knowledge_url, load_knowledge_store, sanitize_untrusted_knowledge,
-    save_knowledge_store, sha256_bytes, sha256_hex, KnowledgeItem, KnowledgeSourceKind,
+    save_knowledge_store, sha256_bytes, sha256_hex, KnowledgeItem, KnowledgeItemInput,
+    KnowledgeSourceKind,
 };
 pub use packages::{
     create_knowledge_pack, create_model_release, create_skill_pack, hash_file_contents,
     install_package, install_package_for_model, list_active_packages, rollback_package,
-    verify_package_integrity, InstallReceipt, PackageKind, PackageManifest, RollbackReceipt,
+    verify_package_integrity, InstallReceipt, PackageKind, PackageManifest, PackageMeta,
+    RollbackReceipt,
 };
 pub use registry::{
     get_dataset_by_id, import_and_sanitize_jsonl, list_curated_datasets, DatasetCatalogEntry,
