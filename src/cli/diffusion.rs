@@ -286,6 +286,9 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let mut python = PathBuf::from("python");
             let mut min_psnr: Option<String> = None;
             let mut pixel_tolerance: Option<String> = None;
+            let mut kind: Option<String> = None;
+            let mut ffmpeg: Option<PathBuf> = None;
+            let mut max_temporal_delta: Option<String> = None;
             let mut timeout: Option<u32> = None;
             let mut confirmed = false;
             let utf8 = |v: std::ffi::OsString, what: &str| -> io::Result<String> {
@@ -304,6 +307,19 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                         let v = utf8(next_argument(&mut args, "minimum PSNR dB")?, "min-psnr")?;
                         v.parse::<f64>().map_err(|_| invalid("min-psnr must be a number"))?;
                         min_psnr = Some(v);
+                    }
+                    Some("--kind") => {
+                        let v = utf8(next_argument(&mut args, "image|video")?, "kind")?;
+                        if v != "image" && v != "video" {
+                            return Err(invalid("kind must be image or video"));
+                        }
+                        kind = Some(v);
+                    }
+                    Some("--ffmpeg") => ffmpeg = Some(PathBuf::from(next_argument(&mut args, "ffmpeg executable")?)),
+                    Some("--max-temporal-delta") => {
+                        let v = utf8(next_argument(&mut args, "max temporal delta")?, "max-temporal-delta")?;
+                        v.parse::<f64>().map_err(|_| invalid("max-temporal-delta must be a number"))?;
+                        max_temporal_delta = Some(v);
                     }
                     Some("--pixel-tolerance") => {
                         let v = utf8(next_argument(&mut args, "pixel tolerance")?, "pixel-tolerance")?;
@@ -356,6 +372,15 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             }
             if let Some(v) = pixel_tolerance {
                 command.arg("--pixel-tolerance").arg(v);
+            }
+            if let Some(v) = kind {
+                command.arg("--kind").arg(v);
+            }
+            if let Some(v) = ffmpeg {
+                command.arg("--ffmpeg").arg(v);
+            }
+            if let Some(v) = max_temporal_delta {
+                command.arg("--max-temporal-delta").arg(v);
             }
             if let Some(v) = timeout {
                 command.arg("--timeout").arg(v.to_string());

@@ -83,7 +83,7 @@ No embedding, reranker, ONNX, detection or segmentation command.
 
 ## Ranked next tasks (user value / effort)
 
-1. **Probe classification + usage hygiene.** Check Speech/Embedding before
+1. **DONE 2026-10-30. Probe classification + usage hygiene.** Check Speech/Embedding before
    Diffusion or match `dit` as a token; add `clip` to the VLM list; add `bert`,
    `xlm-roberta`, `*Embedding*`, `*Reranker*` hints; probe GGML `.bin` headers;
    list the ten missing commands in usage; fix the README link.
@@ -94,7 +94,7 @@ No embedding, reranker, ONNX, detection or segmentation command.
    convert to q8_0, q5_0, q4_K, q4_0, q3_K; run the parity script over N prompts
    x M seeds; one receipt names the smallest format that passes `--min-psnr`, or
    none. Optional `sd-cli --tensor-type-rules` for sensitive blocks.
-3. **Embedding / reranker gate.** `embed-parity-plan|run`: `quantize-hf` then
+3. **DONE 2026-10-30 (`embed-parity-plan|run`). Embedding / reranker gate.** `embed-parity-plan|run`: `quantize-hf` then
    `llama-embedding` on reference and candidate over a held-out set; min and
    mean cosine, top-k overlap, Recall@k; reranker mode on NDCG@10. Needs
    `BackendId::LlamaEmbedding` and better embedding classification.
@@ -105,7 +105,7 @@ No embedding, reranker, ONNX, detection or segmentation command.
 5. **whisper.cpp quantize + WER gate.** `whisper-quant-run` (q8_0, q5_0, q4_0)
    and `whisper-parity-run` (held-out clips, WER vs reference transcripts and vs
    the original model, `--max-wer-delta`).
-6. **Video temporal parity.** ffmpeg frame extraction in the parity script,
+6. **DONE 2026-10-30 (`diffusion-parity --kind video`). Video temporal parity.** ffmpeg frame extraction in the parity script,
    per-frame PSNR (min, mean) plus a temporal-consistency delta;
    `diffusion-parity --kind video`.
 7. (deferred) ONNX/OpenVINO utility routes beyond text generation, with cosine

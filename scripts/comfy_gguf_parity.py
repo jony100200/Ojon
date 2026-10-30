@@ -13,9 +13,12 @@ What is measured (per output image, then averaged):
   * mean absolute pixel difference (0..255).
   * fraction of pixels whose max channel difference exceeds --pixel-tolerance.
 
-Gate: --min-psnr (default 30 dB). A video workflow must export PNG frames in
-the same run (a SaveImage node on the decoded frames); GIF/MP4 are refused
-rather than guessed at.
+Gate: --min-psnr (default 30 dB) on the worst image or frame. With --kind video,
+MP4/WebM/GIF outputs are decoded to frames with ffmpeg (every decoded frame once,
+so frame N lines up across the two runs) and a temporal-consistency delta is
+reported: the mean absolute difference between the reference's and the
+candidate's frame-to-frame motion. Flicker and blur show up there even when
+single-frame PSNR looks fine; --max-temporal-delta gates it.
 
 PNG decoding is done here with the standard library only (zlib + the five PNG
 filters), for 8-bit RGB/RGBA/grey non-interlaced images, which is what ComfyUI's
@@ -25,8 +28,11 @@ import argparse
 import copy
 import json
 import math
+import shutil
 import struct
+import subprocess
 import sys
+import tempfile
 import time
 import uuid
 import zlib
@@ -235,35 +241,111 @@ def run_once(server, workflow, timeout_s):
     fail("ComfyUI did not finish within the timeout")
 
 
-def fetch_pngs(server, outputs):
+VIDEO_EXTENSIONS = (".mp4", ".webm", ".mkv", ".mov", ".gif")
+
+
+def extract_frames(media_bytes, suffix, ffmpeg):
+    """Decode a video container to PNG frames with ffmpeg. Returns [(name, png_bytes)].
+
+    `-vsync 0` keeps every decoded frame once (no duplication to a constant
+    rate), so frame N of the reference lines up with frame N of the candidate
+    when both came from the same workflow.
+    """
+    if not ffmpeg:
+        raise ValueError("video output needs ffmpeg; pass --ffmpeg or put it on PATH")
+    with tempfile.TemporaryDirectory(prefix="ojon-frames-") as tmp:
+        src = Path(tmp) / ("clip" + suffix)
+        src.write_bytes(media_bytes)
+        pattern = str(Path(tmp) / "frame_%05d.png")
+        proc = subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-i", str(src), "-vsync", "0", "-f", "image2", pattern],
+                              capture_output=True, text=True, timeout=600)
+        if proc.returncode != 0:
+            raise ValueError(f"ffmpeg failed to decode {suffix}: {proc.stderr.strip()[:400]}")
+        frames = sorted(Path(tmp).glob("frame_*.png"))
+        if not frames:
+            raise ValueError("ffmpeg produced no frames")
+        return [(f.name, f.read_bytes()) for f in frames]
+
+
+def fetch_media(server, outputs, kind, ffmpeg=None):
+    """PNG outputs for images; for video, PNG frames (SaveImage) or decoded containers."""
     images = []
+    categories = ("images",) if kind == "image" else ("images", "gifs", "videos")
     for node_output in outputs.values():
-        for item in node_output.get("images", []) if isinstance(node_output, dict) else []:
-            name = item.get("filename", "")
-            if not name.lower().endswith(".png"):
-                continue
-            params = urlencode({"filename": name, "subfolder": item.get("subfolder", ""), "type": item.get("type", "output")})
-            with urlopen(server + "/view?" + params, timeout=60) as response:
-                images.append((name, response.read()))
+        if not isinstance(node_output, dict):
+            continue
+        for category in categories:
+            for item in node_output.get(category, []):
+                name = item.get("filename", "")
+                lower = name.lower()
+                is_png = lower.endswith(".png")
+                is_video = lower.endswith(VIDEO_EXTENSIONS)
+                if not (is_png or (kind == "video" and is_video)):
+                    continue
+                params = urlencode({"filename": name, "subfolder": item.get("subfolder", ""), "type": item.get("type", "output")})
+                with urlopen(server + "/view?" + params, timeout=120) as response:
+                    data = response.read()
+                if is_png:
+                    images.append((name, data))
+                else:
+                    suffix = Path(name).suffix.lower()
+                    images.extend((f"{name}#{fname}", fb) for fname, fb in extract_frames(data, suffix, ffmpeg))
     if not images:
-        fail("no PNG outputs; a video workflow must export PNG frames (SaveImage) for parity")
+        if kind == "video":
+            fail("no video or PNG-frame outputs found in the workflow result")
+        fail("no PNG outputs; a video workflow must use --kind video or export PNG frames")
     images.sort(key=lambda x: x[0])
     return images
 
 
-def parity(reference_pngs, candidate_pngs, pixel_tolerance):
+def fetch_pngs(server, outputs):
+    return fetch_media(server, outputs, "image")
+
+
+def temporal_profile(frames_rgb, width, height):
+    """Mean absolute pixel change between consecutive frames: the motion signature."""
+    n = width * height * 3
+    out = []
+    for a, b in zip(frames_rgb, frames_rgb[1:]):
+        out.append(sum(abs(x - y) for x, y in zip(a, b)) / n)
+    return out
+
+
+def temporal_delta(ref_profile, cand_profile):
+    """How differently the candidate moves: mean |ref change - cand change| per step.
+
+    A quant that blurs or flickers shows up here even when single-frame PSNR
+    looks acceptable: flicker raises the candidate's change where the reference
+    is still, blur lowers it where the reference moves.
+    """
+    if len(ref_profile) != len(cand_profile) or not ref_profile:
+        return None
+    return sum(abs(r - c) for r, c in zip(ref_profile, cand_profile)) / len(ref_profile)
+
+
+def parity(reference_pngs, candidate_pngs, pixel_tolerance, temporal=False):
     if len(reference_pngs) != len(candidate_pngs):
         raise ValueError(f"reference produced {len(reference_pngs)} PNGs, candidate {len(candidate_pngs)}")
     per_image = []
+    ref_frames, cand_frames = [], []
+    size = None
     for (rn, rb), (cn, cb) in zip(reference_pngs, candidate_pngs):
         w, h, ch, px = decode_png(rb)
         w2, h2, ch2, px2 = decode_png(cb)
         if (w, h) != (w2, h2):
             raise ValueError(f"{rn} vs {cn}: size mismatch")
-        m = compare_rgb(to_rgb(w, h, ch, px), to_rgb(w2, h2, ch2, px2), w, h, pixel_tolerance)
+        r_rgb, c_rgb = to_rgb(w, h, ch, px), to_rgb(w2, h2, ch2, px2)
+        m = compare_rgb(r_rgb, c_rgb, w, h, pixel_tolerance)
         m["reference"] = rn
         m["candidate"] = cn
         per_image.append(m)
+        if temporal:
+            if size is None:
+                size = (w, h)
+            elif size != (w, h):
+                raise ValueError("frames change size within the clip")
+            ref_frames.append(r_rgb)
+            cand_frames.append(c_rgb)
     finite = [m["psnr_db"] for m in per_image if math.isfinite(m["psnr_db"])]
     summary = {
         "images": len(per_image),
@@ -272,6 +354,13 @@ def parity(reference_pngs, candidate_pngs, pixel_tolerance):
         "mean_abs_diff": sum(m["mean_abs_diff"] for m in per_image) / len(per_image),
         "max_pixels_over_tolerance_frac": max(m["pixels_over_tolerance_frac"] for m in per_image),
     }
+    if temporal and size is not None:
+        rp = temporal_profile(ref_frames, *size)
+        cp = temporal_profile(cand_frames, *size)
+        summary["frames"] = len(ref_frames)
+        summary["temporal_delta"] = temporal_delta(rp, cp)
+        summary["reference_mean_motion"] = (sum(rp) / len(rp)) if rp else 0.0
+        summary["candidate_mean_motion"] = (sum(cp) / len(cp)) if cp else 0.0
     return summary, per_image
 
 
@@ -290,11 +379,19 @@ def run(args):
         fail(str(e))
     reference_outputs = run_once(server, patch_model(workflow, node_id, args.reference_name), args.timeout)
     candidate_outputs = run_once(server, patch_model(workflow, node_id, args.candidate_name), args.timeout)
+    ffmpeg = args.ffmpeg or shutil.which("ffmpeg")
     try:
-        summary, per_image = parity(fetch_pngs(server, reference_outputs), fetch_pngs(server, candidate_outputs), args.pixel_tolerance)
+        ref_media = fetch_media(server, reference_outputs, args.kind, ffmpeg)
+        cand_media = fetch_media(server, candidate_outputs, args.kind, ffmpeg)
+        summary, per_image = parity(ref_media, cand_media, args.pixel_tolerance, temporal=(args.kind == "video"))
     except ValueError as e:
         fail(str(e))
     passed = summary["min_psnr_db"] >= args.min_psnr
+    temporal_ok = None
+    if args.kind == "video" and args.max_temporal_delta is not None:
+        td = summary.get("temporal_delta")
+        temporal_ok = td is not None and td <= args.max_temporal_delta
+        passed = passed and temporal_ok
     receipt = {
         "schema": "ojon.diffusion_parity.v1",
         "ok": True,
@@ -305,12 +402,18 @@ def run(args):
         "reference_name": args.reference_name,
         "candidate_name": args.candidate_name,
         "seeds": [{"node": k, "seed": v} for k, v in seeds],
+        "kind": args.kind,
         "min_psnr_required_db": args.min_psnr,
+        "max_temporal_delta": args.max_temporal_delta,
+        "temporal_within_gate": temporal_ok,
+        "ffmpeg": ffmpeg if args.kind == "video" else None,
         "pixel_tolerance": args.pixel_tolerance,
         "summary": {k: ("inf" if isinstance(v, float) and math.isinf(v) else v) for k, v in summary.items()},
         "per_image": [{k: ("inf" if isinstance(v, float) and math.isinf(v) else v) for k, v in m.items()} for m in per_image],
-        "claim": ("pixel parity within the PSNR gate on this workflow and seed; not a statement about other prompts or seeds"
-                  if passed else "rejected: candidate output diverges from the reference beyond the PSNR gate"),
+        "claim": (("frame parity within the PSNR gate" + (" and the temporal-delta gate" if temporal_ok is not None else "")
+                   + " on this workflow and seed; not a statement about other prompts or seeds") if args.kind == "video" and passed
+                  else "pixel parity within the PSNR gate on this workflow and seed; not a statement about other prompts or seeds" if passed
+                  else "rejected: candidate output diverges from the reference beyond the gate"),
     }
     if args.receipt:
         args.receipt.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
@@ -325,7 +428,12 @@ def main():
     parser.add_argument("--candidate-name", required=True, help="candidate quantized GGUF filename as listed by the loader node")
     parser.add_argument("--node-id", help="model loader node ID if the workflow has several")
     parser.add_argument("--server", default="http://127.0.0.1:8188")
-    parser.add_argument("--min-psnr", type=float, default=30.0, help="gate on the worst image, dB")
+    parser.add_argument("--kind", choices=("image", "video"), default="image",
+                        help="video: decode MP4/WebM/GIF outputs to frames with ffmpeg and add a temporal-consistency delta")
+    parser.add_argument("--ffmpeg", help="ffmpeg executable for --kind video (default: PATH)")
+    parser.add_argument("--max-temporal-delta", type=float,
+                        help="video gate: mean |reference motion - candidate motion| per frame step, 0..255 scale")
+    parser.add_argument("--min-psnr", type=float, default=30.0, help="gate on the worst image or frame, dB")
     parser.add_argument("--pixel-tolerance", type=int, default=8, help="per-pixel max channel difference counted as 'over'")
     parser.add_argument("--timeout", type=float, default=1800.0, help="seconds per generation")
     parser.add_argument("--receipt", type=Path, help="write the JSON receipt here as well")

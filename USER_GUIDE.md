@@ -261,10 +261,12 @@ ojon diffusion-parity --workflow flux_api.json --reference-name flux-dev-F16.ggu
 The receipt (`ojon.diffusion_parity.v1`) reports PSNR, mean absolute pixel
 difference and the fraction of pixels over `--pixel-tolerance` per image, and
 `passed` against `--min-psnr` on the worst image. The workflow must carry an
-explicit integer seed on every sampler; a video workflow must export PNG frames
-(SaveImage on the decoded frames), GIF/MP4 outputs are refused rather than
-guessed at. A pass is a statement about this workflow and seed, not about every
-prompt.
+explicit integer seed on every sampler. For video, `--kind video` decodes
+MP4/WebM/GIF outputs to frames with ffmpeg and adds a temporal-consistency
+delta (mean |reference motion - candidate motion| per frame step); flicker and
+blur show up there even when single-frame PSNR looks fine, and
+`--max-temporal-delta` gates it. A pass is a statement about this workflow and
+seed, not about every prompt.
 
 ## Embedding and reranker parity
 

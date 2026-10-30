@@ -92,6 +92,40 @@ class Metrics(unittest.TestCase):
             parity.parity(ref, [("b.png", encode_png(5, 6, gradient(5, 6)))], 8)
 
 
+class Temporal(unittest.TestCase):
+    def test_profile_and_delta_detect_flicker_and_blur(self):
+        w, h = 4, 4
+        still = bytes([100] * (w * h * 3))
+        moved = bytes([110] * (w * h * 3))
+        ref = [still, moved, still]           # reference moves then returns
+        cand_same = [still, moved, still]
+        cand_flicker = [still, still, moved]  # same frames, different timing
+        rp = parity.temporal_profile(ref, w, h)
+        self.assertEqual(rp, [10.0, 10.0])
+        self.assertEqual(parity.temporal_delta(rp, parity.temporal_profile(cand_same, w, h)), 0.0)
+        self.assertGreater(parity.temporal_delta(rp, parity.temporal_profile(cand_flicker, w, h)), 0.0)
+        self.assertIsNone(parity.temporal_delta(rp, [1.0]))
+
+    def test_parity_video_mode_adds_temporal_summary(self):
+        px_a, px_b = gradient(6, 6), bytes((v + 3) & 255 for v in gradient(6, 6))
+        ref = [("f1.png", encode_png(6, 6, px_a)), ("f2.png", encode_png(6, 6, px_b))]
+        summary, per = parity.parity(ref, ref, 8, temporal=True)
+        self.assertEqual(summary["frames"], 2)
+        self.assertEqual(summary["temporal_delta"], 0.0)
+        self.assertGreater(summary["reference_mean_motion"], 0.0)
+        summary_img, _ = parity.parity(ref, ref, 8)
+        self.assertNotIn("temporal_delta", summary_img)
+
+    def test_extract_frames_requires_ffmpeg_and_rejects_garbage(self):
+        with self.assertRaises(ValueError):
+            parity.extract_frames(b"not a video", ".mp4", None)
+        import shutil as _sh
+        ff = _sh.which("ffmpeg")
+        if ff:
+            with self.assertRaises(ValueError):
+                parity.extract_frames(b"not a video", ".mp4", ff)
+
+
 class WorkflowChecks(unittest.TestCase):
     def test_fixed_seed_required(self):
         wf = {"3": {"class_type": "KSampler", "inputs": {"seed": 42, "steps": 20}},
