@@ -251,6 +251,47 @@ explicit integer seed on every sampler; a video workflow must export PNG frames
 guessed at. A pass is a statement about this workflow and seed, not about every
 prompt.
 
+## Embedding and reranker parity
+
+Perplexity and KL divergence say little about an embedding model: its output is
+a vector, not a next-token distribution. `embed-parity-*` compares the vectors
+instead. Both the reference and the candidate GGUF embed the same held-out
+lines through the public `llama-embedding` tool, and Ojon measures how far the
+candidate's vectors and rankings drift from the reference's.
+
+```sh
+# Plan only: validates the files and prints the exact llama-embedding commands; writes nothing
+ojon embed-parity-plan bge-m3-F16.gguf bge-m3-Q5_K_M.gguf ./embed-out --texts heldout.txt
+
+# Execute, with a retrieval split and a reranker variant
+ojon embed-parity-run bge-m3-F16.gguf bge-m3-Q5_K_M.gguf ./embed-out --texts heldout.txt      --queries queries.txt --documents docs.txt --min-cosine 0.99 --min-recall 0.95 --confirm
+ojon embed-parity-run reranker-F16.gguf reranker-Q6_K.gguf ./rerank-out --pooling rank      --queries queries.txt --documents docs.txt --min-ndcg 0.95 --confirm
+```
+
+Inputs are one text per line (`--texts` 8..=4096 lines; `--queries` and
+`--documents` optional, both or neither). `--pooling` is `mean` by default
+(`last`, `cls` or `rank` as the model requires); `--ngl N` / `--ngl auto`,
+`--ctx` and `--batch` are passed through to the tool.
+
+The receipt (`ojon.embed_parity.v1`) reports, with the exact commands:
+
+- per-text cosine between reference and candidate vectors: min, mean, p05;
+- top-k neighbour overlap (`--top-k`, default 5): for every text, the share of
+  its k nearest other texts under the reference that are also its k nearest
+  under the candidate;
+- with queries and documents: Recall@k and NDCG@10 of the candidate's
+  query-to-document ranking against the reference's ranking;
+- `--pooling rank`: the tool scores every query/document pair; Recall@k and
+  NDCG@10 come from those score matrices, and the cosine is taken per query
+  over its vector of document scores.
+
+The gate is `--min-cosine` (default 0.99) on the **minimum** per-text cosine,
+plus `--min-recall` / `--min-ndcg` when given. A pass means the candidate
+reproduces the reference's geometry on this set. It is a similarity
+measurement between two models, not a retrieval or reranking benchmark: there
+are no relevance labels, the reference's ranking stands in for them, and a
+candidate can agree with a reference that is itself poor at the task.
+
 ## Native image/video model weight compression (experimental)
 
 Ojon ships its **own Rust quantizer** for eligible 2D weight matrices in original F16, BF16 or F32 safetensors checkpoints. It uses bounded-memory per-group affine uniform quantization (2/3/4-bit); unrecognized and sensitive tensors are preserved without modification. There is no dependency on RebelUI, PyTorch or GPU drivers for this converter.
