@@ -404,13 +404,9 @@ pub fn block_pattern(class: TensorClass, blocks: &[u32]) -> Option<String> {
     let alt = blocks.iter().map(u32::to_string).collect::<Vec<_>>().join("|");
     let pat = class.pattern();
     let prefix = format!("^blk{0}.({alt}){0}.", BS_LIT);
-    if let Some(rest) = pat.strip_prefix(BLK_ANY) {
-        Some(format!("{prefix}{rest}"))
-    } else if let Some(rest) = pat.strip_prefix(DOT) {
-        Some(format!("{prefix}{rest}"))
-    } else {
-        None
-    }
+    pat.strip_prefix(BLK_ANY)
+        .or_else(|| pat.strip_prefix(DOT))
+        .map(|rest| format!("{prefix}{rest}"))
 }
 
 /// Lines that pin `blocks` of every lowered class back to `base`. They must come
