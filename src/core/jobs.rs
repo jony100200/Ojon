@@ -66,7 +66,7 @@ fn peak_process_ram(child: &Child) -> Option<u64> {
     };
     let size = value.cb;
     let success =
-        unsafe { GetProcessMemoryInfo(child.as_raw_handle() as *mut c_void, &mut value, size) };
+        unsafe { GetProcessMemoryInfo(child.as_raw_handle(), &mut value, size) };
     if success == 0 {
         None
     } else {

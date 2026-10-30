@@ -1300,8 +1300,8 @@ pub fn assemble_flint_hybrid_gguf(
     ));
 
     // Open unique source files and build tensor offset/length catalogs
-    let mut unique_sources: HashMap<PathBuf, (File, u64, HashMap<String, (u32, u64, u64)>)> =
-        HashMap::new();
+    type SourceCatalog = (File, u64, HashMap<String, (u32, u64, u64)>);
+    let mut unique_sources: HashMap<PathBuf, SourceCatalog> = HashMap::new();
 
     // Always include template file
     {

@@ -332,8 +332,7 @@ pub fn allocate_bits_with_strategy(
                     let floor = if target >= 3.8 { min_lvl } else { 0 };
                     let mut best_l = floor;
                     let mut best_obj = f64::INFINITY;
-                    for l in floor..BPW.len() {
-                        let b = BPW[l];
+                    for (l, &b) in BPW.iter().enumerate().skip(floor) {
                         let obj = omega * (-2.0 * std::f64::consts::LN_2 * b).exp() + mid * b;
                         if obj < best_obj {
                             best_obj = obj;
@@ -355,8 +354,7 @@ pub fn allocate_bits_with_strategy(
                 let floor = if target >= 3.8 { min_lvl } else { 0 };
                 let mut best_l = floor;
                 let mut best_obj = f64::INFINITY;
-                for l in floor..BPW.len() {
-                    let b = BPW[l];
+                for (l, &b) in BPW.iter().enumerate().skip(floor) {
                     let obj = omega * (-2.0 * std::f64::consts::LN_2 * b).exp() + hi * b;
                     if obj < best_obj {
                         best_obj = obj;

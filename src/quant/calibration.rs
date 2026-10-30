@@ -97,7 +97,7 @@ pub fn prepare_imatrix(
     if std::str::from_utf8(&sample[..n]).is_err() && n < 4096 {
         return Err(invalid("calibration must be UTF-8 text"));
     }
-    if sample[..n].iter().any(|b| *b == 0) {
+    if sample[..n].contains(&0) {
         return Err(invalid("calibration contains binary NUL bytes"));
     }
     if output.extension().and_then(|s| s.to_str()) != Some("gguf") {

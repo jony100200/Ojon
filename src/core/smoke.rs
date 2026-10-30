@@ -148,14 +148,11 @@ pub fn smoke_gguf_capture_with_device(
     let result = crate::jobs::capture_with_timeout(&mut cmd, 128 * 1024, Duration::from_secs(600))?;
     let stderr = String::from_utf8_lossy(&result.stderr);
     if !result.status.success() {
-        return Err(io::Error::new(
-            ErrorKind::Other,
-            format!(
-                "llama-cli exited with {}: {}",
-                result.status,
-                stderr.chars().take(1000).collect::<String>()
-            ),
-        ));
+        return Err(io::Error::other(format!(
+            "llama-cli exited with {}: {}",
+            result.status,
+            stderr.chars().take(1000).collect::<String>()
+        )));
     }
     Ok(SmokeCapture {
         stdout: String::from_utf8_lossy(&result.stdout)

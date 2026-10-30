@@ -898,8 +898,8 @@ mod tests {
             assert!(err.is_finite());
             let mut buf = vec![0; (values.len() * bits as usize).div_ceil(8)];
             pack_codes(&codes, bits, &mut buf);
-            for i in 0..4 {
-                assert_eq!(codes[i], unpack_code(&buf, bits, i));
+            for (i, &code) in codes.iter().enumerate().take(4) {
+                assert_eq!(code, unpack_code(&buf, bits, i));
             }
         }
     }
