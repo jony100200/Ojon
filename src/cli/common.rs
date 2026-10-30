@@ -19,9 +19,11 @@ Commands:
   ojon flint-inspect <model.gguf|dir> [--json]   Inspect Flint MoE 256-expert topology
   ojon flint-pipeline-plan <model.gguf|dir> [--json]   Plan multi-stage RoCo quantization and hardware fit
   ojon flint-evaluate <candidate.pending> [--reference-logits <path>] [--tool <perplexity>] [--gpu-layers N] [--json]
+  ojon flint-compare-logits <reference-logits-dump> <candidate-logits-dump> [--json]   Direct logits comparison: top-1 agreement and KL on saved dumps
   ojon flint-functional <model.gguf> [--tool <llama-cli>] [--gpu-layers N] [--json]
   ojon flint-uncensor-plan <model.gguf> <output.gguf> [--strength 0.1] [--blocks 20,24,28,32] [--json]
   ojon flint-promote <candidate.pending> --receipt <receipt.json> --confirm
+  ojon flint-rco-assemble <new-hybrid.gguf> --template <template.gguf> --spine <Q6_K.gguf> --experts <Q4_K_M.gguf> --routers <F32.gguf> --confirm   Assemble a RoCo hybrid from per-role GGUF sources
   ojon optimize-workflow-run <model-path> [--baseline Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--imatrix calibration.imatrix] [--tensor-sensitivity scores.json] [--ppl-corpus heldout.txt] [--max-ppl-regression-pct 0] [--goal balanced|smallest] --confirm [--json]
   ojon optimize-workflow-plan <model-path> [--baseline current-Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--server-tool path-to-llama-server] [--goal balanced|smallest|fastest] [--precisions IQ4_XS,Q3_K_M] [--bench-prompt-tokens 512] [--bench-gen-tokens 128] [--bench-repetitions 3] [--balanced-speed-ratio 0.85] [--device auto|cpu|cuda|xpu] [--runtime-device SYCL0|CUDA0] [--gpu-layers 99] [--min-saving-percent 5] [--max-loss-points 0] [--json]
   ojon optimize-plan <model-path> [--device auto|cpu|cuda|xpu] [--json]   Compare candidate routes without converting
@@ -77,12 +79,17 @@ Commands:
   ojon eval-sweep <sweep-manifest.json> <held-out-corpus.txt> [--tool llama-perplexity] [--gpu-layers N] [--context 2048] [--max-degradation 1.0] --confirm
   ojon imatrix-plan <original-f16.gguf> <calibration.txt> <new-imatrix.gguf> [--gpu-layers 0] [--context 2048] [--tool path]
   ojon imatrix-run  <original-f16.gguf> <calibration.txt> <new-imatrix.gguf> [options] --confirm
+  ojon corpus-build <new-corpus.txt> <file-or-dir> [...] [--max-file-mib 64] [--json]   Calibration corpus from your own text (.txt .md .rst .json .jsonl .py .rs); paragraphs deduplicated
+  ojon recipe-plan <original-F16.gguf> <empty-output-dir> --corpus calibration.txt [--base q5_k] [--floor iq2_s] [--budget 0.01] [--budget-p99 X] [--imatrix path|auto] [--eval-corpus heldout.txt] [--ctx 512] [--ngl 99|auto] [--chunks 40] [--threads N] [--json]   Plan the KL-divergence-gated mixed-precision recipe search without converting
+  ojon recipe-run  <original-F16.gguf> <empty-output-dir> [same options] [--keep-probes] [--no-boundary-refine] [--resume] --confirm   Measure how low each tensor class can go within the KLD budget and write the smallest recipe (resumable)
+  ojon recipe-apply <other-original-F16.gguf> <output-dir> <recipe-receipt.json> [--corpus heldout.txt --verify-budget X] [--imatrix path] [--ctx 512] [--ngl 99|auto] [--chunks 40] [--threads N] --confirm   Reuse a measured recipe on a sibling model, optionally re-measuring KLD against a budget
   ojon diffusion-gguf-plan <denoiser.safetensors> <output.gguf> [--tool sd-cli] [--kind image|video] [--layout diffusion|checkpoint] [--format q4_0|q5_0|q8_0|q4_K|q3_K]
   ojon diffusion-gguf-run <denoiser.safetensors> <output.gguf> [same options] --confirm
   ojon diffusion-gguf-smoke-plan <denoiser.gguf> <output.png|webm> [--kind image|video] [--component vae=vae.safetensors] [--component llm=encoder.gguf] [--prompt text] [--seed 42] [--steps 4]
   ojon diffusion-gguf-smoke-run <denoiser.gguf> <output.png|webm> [same options] --confirm
   ojon diffusion-gguf-comfy-plan <denoiser.gguf> <api-workflow.json> <receipt.json> [--kind image|video] [--python python] [--node-id ID] [--server http://127.0.0.1:8188]
   ojon diffusion-gguf-comfy-run  <denoiser.gguf> <api-workflow.json> <receipt.json> [same options] --confirm
+  ojon diffusion-parity --workflow <api-workflow.json> --reference-name <reference.gguf|safetensors> --candidate-name <candidate.gguf> [--node-id ID] [--server http://127.0.0.1:8188] [--receipt receipt.json] [--python python] [--min-psnr 30] [--pixel-tolerance N] [--timeout S] --confirm   Measured image parity: same fixed-seed ComfyUI workflow with reference and candidate weights, PSNR-gated
   ojon minimax-video-test-plan <safetensors-file|OrbitQuant-release-dir> <ComfyUI-api-workflow.json> <new-video.mp4> <new-receipt.json> [--runtime safetensors|orbitquant] [--server http://127.0.0.1:8188] [--ffprobe path]
   ojon minimax-video-test-run  <safetensors-file|OrbitQuant-release-dir> <ComfyUI-api-workflow.json> <new-video.mp4> <new-receipt.json> [same options] --confirm
   ojon minimax-checkpoint-plan <original-MiniMax-H3.safetensors> <new-NVFP4.safetensors> [--converter ctq] [--device cpu|cuda|xpu|auto]
@@ -118,8 +125,10 @@ Commands:
   ojon quantize  <input.gguf> <output.gguf> [options]
   ojon learn-collector-status [--data-dir <path>] [--json]
   ojon learn-collector-start  [--port <port>] [--data-dir <path>] [--non-blocking]
+  ojon learn-harvest          <agent-runs-dir> [--data-dir <path>] [--json]   Harvest agent session logs into collector episodes (verified, failed, unverified; secrets redacted)
   ojon learn-dataset-list     [--category <name>] [--json]
   ojon learn-dataset-import   <input.jsonl> <output.jsonl> [--json]
+  ojon learn-utility-models   [--json]   List the static catalogue of small utility models (OCR, embedding, reranker, detection) and their jobs
   ojon learn-curate           <episodes.jsonl> <output-dir> [--anchor-ratio 0.08] [--recency-k 3] [--json]
   ojon learn-train-plan       <model-dir> <dataset-dir> <output-dir> [--quant 4] [--json]
   ojon learn-train-run        <model-dir> <dataset-dir> <output-dir> [--quant 4] [--dry-run] [--confirm]
@@ -128,6 +137,7 @@ Commands:
   ojon learn-temporal-query   <store.jsonl> <query-text> [--as-of <epoch|YYYY-MM-DD>] [--domain <d>] [--augment] [--json]
   ojon learn-package-create   <knowledge|skill|release> <id> <name> <version> <input-path> <dest-dir> [options]
   ojon learn-package-install  <pkg-dir> <install-root> [--json]
+  ojon learn-package-list     <install-root> [--json]   List installed knowledge/skill/release packages under an install root
   ojon learn-package-rollback <knowledge|skill|release> <install-root> [--json]
   ojon learn-daemon-run       [--port <port>] [--data-dir <path>] [--max-disk-mb <N>] [--timeout-s <N>]
 
