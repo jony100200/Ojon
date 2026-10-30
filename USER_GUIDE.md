@@ -265,6 +265,22 @@ worst-frame PSNR (and temporal delta for `--kind video`) and names the smallest
 format that passed the gate, or none. `diffusion-sweep-plan` prints the plan and
 converts nothing.
 
+### FIBO 2 and other models sd-cli does not know: `--converter comfy-gguf`
+
+```sh
+ojon diffusion-sweep-run fibo2_dev_bf16.safetensors "M:\ComfyUI\models\unet" --workflow fibo2_api.json \
+     --reference-name fibo2_dev_bf16.safetensors --converter comfy-gguf \
+     --convert-script "<ComfyUI>\custom_nodes\ComfyUI-GGUF\tools\convert.py" --python <python with torch+gguf> \
+     --formats Q8_0,Q6_K,Q5_K_M,Q4_K_M,Q4_0 --min-psnr 30 --confirm
+```
+
+The ComfyUI-GGUF converter (molbal fork) converts and quantizes in one streamed
+Python pass (`--src --dst --streamed --quant-type`), so FIBO 2, Krea 2 and the
+other architectures stable-diffusion.cpp lacks go through the same sweep and
+the same fixed-seed parity gate. Its format names are its own (`Q5_K_M`, not
+`q5_0`); the plan refuses a format the chosen converter does not have. Loading a
+`fibo2` GGUF in ComfyUI needs that fork's loader node as well.
+
 ## Measured image parity for diffusion GGUF quants
 
 The language side gates a quant on KL divergence. For image and video models the

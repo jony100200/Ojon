@@ -89,6 +89,7 @@ Commands:
   ojon diffusion-gguf-smoke-run <denoiser.gguf> <output.png|webm> [same options] --confirm
   ojon diffusion-gguf-comfy-plan <denoiser.gguf> <api-workflow.json> <receipt.json> [--kind image|video] [--python python] [--node-id ID] [--server http://127.0.0.1:8188]
   ojon diffusion-gguf-comfy-run  <denoiser.gguf> <api-workflow.json> <receipt.json> [same options] --confirm
+  ojon diffusion-sweep-plan|run <denoiser.safetensors> <ComfyUI models/unet dir> --workflow api.json --reference-name ref.gguf [--converter sd-cli|comfy-gguf --convert-script tools/convert.py] [--formats ...] [--kind image|video] [--min-psnr 30] [--confirm]   Convert every format, measure each by fixed-seed parity, keep the smallest passing
   ojon diffusion-parity --workflow <api-workflow.json> --reference-name <reference.gguf|safetensors> --candidate-name <candidate.gguf> [--node-id ID] [--server http://127.0.0.1:8188] [--receipt receipt.json] [--python python] [--min-psnr 30] [--pixel-tolerance N] [--timeout S] --confirm   Measured image parity: same fixed-seed ComfyUI workflow with reference and candidate weights, PSNR-gated
   ojon minimax-video-test-plan <safetensors-file|OrbitQuant-release-dir> <ComfyUI-api-workflow.json> <new-video.mp4> <new-receipt.json> [--runtime safetensors|orbitquant] [--server http://127.0.0.1:8188] [--ffprobe path]
   ojon minimax-video-test-run  <safetensors-file|OrbitQuant-release-dir> <ComfyUI-api-workflow.json> <new-video.mp4> <new-receipt.json> [same options] --confirm
