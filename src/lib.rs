@@ -25,10 +25,12 @@ pub use self::quant::ara;
 pub use self::quant::autoround;
 pub use self::quant::calibration;
 pub use self::quant::exl3;
+pub use self::quant::kld;
 pub use self::quant::packed;
 pub use self::quant::ppl;
 pub use self::quant::quant_compare;
 pub use self::quant::quant_parity;
+pub use self::quant::recipe;
 pub use self::quant::sweep;
 
 // Uncensor
