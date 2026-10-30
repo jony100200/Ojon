@@ -24,6 +24,7 @@ pub use self::quant::advanced;
 pub use self::quant::ara;
 pub use self::quant::autoround;
 pub use self::quant::calibration;
+pub use self::quant::corpus;
 pub use self::quant::exl3;
 pub use self::quant::kld;
 pub use self::quant::packed;

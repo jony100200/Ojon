@@ -57,6 +57,21 @@ ojon autoround-plan "./models/hf-original" "./models/out\q5-calibrated" --bits 5
 
 To execute, use `autoround-run` with the same options and `--confirm`. Ojon checks that GGUF output metadata exists, not that the model runs or meets a quality threshold. Compare against existing llama.cpp K/IQ conversions using held-out data and a verified target loader. See Intel's upstream AutoRound step-by-step guide.
 
+## Build a calibration corpus from your own text
+
+The importance matrix and every KL-divergence number are only as good as the
+text behind them. Instruct models calibrate best on chat-style, task-representative
+text (your prompts, chat exports, docs, code), not encyclopedia prose.
+
+```sh
+ojon corpus-build ./calibration.txt ./my-chats/ ./docs/ notes.md --json
+```
+
+Accepts `.txt .md .rst .json .jsonl .py .rs` (JSON/JSONL are flattened to their
+string values), drops exact-duplicate paragraphs and control characters, refuses
+to overwrite, and writes `calibration.txt.report.json` with byte and approximate
+token counts and whether the result reaches the recommended 1 MiB.
+
 ## From original to accepted quant, in order
 
 1. `imatrix-run` (or `recipe-run --imatrix auto`) on chat-style calibration text.

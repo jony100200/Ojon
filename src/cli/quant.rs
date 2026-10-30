@@ -2172,6 +2172,48 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             }
             Ok(true)
         }
+        "corpus-build" => {
+            // Calibration corpus from the user's own text: files or one-level directories.
+            let output = PathBuf::from(next_argument(&mut args, "new corpus .txt output")?);
+            let mut inputs: Vec<PathBuf> = Vec::new();
+            let mut max_file_mib = 64u64;
+            let mut json = false;
+            while let Some(option) = args.next() {
+                match option.to_str() {
+                    Some("--max-file-mib") => {
+                        max_file_mib = next_argument(&mut args, "max file size MiB")?
+                            .to_str()
+                            .and_then(|v| v.parse().ok())
+                            .ok_or_else(|| invalid("max-file-mib must be a number"))?
+                    }
+                    Some("--json") => json = true,
+                    Some(other) if other.starts_with("--") => {
+                        return Err(invalid(format!("unknown corpus-build option: {other}")))
+                    }
+                    _ => inputs.push(PathBuf::from(option)),
+                }
+            }
+            if inputs.is_empty() {
+                return Err(invalid("corpus-build needs at least one input file or directory"));
+            }
+            let report = ojon_backend::corpus::build_corpus(&inputs, &output, max_file_mib * 1024 * 1024)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report.as_json())?);
+            } else {
+                println!("corpus: {}", output.display());
+                println!(
+                    "{} inputs, {} skipped, {} paragraphs kept ({} duplicates dropped), {} bytes (~{} tokens){}",
+                    report.inputs.len(),
+                    report.skipped.len(),
+                    report.paragraphs_kept,
+                    report.duplicates_dropped,
+                    report.bytes_out,
+                    report.approx_tokens,
+                    if report.bytes_out >= ojon_backend::corpus::RECOMMENDED_BYTES { "" } else { " - under the 1 MiB recommended for calibration" }
+                );
+            }
+            Ok(true)
+        }
         "recipe-apply" => {
             // Reuse a measured recipe on another original of the same family, optionally verifying KLD.
             let source = PathBuf::from(next_argument(&mut args, "original F16/BF16 GGUF model")?);
