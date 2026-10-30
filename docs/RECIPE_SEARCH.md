@@ -44,8 +44,9 @@ task suite before anyone claims capability was kept.
 1. **Reference**: original F16/BF16 GGUF over a fixed corpus slice
    (`--chunks`, default 40 chunks of `--ctx` tokens). Same slice for every
    candidate, so numbers are comparable.
-2. **Importance matrix** (`--imatrix auto`): `llama-imatrix` on the same
-   corpus. Low-bit levels (iq2/iq3/iq4) need it; without one the search
+2. **Importance matrix** (`--imatrix auto`): `llama-imatrix` on the calibration
+   half of the corpus (`corpus-build` assembles one from your own chats, docs and
+   code; aim for 1 MiB or more of task-representative text). Low-bit levels (iq2/iq3/iq4) need it; without one the search
    understates how low a class can go. On Qwen3-0.6B the all-q5_k base dropped
    from mean KLD 0.0438 to 0.0234 just by adding it.
 3. **Base**: every searched class pinned to `--base` through a complete
