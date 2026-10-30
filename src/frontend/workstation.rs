@@ -2654,6 +2654,7 @@ impl Workstation {
                                     BackendId::LlamaServer=>"Persistent task-evaluation server",
                                     BackendId::LlamaBench => "GGUF performance benchmark",
                                     BackendId::LlamaPerplexity => "GGUF quality / PPL",
+                                    BackendId::LlamaEmbedding => "Embedding / reranker parity",
                                     BackendId::LlamaImatrix => "GGUF calibration",
                                     BackendId::HfConverter => "HF to GGUF script",
                                     BackendId::LlamaFactory => "LoRA / QLoRA trainer",

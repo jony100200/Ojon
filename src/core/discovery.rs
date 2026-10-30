@@ -29,6 +29,7 @@ pub enum BackendId {
     LlamaServer,
     LlamaBench,
     LlamaPerplexity,
+    LlamaEmbedding,
     LlamaImatrix,
     HfConverter,
     LlamaFactory,
@@ -50,7 +51,7 @@ pub struct BackendSpec {
     pub role: &'static str,
 }
 
-const SPECS: [BackendSpec; 13] = [
+const SPECS: [BackendSpec; 14] = [
     BackendSpec {
         id: BackendId::LlamaQuantize,
         name: "llama.cpp quantizer",
@@ -95,6 +96,15 @@ const SPECS: [BackendSpec; 13] = [
         website: "https://github.com/ggml-org/llama.cpp",
         integration: Integration::Wired,
         role: "Real held-out text perplexity comparison between original and candidate GGUF variants",
+    },
+    BackendSpec {
+        id: BackendId::LlamaEmbedding,
+        name: "llama.cpp embedding and reranker scorer",
+        executable_names: &["llama-embedding", "llama-embedding.exe"],
+        override_env: "OJON_LLAMA_EMBEDDING",
+        website: "https://github.com/ggml-org/llama.cpp",
+        integration: Integration::Wired,
+        role: "Embedding / reranker parity: cosine, neighbour overlap and ranking agreement between original and candidate GGUF",
     },
     BackendSpec {
         id: BackendId::LlamaImatrix,

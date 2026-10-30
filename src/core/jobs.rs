@@ -238,8 +238,27 @@ pub fn run_with_log<F>(cmd: &mut Command, emit: F) -> io::Result<()>
 where
     F: FnMut(&str),
 {
-    let timeout = match std::env::var("OJON_JOB_TIMEOUT_SECONDS") {
-        Ok(raw) => Duration::from_secs(
+    run_with_log_timeout(cmd, job_timeout()?, emit)
+}
+
+/// Same bound as `run_with_log`, but the child's stdout is written verbatim to
+/// a new file (`create_new`, never overwritten) while stderr still streams to
+/// `emit`. For tools whose stdout is one large data document (for example
+/// `llama-embedding --embd-output-format json`): the line splitter and the
+/// display cap of the streaming path would truncate it.
+pub fn run_with_log_to_file<F>(cmd: &mut Command, stdout_file: &Path, emit: F) -> io::Result<()>
+where
+    F: FnMut(&str),
+{
+    let file = std::fs::OpenOptions::new().write(true).create_new(true).open(stdout_file)?;
+    run_streaming(cmd, Some(file), job_timeout()?, emit)
+}
+
+/// The subprocess bound used by `run_with_log`: 4 hours unless
+/// OJON_JOB_TIMEOUT_SECONDS (5..=86400) says otherwise.
+fn job_timeout() -> io::Result<Duration> {
+    match std::env::var("OJON_JOB_TIMEOUT_SECONDS") {
+        Ok(raw) => Ok(Duration::from_secs(
             raw.parse::<u64>()
                 .ok()
                 .filter(|seconds| (5..=86400).contains(seconds))
@@ -249,15 +268,26 @@ where
                         "OJON_JOB_TIMEOUT_SECONDS must be 5..=86400",
                     )
                 })?,
-        ),
-        Err(std::env::VarError::NotPresent) => Duration::from_secs(4 * 3600),
-        Err(e) => return Err(io::Error::new(io::ErrorKind::InvalidInput, e)),
-    };
-    run_with_log_timeout(cmd, timeout, emit)
+        )),
+        Err(std::env::VarError::NotPresent) => Ok(Duration::from_secs(4 * 3600)),
+        Err(e) => Err(io::Error::new(io::ErrorKind::InvalidInput, e)),
+    }
 }
 /// Bound even silent subprocesses. Timeout kills and reaps the selected
 /// direct child, closes the receiver and never claims successful output.
-pub fn run_with_log_timeout<F>(cmd: &mut Command, timeout: Duration, mut emit: F) -> io::Result<()>
+pub fn run_with_log_timeout<F>(cmd: &mut Command, timeout: Duration, emit: F) -> io::Result<()>
+where
+    F: FnMut(&str),
+{
+    run_streaming(cmd, None, timeout, emit)
+}
+
+fn run_streaming<F>(
+    cmd: &mut Command,
+    stdout_file: Option<std::fs::File>,
+    timeout: Duration,
+    mut emit: F,
+) -> io::Result<()>
 where
     F: FnMut(&str),
 {
@@ -268,29 +298,32 @@ where
         ));
     }
     let started = Instant::now();
+    let to_file = stdout_file.is_some();
     let mut child = cmd
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(match stdout_file {
+            Some(file) => Stdio::from(file),
+            None => Stdio::piped(),
+        })
         .stderr(Stdio::piped())
         .spawn()?;
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("missing stdout pipe"))?;
     let stderr = child
         .stderr
         .take()
         .ok_or_else(|| io::Error::other("missing stderr pipe"))?;
     let (tx, rx) = mpsc::sync_channel::<String>(64);
 
-    let readers: Vec<_> = vec![
-        thread::spawn({
-            let tx = tx.clone();
-            move || read_pipe(stdout, tx, "stdout")
-        }),
-        thread::spawn(move || read_pipe(stderr, tx, "stderr")),
-    ];
+    let mut readers = Vec::new();
+    if !to_file {
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("missing stdout pipe"))?;
+        let tx = tx.clone();
+        readers.push(thread::spawn(move || read_pipe(stdout, tx, "stdout")));
+    }
+    readers.push(thread::spawn(move || read_pipe(stderr, tx, "stderr")));
 
     // Drain both pipes until they close. Even after reaching the display cap,
     // keep consuming to avoid stalling the converter.
@@ -615,6 +648,33 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(started.elapsed() < Duration::from_secs(4));
     }
+    #[test]
+    fn stdout_file_receives_data_while_stderr_streams() {
+        let dir = std::env::temp_dir().join(format!("ojon-jobs-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("stdout.txt");
+        let mut command = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "echo data-line& echo log-line 1>&2"]);
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.args(["-c", "echo data-line; echo log-line 1>&2"]);
+            c
+        };
+        let mut seen = Vec::new();
+        run_with_log_to_file(&mut command, &out, |line| seen.push(line.to_owned())).unwrap();
+        let data = std::fs::read_to_string(&out).unwrap();
+        assert!(data.trim().starts_with("data-line"), "{data:?}");
+        assert!(seen.iter().any(|l| l.starts_with("[stderr]") && l.contains("log-line")), "{seen:?}");
+        assert!(!seen.iter().any(|l| l.contains("data-line")), "stdout must not reach the log: {seen:?}");
+        // Refuses to overwrite an existing capture file.
+        let mut again = Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        again.args(if cfg!(windows) { ["/C", "echo x"] } else { ["-c", "echo x"] });
+        assert!(run_with_log_to_file(&mut again, &out, |_| {}).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn reports_failing_command_without_faking_success() {
         let mut command = if cfg!(windows) {

@@ -2274,6 +2274,98 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             println!("receipt: {}", receipt_out.display());
             Ok(true)
         }
+        "embed-parity-plan" | "embed-parity-run" => {
+            // Embedding / reranker parity: both models embed the same held-out
+            // lines through llama-embedding; cosine, neighbour overlap and
+            // ranking agreement are measured and gated. Plan writes nothing.
+            let execute = cmd == "embed-parity-run";
+            let reference = PathBuf::from(next_argument(&mut args, "reference GGUF (original or accepted quant)")?);
+            let candidate = PathBuf::from(next_argument(&mut args, "candidate GGUF")?);
+            let output_dir = PathBuf::from(next_argument(&mut args, "empty output directory")?);
+            let mut settings = ojon_backend::embed_parity::EmbedSettings {
+                tool: ojon_backend::discovery::resolve_backend_command(BackendId::LlamaEmbedding, "llama-embedding")?,
+                ..Default::default()
+            };
+            let mut gate = ojon_backend::embed_parity::EmbedGate::default();
+            let (mut confirm, mut json) = (false, false);
+            let text = |v: std::ffi::OsString, what: &str| -> io::Result<String> {
+                v.to_str().map(str::to_owned).ok_or_else(|| invalid(format!("{what} requires UTF-8")))
+            };
+            let number = |v: std::ffi::OsString, what: &str| -> io::Result<f64> {
+                text(v, what)?.parse::<f64>().map_err(|_| invalid(format!("{what} must be a number")))
+            };
+            while let Some(option) = args.next() {
+                match option.to_str() {
+                    Some("--texts") => settings.texts = Some(PathBuf::from(next_argument(&mut args, "held-out texts, one per line")?)),
+                    Some("--queries") => settings.queries = Some(PathBuf::from(next_argument(&mut args, "queries, one per line")?)),
+                    Some("--documents") => settings.documents = Some(PathBuf::from(next_argument(&mut args, "documents, one per line")?)),
+                    Some("--embedding-tool") => settings.tool = PathBuf::from(next_argument(&mut args, "llama-embedding executable")?),
+                    Some("--pooling") => {
+                        let v = text(next_argument(&mut args, "pooling: mean, last, cls or rank")?, "pooling")?;
+                        settings.pooling = ojon_backend::embed_parity::Pooling::parse(&v)
+                            .ok_or_else(|| invalid(format!("unknown pooling '{v}' (mean, last, cls, rank)")))?;
+                    }
+                    Some("--no-normalise") | Some("--no-normalize") => settings.normalise = false,
+                    Some("--ctx") => settings.context = text(next_argument(&mut args, "context")?, "ctx")?.parse().map_err(|_| invalid("ctx must be a number"))?,
+                    Some("--batch") => settings.batch = text(next_argument(&mut args, "batch size")?, "batch")?.parse().map_err(|_| invalid("batch must be a number"))?,
+                    Some("--ngl") => {
+                        let v = text(next_argument(&mut args, "gpu layers or 'auto'")?, "ngl")?;
+                        if v == "auto" { settings.fit = true; } else { settings.gpu_layers = v.parse().map_err(|_| invalid("ngl must be a number or 'auto'"))?; }
+                    }
+                    Some("--top-k") => settings.top_k = text(next_argument(&mut args, "neighbour depth k")?, "top-k")?.parse().map_err(|_| invalid("top-k must be a number"))?,
+                    Some("--min-cosine") => gate.min_cosine = number(next_argument(&mut args, "minimum per-text cosine")?, "min-cosine")?,
+                    Some("--min-recall") => gate.min_recall = Some(number(next_argument(&mut args, "minimum Recall@k")?, "min-recall")?),
+                    Some("--min-ndcg") => gate.min_ndcg = Some(number(next_argument(&mut args, "minimum NDCG@10")?, "min-ndcg")?),
+                    Some("--json") => json = true,
+                    Some("--confirm") if execute => confirm = true,
+                    _ => return Err(invalid(format!("unknown embed-parity option: {}", option.to_string_lossy()))),
+                }
+            }
+            let plan = ojon_backend::embed_parity::prepare_embed_parity(ojon_backend::embed_parity::EmbedParityJob {
+                reference,
+                candidate,
+                output_dir,
+                settings,
+                gate,
+            })?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&plan.plan_json())?);
+            } else {
+                println!("reference: {}", plan.job.reference.display());
+                println!("candidate: {}", plan.job.candidate.display());
+                println!(
+                    "pooling {} | texts {} | queries {} | documents {} | k {} | gate min cosine {}",
+                    plan.job.settings.pooling.as_str(),
+                    plan.inputs.texts.len(),
+                    plan.inputs.queries.len(),
+                    plan.inputs.documents.len(),
+                    plan.job.settings.top_k,
+                    plan.job.gate.min_cosine
+                );
+                for run in &plan.runs {
+                    println!("run {} {} ({} lines): {}", run.role, run.set, run.lines, run.command);
+                }
+            }
+            if !execute {
+                println!("writes: nothing");
+                println!("next_step: ojon embed-parity-run <same arguments> --confirm");
+                return Ok(true);
+            }
+            if !confirm {
+                return Err(invalid("embed-parity-run loads both models and writes prompt files, captures and a receipt; add --confirm to execute"));
+            }
+            let receipt = ojon_backend::embed_parity::run_embed_parity(&plan, |line| eprintln!("{line}"))?;
+            if json {
+                println!("{}", std::fs::read_to_string(&receipt)?);
+            } else {
+                let doc: serde_json::Value = serde_json::from_slice(&std::fs::read(&receipt)?)?;
+                println!("receipt: {}", receipt.display());
+                println!("metrics: {}", doc["metrics"]);
+                println!("gate: {}", doc["gate"]);
+                println!("claim: {}", doc["claim"]);
+            }
+            Ok(true)
+        }
         "recipe-plan" | "recipe-run" => {
             // KLD-gated mixed-precision recipe search: measure how low each tensor
             // class can go before the output distribution moves past a budget.
