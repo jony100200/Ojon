@@ -3678,6 +3678,7 @@ mod tests {
             data_offset: 32,
             alignment: 32,
             split_count: None,
+            split_no: None,
             big_endian: false,
         });
         assert!(ws.ready_to_convert());

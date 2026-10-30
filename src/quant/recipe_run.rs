@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Instant;
 
-use crate::gguf::{inspect_gguf, inspect_gguf_tensors};
+use crate::gguf::{inspect_gguf, inspect_gguf_tensors, inspect_sharded_gguf};
 use crate::llama::{prepare_gguf, quantize_gguf_with_log, Precision};
 use crate::quant::kld::{measure_kld, save_reference_logits, KldSettings, KldStats};
 use crate::quant::recipe::{
@@ -168,12 +168,11 @@ pub fn prepare_recipe(job: RecipeJob) -> io::Result<RecipePlan> {
     }
     job.kld.validate()?;
     let source = job.source.canonicalize()?;
-    let info = inspect_gguf(&source)?;
+    // A split original is read through its first shard; llama-quantize,
+    // llama-imatrix and llama-perplexity all follow the shards from there.
+    let (info, tensors) = inspect_sharded_gguf(&source)?;
     if info.tensor_count == 0 {
         return Err(invalid("source GGUF has no tensors"));
-    }
-    if info.split_count.unwrap_or(1) > 1 {
-        return Err(invalid("split GGUF source unsupported; merge the shards first"));
     }
     if !matches!(info.file_type, Some(0 | 1 | 32)) {
         return Err(invalid(
@@ -222,7 +221,6 @@ pub fn prepare_recipe(job: RecipeJob) -> io::Result<RecipePlan> {
             return Err(invalid("p99 budget must be a finite number in 0..=10"));
         }
     }
-    let tensors = inspect_gguf_tensors(&source)?;
     let present = class_elements(&tensors);
     if let Some(reason) = not_a_language_model(info.architecture.as_deref(), &present) {
         return Err(invalid(reason));

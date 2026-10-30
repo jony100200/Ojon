@@ -6,7 +6,7 @@
 
 use crate::cli::common::{invalid, next_argument};
 use ojon_backend::discovery::{resolve_backend_command, BackendId};
-use ojon_backend::gguf::inspect_gguf;
+use ojon_backend::gguf::{inspect_gguf, inspect_sharded_gguf};
 use ojon_backend::kld::{measure_kld, save_reference_logits, KldSettings};
 use ojon_backend::recipe_run::plain;
 use serde_json::json;
@@ -140,7 +140,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     Some("--reference") => reference = Some(PathBuf::from(next_argument(&mut it, "reference logits path")?)),
                     Some("--original") => {
                         let p = PathBuf::from(next_argument(&mut it, "original GGUF, for size percentages")?);
-                        original_bytes = Some(inspect_gguf(&p).map_err(|e| invalid(format!("original {}: {e}", p.display())))?.file_bytes);
+                        original_bytes = Some(inspect_sharded_gguf(&p).map_err(|e| invalid(format!("original {}: {e}", p.display())))?.0.file_bytes);
                     }
                     _ => rest.push(a),
                 }

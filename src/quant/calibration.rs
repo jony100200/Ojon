@@ -2,7 +2,6 @@
 //! Calibration is independent of held-out task evaluation and does not make
 //! a "quality preserved" claim. The original GGUF and corpus are read-only.
 
-use crate::gguf::inspect_gguf;
 use crate::jobs::run_with_log;
 use serde_json::{json, Value};
 use std::fs::{self, File};
@@ -73,12 +72,9 @@ pub fn prepare_imatrix(
     if !model.is_file() {
         return Err(invalid("original GGUF path must be a file"));
     }
-    let m = inspect_gguf(&model)?;
+    let (m, _) = crate::gguf::inspect_sharded_gguf(&model)?;
     if m.tensor_count == 0 {
         return Err(invalid("empty GGUF tensor catalog"));
-    }
-    if m.split_count.unwrap_or(1) > 1 {
-        return Err(invalid("split GGUF source unsupported"));
     }
     if !matches!(m.file_type, Some(0 | 1 | 32)) {
         return Err(invalid("importance calibration expects original F32, F16 or BF16 GGUF, not an already quantized model"));

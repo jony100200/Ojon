@@ -154,14 +154,13 @@ pub fn prepare_gguf(
     if !canonical_source.is_file() {
         return Err(bad("source must be a regular GGUF file"));
     }
-    let source_info = inspect_gguf(&canonical_source)?;
+    // Split originals are read through their first shard (all shards must be
+    // present); llama-quantize writes one output file from them.
+    let (source_info, _) = crate::gguf::inspect_sharded_gguf(&canonical_source)?;
     if source_info.tensor_count == 0 {
         return Err(bad("source GGUF has no tensors"));
     }
     validate_original_precision(source_info.file_type)?;
-    if source_info.split_count.unwrap_or(1) > 1 {
-        return Err(bad("this first adapter supports single-file GGUF only; multi-shard GGUF needs a dedicated recipe"));
-    }
     let output_filename = output
         .file_name()
         .ok_or_else(|| bad("missing output filename"))?;
