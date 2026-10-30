@@ -164,7 +164,7 @@ pub fn prepare_research(
         return Err(bad("group must be 32, 64 or 128"));
     }
     match kind {
-        ResearchKind::Hqq if !matches!(bits, 2 | 3 | 4) => {
+        ResearchKind::Hqq if !matches!(bits, 2..=4) => {
             return Err(bad("HQQ route supports 2/3/4 bit only"));
         }
         ResearchKind::OpenVino if bits != 4 => {

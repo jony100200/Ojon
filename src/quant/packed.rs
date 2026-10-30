@@ -201,7 +201,7 @@ pub struct PackPlan {
     packed_count: usize,
 }
 pub fn plan_pack(input: &Path, output: &Path, bits: u8, group: usize) -> io::Result<PackPlan> {
-    if !matches!(bits, 2 | 3 | 4) {
+    if !matches!(bits, 2..=4) {
         return Err(invalid("bits must be 2, 3 or 4"));
     }
     if !(32..=256).contains(&group) || !group.is_power_of_two() {
@@ -643,7 +643,7 @@ pub fn unpack(input: &Path, output: &Path) -> io::Result<PathBuf> {
         .map_err(|_| bad("unsupported bitwidth"))?;
     let group = usize::try_from(root["group"].as_u64().ok_or_else(|| bad("missing group"))?)
         .map_err(|_| bad("invalid group size"))?;
-    if !matches!(bits, 2 | 3 | 4) || !(32..=256).contains(&group) || !group.is_power_of_two() {
+    if !matches!(bits, 2..=4) || !(32..=256).contains(&group) || !group.is_power_of_two() {
         return Err(bad("unsupported packed bitwidth or grouping"));
     }
     let items = root["tensors"]

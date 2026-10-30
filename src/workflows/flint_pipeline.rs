@@ -412,7 +412,7 @@ pub fn parse_flint_logits_header(path: &Path) -> io::Result<(usize, usize, usize
     let chunks = i32::from_le_bytes(hdr[8..12].try_into().unwrap()) as usize;
     let scored = (context.saturating_sub(1).saturating_sub(context / 2)) * chunks;
     let expected =
-        20 + (context * chunks * 4) as u64 + (scored * (2 * ((vocabulary + 1) / 2) + 4) * 2) as u64;
+        20 + (context * chunks * 4) as u64 + (scored * (2 * vocabulary.div_ceil(2) + 4) * 2) as u64;
     let actual = file.metadata()?.len();
     if actual != expected {
         return Err(invalid(format!(
@@ -506,7 +506,7 @@ pub fn compare_flint_logits_files(
         return Err(invalid("dumps were made from different token sequences"));
     }
 
-    let record_bytes = (2 * ((ref_vocab + 1) / 2) + 4) * 2;
+    let record_bytes = (2 * ref_vocab.div_ceil(2) + 4) * 2;
     let mut buf_ref = vec![0u8; record_bytes];
     let mut buf_cand = vec![0u8; record_bytes];
     let mut lp_ref = vec![0f64; ref_vocab];
@@ -1363,10 +1363,10 @@ pub fn assemble_flint_hybrid_gguf(
             2 | 3 => {
                 template_file.seek(SeekFrom::Current(2))?;
             }
-            4 | 5 | 6 => {
+            4..=6 => {
                 template_file.seek(SeekFrom::Current(4))?;
             }
-            10 | 11 | 12 => {
+            10..=12 => {
                 template_file.seek(SeekFrom::Current(8))?;
             }
             8 => {
@@ -1389,10 +1389,10 @@ pub fn assemble_flint_hybrid_gguf(
                     2 | 3 => {
                         template_file.seek(SeekFrom::Current((alen * 2) as i64))?;
                     }
-                    4 | 5 | 6 => {
+                    4..=6 => {
                         template_file.seek(SeekFrom::Current((alen * 4) as i64))?;
                     }
-                    10 | 11 | 12 => {
+                    10..=12 => {
                         template_file.seek(SeekFrom::Current((alen * 8) as i64))?;
                     }
                     8 => {
@@ -1569,7 +1569,7 @@ mod tests {
         for t in 0..ctx {
             f.write_all(&(t as i32).to_le_bytes()).unwrap();
         }
-        let nv = 2 * ((vocab + 1) / 2) + 4;
+        let nv = 2 * vocab.div_ceil(2) + 4;
         for logits in rows {
             let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             let min = logits

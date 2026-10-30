@@ -334,7 +334,7 @@ fn inspect_ojonq(path: &Path) -> io::Result<ModelProbe> {
     let bits = value["bits"]
         .as_u64()
         .ok_or_else(|| invalid("packed bit count missing"))?;
-    if !matches!(bits, 2 | 3 | 4) {
+    if !matches!(bits, 2..=4) {
         return Err(invalid("unsupported packed bit count"));
     }
     let mut count = 0u64;
