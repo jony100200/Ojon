@@ -124,3 +124,27 @@ the corpus slice. For a 0.6B model that is a few minutes; for a 39B-parameter
 MoE with 31 probes it is hours and tens of GB of transient disk. Narrow it with
 `--floor`, a higher `--base`, or fewer `--chunks`, and reuse the result on
 sibling models with `recipe-apply`.
+
+## 8. Worked example (measured 2026-10-30)
+
+Qwen3-0.6B BF16 (1.2 GB), 50 KB held-out corpus, 12 chunks of 512 tokens,
+`--imatrix auto --base q5_k --floor iq2_s --budget 0.01 --budget-p99 0.05`,
+public llama.cpp Vulkan tools, 21 quantizations in about 25 minutes.
+
+| step | result |
+|---|---|
+| all-q5_k base, no imatrix (earlier run) | mean KLD 0.0438 |
+| all-q5_k base, with imatrix | mean KLD 0.0234, 34.7% of source |
+| cheapest probe: attn_qk at q4_k | +0.0092 |
+| typical probes: token_embd q4_k +0.0127, ffn_down iq4_xs +0.0128, attn_vo iq4_xs +0.0177 |
+| expensive: attn_qk iq2_s +0.188, ffn_gate_up iq2_s +0.391, attn_vo q3_k +0.115 |
+| selected recipe | attn_qk -> q4_k, everything else q5_k |
+| final, measured again | mean KLD 0.0326 (budget 0.0334), p99 0.194 (budget 0.0234+0.05), 33.8% of source, **within budget** |
+
+What this teaches: a 0.6B model has almost no slack below q5_k at a 0.01
+budget; the importance matrix alone was worth more than any single precision
+step; and attention value/output and dense FFN down-projections are the classes
+that punish low bits hardest here, which is the same shape the old `_M` rules
+assumed but now with numbers attached. On a 39B MoE the expert classes carry
+97% of the bytes and a different answer is expected; that is exactly why the
+search measures instead of assuming.
