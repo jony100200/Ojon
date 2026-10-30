@@ -87,6 +87,46 @@ fn count_tool_results(content: &Value) -> usize {
         .unwrap_or(0)
 }
 
+/// Text inside tool_result blocks (string or nested text blocks), lower-cased.
+fn tool_result_text(content: &Value) -> String {
+    let mut out = String::new();
+    if let Some(blocks) = content.as_array() {
+        for b in blocks.iter().filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result")) {
+            match b.get("content") {
+                Some(Value::String(s)) => out.push_str(s),
+                Some(Value::Array(inner)) => {
+                    for t in inner {
+                        if let Some(s) = t.get("text").and_then(Value::as_str) {
+                            out.push_str(s);
+                            out.push('\n');
+                        }
+                    }
+                }
+                _ => {}
+            }
+            out.push('\n');
+        }
+    }
+    out.to_ascii_lowercase()
+}
+
+/// Execution signal from a tool result: Some(true) for an explicit pass line,
+/// Some(false) for an explicit failure, None for neither. These are the markers
+/// of the tools the agents actually run (cargo, pytest, cmake/MSBuild, Python,
+/// Rust panics). Only explicit markers count; prose is never a signal.
+pub fn execution_signal(text: &str) -> Option<bool> {
+    const PASS: [&str; 6] = ["test result: ok.", " passed in ", "build_exit=0", "exit=0", "all tests passed", "finished `dev` profile"];
+    const FAIL: [&str; 9] = ["test result: failed", " failed in ", "error[e", "panicked at", "traceback (most recent call last)", "build_exit=1", "assertionerror", "exit=1", "error: could not compile"];
+    let pass = PASS.iter().filter_map(|m| text.rfind(m)).max();
+    let fail = FAIL.iter().filter_map(|m| text.rfind(m)).max();
+    match (pass, fail) {
+        (None, None) => None,
+        (Some(_), None) => Some(true),
+        (None, Some(_)) => Some(false),
+        (Some(p), Some(f)) => Some(p > f), // the LAST signal in the result wins
+    }
+}
+
 struct Draft {
     episode_id: String,
     session_id: String,
@@ -97,6 +137,8 @@ struct Draft {
     assistant_text: Vec<String>,
     tool_calls: Vec<ToolCallRecord>,
     tool_results: usize,
+    /// last execution signal seen in this episode's tool results
+    signal: Option<bool>,
 }
 
 impl Draft {
@@ -119,7 +161,15 @@ impl Draft {
         }
         ep.tool_calls = self.tool_calls;
         ep.tool_results = (self.tool_results > 0).then(|| vec![serde_json::json!({"tool_result_count": self.tool_results})]);
-        ep.outcome = EpisodeOutcome::Unverified;
+        // Outcome from the last explicit execution signal in the episode's own tool
+        // results; a transcript with no such signal stays Unverified.
+        ep.outcome = match self.signal {
+            Some(true) => EpisodeOutcome::VerifiedSuccess,
+            Some(false) => EpisodeOutcome::FailedRetry,
+            None => EpisodeOutcome::Unverified,
+        };
+        ep.unit_tests_passed = self.signal;
+        ep.scalar_reward = ep.outcome.default_reward();
         Some(ep)
     }
 }
@@ -195,11 +245,15 @@ pub fn parse_claude_transcript(path: &Path) -> io::Result<Vec<CollectedEpisode>>
                         assistant_text: Vec::new(),
                         tool_calls: Vec::new(),
                         tool_results: 0,
+                        signal: None,
                     });
                 }
                 None => {
                     if let Some(d) = draft.as_mut() {
                         d.tool_results += count_tool_results(content);
+                        if let Some(sig) = execution_signal(&tool_result_text(content)) {
+                            d.signal = Some(sig);
+                        }
                     }
                 }
             }
@@ -308,12 +362,52 @@ mod tests {
         assert_eq!(e.tool_calls.len(), 1);
         assert_eq!(e.tool_calls[0].name, "Edit");
         assert_eq!(e.tool_results.as_ref().unwrap()[0]["tool_result_count"], 1);
-        assert_eq!(e.outcome, EpisodeOutcome::Unverified);
+        assert_eq!(e.outcome, EpisodeOutcome::Unverified); // "ok" alone is not an execution marker
+        assert_eq!(e.unit_tests_passed, None);
         assert_eq!(e.timestamp_epoch_s, 1793322123); // 2026-10-30T01:02:03Z
         let e2 = &eps[1];
         assert_eq!(e2.episode_id, "S1:u3");
         assert_eq!(e2.assistant_response, "All 5 tests pass.");
         assert!(e2.tool_calls.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn execution_signals_use_the_last_explicit_marker() {
+        assert_eq!(execution_signal("running 3 tests\ntest result: ok. 3 passed; 0 failed"), Some(true));
+        assert_eq!(execution_signal("test result: failed. 2 passed; 1 failed"), Some(false));
+        assert_eq!(execution_signal("error[e0308]: mismatched types\nerror: could not compile `x`"), Some(false));
+        assert_eq!(execution_signal("test result: failed\n...fixed...\ntest result: ok. 5 passed"), Some(true));
+        assert_eq!(execution_signal("test result: ok. 5 passed\nthread 'main' panicked at src/x.rs"), Some(false));
+        assert_eq!(execution_signal("file written"), None);
+        assert_eq!(execution_signal(""), None);
+    }
+
+    #[test]
+    fn tool_result_signals_label_the_episode() {
+        let dir = std::env::temp_dir().join(format!("ojon-claude3-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("s.jsonl");
+        let lines = [
+            r#"{"type":"user","uuid":"a","sessionId":"S","cwd":"D:\\x","message":{"role":"user","content":"fix it"}}"#,
+            r#"{"type":"assistant","sessionId":"S","message":{"role":"assistant","content":[{"type":"tool_use","id":"t","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+            r#"{"type":"user","sessionId":"S","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"test result: FAILED. 1 passed; 1 failed"}]}}"#,
+            r#"{"type":"assistant","sessionId":"S","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"cargo test"}}]}}"#,
+            r#"{"type":"user","sessionId":"S","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":[{"type":"text","text":"test result: ok. 2 passed; 0 failed"}]}]}}"#,
+            r#"{"type":"assistant","sessionId":"S","message":{"role":"assistant","content":"Fixed and verified."}}"#,
+            r#"{"type":"user","uuid":"b","sessionId":"S","cwd":"D:\\x","message":{"role":"user","content":"and this one"}}"#,
+            r#"{"type":"assistant","sessionId":"S","message":{"role":"assistant","content":[{"type":"tool_use","id":"t3","name":"Bash","input":{"command":"pytest"}}]}}"#,
+            r#"{"type":"user","sessionId":"S","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t3","content":"Traceback (most recent call last):\nAssertionError"}]}}"#,
+            r#"{"type":"assistant","sessionId":"S","message":{"role":"assistant","content":"It fails."}}"#,
+        ];
+        fs::write(&p, lines.join("\n") + "\n").unwrap();
+        let eps = parse_claude_transcript(&p).unwrap();
+        assert_eq!(eps.len(), 2);
+        assert_eq!(eps[0].outcome, EpisodeOutcome::VerifiedSuccess);
+        assert_eq!(eps[0].unit_tests_passed, Some(true));
+        assert!(eps[0].scalar_reward > 0.0);
+        assert_eq!(eps[1].outcome, EpisodeOutcome::FailedRetry);
+        assert_eq!(eps[1].unit_tests_passed, Some(false));
         let _ = fs::remove_dir_all(&dir);
     }
 
