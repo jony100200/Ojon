@@ -195,7 +195,7 @@ fn safe_name(name: &str) -> io::Result<(String, String)> {
         || lead == "language_model.model"
         || lead == "model.text_model"
         || lead == "model.language_model.model"
-        || lead == "")
+        || lead.is_empty())
     {
         return Err(invalid(format!(
             "unrecognized language model prefix: {lead}"

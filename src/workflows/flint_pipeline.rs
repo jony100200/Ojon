@@ -6,11 +6,13 @@
 //! - ProQuant (MoE PTQ): Routing-Consistent RMSNorm (RoCo) and Prune-or-Prioritize (PoP) expert preservation.
 //! - AutoRound / SignRoundV2: Signed gradient descent on weight rounding to minimize output block error.
 //! - Heretic & Refusal Direction: Multi-block contrastive abliteration with frozen router gating invariants.
+//!
 //! Targets host hardware dynamically: evaluates available GPU VRAM, CPU threads, and Host RAM.
 
 use crate::gguf::{ggml_type_name, inspect_gguf, inspect_gguf_tensors};
 use crate::llama::Precision;
 use serde_json::{json, Value};
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
@@ -1321,10 +1323,11 @@ pub fn assemble_flint_hybrid_gguf(
 
     for src_path in recipe.values() {
         let canonical = src_path.canonicalize()?;
-        if !unique_sources.contains_key(&canonical) {
-            let f = File::open(&canonical)?;
-            let summary = inspect_gguf(&canonical)?;
-            let tensors = inspect_gguf_tensors(&canonical)?;
+        if let Entry::Vacant(slot) = unique_sources.entry(canonical) {
+            let path = slot.key();
+            let f = File::open(path)?;
+            let summary = inspect_gguf(path)?;
+            let tensors = inspect_gguf_tensors(path)?;
             let f_len = f.metadata()?.len();
             let mut t_map = HashMap::new();
             for (i, t) in tensors.iter().enumerate() {
@@ -1335,7 +1338,7 @@ pub fn assemble_flint_hybrid_gguf(
                 };
                 t_map.insert(t.name.clone(), (t.storage_type, t.relative_offset, p_len));
             }
-            unique_sources.insert(canonical, (f, summary.data_offset, t_map));
+            slot.insert((f, summary.data_offset, t_map));
         }
     }
 

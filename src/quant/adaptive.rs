@@ -937,7 +937,7 @@ mod tests {
         assert_eq!(strats.len(), 3);
         for s in strats {
             let bpw = s["estimated_measured_tensor_bpw"].as_f64().unwrap();
-            assert!(bpw <= 4.0 + 1e-6 && bpw >= 2.5625);
+            assert!((2.5625..=4.0 + 1e-6).contains(&bpw));
         }
     }
     #[test]

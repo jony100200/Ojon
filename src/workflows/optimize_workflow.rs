@@ -227,18 +227,20 @@ fn configured_options(
     input: &OptimizeWorkflowRequest,
     backends: &[FoundBackend],
 ) -> QuantParityOptions {
-    let mut options = QuantParityOptions::default();
-    options.min_saving_percent = input.min_saving_percent;
-    options.max_loss_points = input.max_loss_points;
-    options.imatrix = input.imatrix.clone();
-    options.ppl_corpus = input.ppl_corpus.clone();
-    options.max_ppl_regression_pct = input.max_ppl_regression_pct;
+    let mut options = QuantParityOptions {
+        min_saving_percent: input.min_saving_percent,
+        max_loss_points: input.max_loss_points,
+        imatrix: input.imatrix.clone(),
+        ppl_corpus: input.ppl_corpus.clone(),
+        max_ppl_regression_pct: input.max_ppl_regression_pct,
+        gpu_layers: input.gpu_layers,
+        device: input.runtime_device.clone(),
+        precisions: precisions_for(input),
+        ..QuantParityOptions::default()
+    };
     if let Some(bin) = executable(backends, BackendId::LlamaPerplexity) {
         options.ppl_tool = bin;
     }
-    options.gpu_layers = input.gpu_layers;
-    options.device = input.runtime_device.clone();
-    options.precisions = precisions_for(input);
     if let Some(bin) = executable(backends, BackendId::LlamaQuantize) {
         options.quantizer = bin;
     }

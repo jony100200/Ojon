@@ -405,7 +405,7 @@ pub fn settings_path() -> io::Result<PathBuf> {
         return Ok(path);
     }
     #[cfg(windows)]
-    {
+    let path = {
         let base = env::var_os("APPDATA")
             .or_else(|| {
                 env::var_os("USERPROFILE").map(|p| {
@@ -416,22 +416,23 @@ pub fn settings_path() -> io::Result<PathBuf> {
                 })
             })
             .ok_or_else(|| invalid("APPDATA/USERPROFILE not set"))?;
-        return Ok(PathBuf::from(base).join("Ojon").join("settings.json"));
-    }
+        PathBuf::from(base).join("Ojon").join("settings.json")
+    };
     #[cfg(target_os = "macos")]
-    {
+    let path = {
         let home = env::var_os("HOME").ok_or_else(|| invalid("HOME not set"))?;
-        return Ok(PathBuf::from(home).join("Library/Application Support/Ojon/settings.json"));
-    }
+        PathBuf::from(home).join("Library/Application Support/Ojon/settings.json")
+    };
     #[cfg(not(any(windows, target_os = "macos")))]
-    {
+    let path = {
         let base = env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
             .or_else(|| env::var_os("HOME").map(|p| PathBuf::from(p).join(".config")))
             .ok_or_else(|| invalid("HOME/XDG_CONFIG_HOME not set"))?;
-        Ok(base.join("ojon").join("settings.json"))
-    }
+        base.join("ojon").join("settings.json")
+    };
+    Ok(path)
 }
 pub fn load_settings() -> io::Result<LocalSettings> {
     load_from_path(&settings_path()?)

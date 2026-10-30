@@ -315,10 +315,7 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|r| r["state"] == "blocked_source"));
         let original = plan_for(&p, "cpu", &[], Some((Some(1), 1))).unwrap();
-        assert_eq!(
-            original["options"][2]["calibration"].as_str().is_some(),
-            true
-        );
+        assert!(original["options"][2]["calibration"].as_str().is_some());
         assert!(original["options"][0]["runtime_load_verified"] == false);
     }
 

@@ -99,8 +99,8 @@ pub fn parse_eval_suite(path: &Path) -> io::Result<EvalSuite> {
 }
 
 /// Read-only suite preflight shared by humans and agent orchestrators.
-//// Schema validity is intentionally NOT an assertion that the data is held out,
-//// representative, independent of calibration, or sufficient to judge writing.
+/// Schema validity is intentionally NOT an assertion that the data is held out,
+/// representative, independent of calibration, or sufficient to judge writing.
 pub fn inspect_task_suite(path: &Path) -> io::Result<Value> {
     let suite = parse_eval_suite(path)?;
     let count = |category: &str| {

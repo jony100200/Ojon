@@ -137,7 +137,7 @@ pub fn prepare_research(
     if !output.is_absolute() {
         return Err(bad("output directory must be absolute"));
     }
-    if !output.file_name().is_some_and(|n| !n.is_empty()) {
+    if output.file_name().is_none_or(|n| n.is_empty()) {
         return Err(bad("output directory needs a name"));
     }
     if output.symlink_metadata().is_ok() {

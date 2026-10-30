@@ -235,7 +235,7 @@ pub fn list_curated_datasets(
 ) -> Vec<&'static DatasetCatalogEntry> {
     CURATED_DATASETS
         .iter()
-        .filter(|e| category.map_or(true, |c| e.category == c))
+        .filter(|e| category.is_none_or(|c| e.category == c))
         .collect()
 }
 
@@ -415,7 +415,7 @@ mod tests {
         let src = tmp.join("raw_input.jsonl");
         let dst = tmp.join("clean_output.jsonl");
 
-        let raw_lines = vec![
+        let raw_lines = [
             r#"{"instruction": "Calculate 2+2", "response": "4 with key sk-abcdef1234567890abcdef"}"#,
             r#"{"instruction": "Calculate 2+2", "response": "Duplicate"}"#, // duplicate
             r#"{"broken json"#,                                             // syntax error

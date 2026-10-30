@@ -387,7 +387,7 @@ impl DatasetEntry {
 
         if date.is_none() {
             if let Some(src) = obj.get("source").and_then(Value::as_str) {
-                for part in src.split(|c| c == '_' || c == ':' || c == '/' || c == '\\') {
+                for part in src.split(['_', ':', '/', '\\']) {
                     if parse_iso_date_to_days(part).is_some() {
                         date = Some(part.to_string());
                         break;

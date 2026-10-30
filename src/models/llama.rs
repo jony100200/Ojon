@@ -20,13 +20,14 @@ fn bad(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Precision {
     Q3KL,
     Q3KM,
     Q3KS,
     Q4KM,
     Q4KS,
+    #[default]
     Q5KM,
     Q5KS,
     Q6K,
@@ -39,11 +40,6 @@ pub enum Precision {
     IQ2S,
     IQ2XS,
     IQ2XXS,
-}
-impl Default for Precision {
-    fn default() -> Self {
-        Self::Q5KM
-    }
 }
 impl Precision {
     pub fn as_str(self) -> &'static str {
