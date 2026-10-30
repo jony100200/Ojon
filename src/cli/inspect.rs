@@ -312,10 +312,26 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let mut threads = std::thread::available_parallelism()
                 .map(|v| v.get())
                 .unwrap_or(4);
+            let mut mmproj_out: Option<PathBuf> = None;
+            let mut mmproj_precision = ojon_backend::mmproj::MmprojPrecision::default();
             while let Some(option) = args.next() {
                 match option.to_str() {
                     Some("--converter") => {
                         converter = PathBuf::from(next_argument(&mut args, "HF converter script")?)
+                    }
+                    Some("--mmproj-out") => {
+                        mmproj_out = Some(PathBuf::from(next_argument(
+                            &mut args,
+                            "vision projector output GGUF",
+                        )?))
+                    }
+                    Some("--mmproj-precision") => {
+                        let v = next_argument(&mut args, "mmproj precision")?;
+                        mmproj_precision = v
+                            .to_str()
+                            .ok_or_else(|| invalid("mmproj precision must be text"))?
+                            .parse()
+                            .map_err(invalid)?;
                     }
                     Some("--python") => {
                         python = PathBuf::from(next_argument(&mut args, "Python executable")?)
@@ -349,12 +365,20 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let plan = prepare_hf(
                 &source, &output, &converter, &python, &quantizer, precision, threads,
             )?;
+            let plan = match &mmproj_out {
+                Some(out) => plan.with_mmproj(out, mmproj_precision)?,
+                None => plan,
+            };
             println!("model_folder: {}", plan.source.directory.display());
             println!("source_weight_bytes: {}", plan.source.source_weight_bytes);
             println!("converter: {}", plan.converter_script.display());
             println!("quantizer: {}", plan.quantizer.display());
             println!("python: {}", plan.python.display());
             println!("precision: {}", plan.precision);
+            if let Some(mm) = &plan.mmproj {
+                println!("mmproj_out: {}", mm.output.display());
+                println!("mmproj_precision: {}", mm.precision);
+            }
             println!("scratch_space: LARGE / NOT ESTIMATED; intermediate F16/BF16 GGUF required");
             println!("runtime_load: NOT_TESTED");
             let done = quantize_hf(&plan)?;
@@ -362,6 +386,9 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             println!("output: {}", done.output.display());
             println!("output_bytes: {}", done.info.file_bytes);
             println!("verification: GGUF_METADATA_AND_TENSOR_CATALOG_ONLY");
+            if let Some(mm) = &done.mmproj {
+                println!("mmproj: {}", mm.as_json());
+            }
             if let Some(receipt) = done.receipt {
                 println!("receipt: {}", receipt.display());
             }

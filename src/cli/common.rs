@@ -64,7 +64,7 @@ Commands:
   ojon sensitivity-extract <original.gguf> <calibration.imatrix> <new-tensor-sensitivity.json> --confirm
   ojon quant-compare-plan <original-or-Q4-reference.gguf> <suite.json> <new-report.json> --candidate name=lower-bit.gguf [--candidate ...] [--vision-suite vision.json --mmproj vision.gguf] [--ppl-corpus heldout.txt] [--json]
   ojon quant-compare-run  <original-or-Q4-reference.gguf> <suite.json> <new-report.json> --candidate name=lower-bit.gguf [--candidate ...] [same options] --confirm
-  ojon quant-parity-plan <original-F16.gguf> <original-or-Q4-reference.gguf> <suite.json> <output-dir> [--precisions Q4_K_M,Q5_K_M] [--imatrix path] [--max-buffer-mib 512] [--gpu-layers 0] [--vision-suite vision.json --mmproj vision.gguf] [--ppl-corpus heldout.txt --max-ppl-regression-pct 0] [--json]
+  ojon quant-parity-plan <original-F16.gguf> <original-or-Q4-reference.gguf> <suite.json> <output-dir> [--precisions Q4_K_M,Q5_K_M] [--imatrix path] [--max-buffer-mib 512] [--gpu-layers 0] [--vision-suite vision.json --mmproj vision.gguf [--mmproj-candidate other-vision.gguf]] [--ppl-corpus heldout.txt --max-ppl-regression-pct 0] [--json]
   ojon quant-parity-run  <original-F16.gguf> <original-or-Q4-reference.gguf> <suite.json> <output-dir> [same options] --confirm
   ojon adaptive-plan <original.gguf> <tensor-sensitivity.json> <existing-output-dir> <suite.json> [--targets 3.0,3.5,4.0] [--quantizer llama-quantize] [--eval-tool llama-cli] [--imatrix path] [--device Vulkan2] [--gpu-layers 99] [--max-loss 1.0] [--json]
   ojon adaptive-run <original.gguf> <tensor-sensitivity.json> <existing-output-dir> <suite.json> [options] --confirm
@@ -152,6 +152,8 @@ Hugging Face conversion options (quantize-hf only):
   --converter <path>      Installed upstream convert_hf_to_gguf.py
   --python <path>         Python executable with llama.cpp converter dependencies
   --quantizer <path>      Installed llama-quantize binary
+  --mmproj-out <path.gguf> Also convert the vision projector (VLM sources only); never overwrites
+  --mmproj-precision <t>  Projector precision: f16 (default), bf16 or q8_0
 
 Important:
   - Direct GGUF quantize takes a GGUF source; quantize-hf takes a local HF checkpoint folder.

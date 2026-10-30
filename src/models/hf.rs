@@ -5,6 +5,9 @@
 use crate::gguf::{inspect_gguf, GgufSummary};
 use crate::jobs::run_with_log;
 use crate::llama::{prepare_gguf, quantize_gguf_with_log, Precision};
+use crate::mmproj::{
+    convert_mmproj, folder_has_vision_tower, resolve_mmproj_output, MmprojPrecision, MmprojResult,
+};
 use crate::resource::{assess_resources, ResourceMode};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -72,6 +75,34 @@ pub struct HfQuantizePlan {
     pub quantizer: PathBuf,
     pub precision: Precision,
     pub threads: usize,
+    /// Optional second converter run for the vision projector (VLM only).
+    pub mmproj: Option<MmprojRequest>,
+}
+/// Where and how precise the separate projector GGUF is written.
+#[derive(Clone, Debug)]
+pub struct MmprojRequest {
+    pub output: PathBuf,
+    pub precision: MmprojPrecision,
+}
+impl HfQuantizePlan {
+    /// Adds a projector conversion. Only valid for a source with a vision
+    /// tower; the destination must be a new `.gguf` outside the source folder
+    /// and distinct from the language output.
+    pub fn with_mmproj(mut self, output: &Path, precision: MmprojPrecision) -> io::Result<Self> {
+        if !folder_has_vision_tower(&self.source.directory)? {
+            return Err(invalid(
+                "--mmproj-out needs a vision model: config.json has no vision_config and model_type is not a VLM",
+            ));
+        }
+        let output = resolve_mmproj_output(output, &self.source.directory)?;
+        if output == self.output {
+            return Err(invalid(
+                "mmproj output must differ from the language GGUF output",
+            ));
+        }
+        self.mmproj = Some(MmprojRequest { output, precision });
+        Ok(self)
+    }
 }
 fn resolve_script(path: &Path) -> io::Result<PathBuf> {
     let candidate = if path.is_dir() {
@@ -134,6 +165,7 @@ pub fn prepare_hf(
         quantizer: quantizer.to_path_buf(),
         precision,
         threads,
+        mmproj: None,
     })
 }
 
@@ -163,6 +195,8 @@ pub struct HfQuantizeResult {
     pub output: PathBuf,
     pub info: GgufSummary,
     pub receipt: Option<PathBuf>,
+    /// Present only when the plan asked for a projector.
+    pub mmproj: Option<MmprojResult>,
 }
 pub fn quantize_hf(plan: &HfQuantizePlan) -> io::Result<HfQuantizeResult> {
     quantize_hf_with_log(plan, |line| eprintln!("{line}"))
@@ -178,6 +212,14 @@ where
             io::ErrorKind::AlreadyExists,
             "output exists",
         ));
+    }
+    if let Some(request) = &plan.mmproj {
+        if request.output.symlink_metadata().is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "mmproj output exists; never overwrite it",
+            ));
+        }
     }
     let parent = plan
         .output
@@ -222,14 +264,30 @@ where
     )?;
     let result = quantize_gguf_with_log(&qplan, |line| on_log(line))?;
     fs::hard_link(&result.output, &plan.output)?;
-    let receipt = write_receipt(plan, &result.output_info).ok();
+    let mmproj = match &plan.mmproj {
+        Some(request) => Some(convert_mmproj(
+            &plan.python,
+            &plan.converter_script,
+            &plan.source.directory,
+            &request.output,
+            request.precision,
+            &mut |line| on_log(line),
+        )?),
+        None => None,
+    };
+    let receipt = write_receipt(plan, &result.output_info, mmproj.as_ref()).ok();
     Ok(HfQuantizeResult {
         output: plan.output.clone(),
         info: result.output_info,
         receipt,
+        mmproj,
     })
 }
-fn write_receipt(plan: &HfQuantizePlan, info: &GgufSummary) -> io::Result<PathBuf> {
+fn write_receipt(
+    plan: &HfQuantizePlan,
+    info: &GgufSummary,
+    mmproj: Option<&MmprojResult>,
+) -> io::Result<PathBuf> {
     let mut path_os: OsString = plan.output.as_os_str().to_os_string();
     path_os.push(".ojon-receipt.txt");
     let path = PathBuf::from(path_os);
@@ -258,6 +316,12 @@ fn write_receipt(plan: &HfQuantizePlan, info: &GgufSummary) -> io::Result<PathBu
     writeln!(file, "output_tensors={}", info.tensor_count)?;
     writeln!(file, "verification=GGUF_METADATA_AND_TENSOR_CATALOG_ONLY")?;
     writeln!(file, "runtime_load_test=NOT_RUN")?;
+    if let Some(mm) = mmproj {
+        writeln!(file, "mmproj.path={}", mm.path.display())?;
+        writeln!(file, "mmproj.precision={}", mm.precision)?;
+        writeln!(file, "mmproj.bytes={}", mm.bytes)?;
+        writeln!(file, "mmproj.vision_inference_test=NOT_RUN")?;
+    }
     file.flush()?;
     Ok(path)
 }
