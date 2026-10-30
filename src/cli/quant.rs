@@ -2294,7 +2294,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 return Err(invalid("recipe-apply writes a quantized model; add --confirm to execute"));
             }
             let settings = match (&corpus, verify_budget) {
-                (Some(c), Some(_)) => Some(ojon_backend::kld::KldSettings { tool: perplexity_tool, corpus: c.clone(), gpu_layers, fit, context, chunks }),
+                (Some(c), Some(_)) => Some(ojon_backend::kld::KldSettings { tool: perplexity_tool, corpus: c.clone(), gpu_layers, fit, context, chunks, device: None }),
                 (None, Some(_)) => return Err(invalid("--verify-budget needs --corpus")),
                 _ => None,
             };
@@ -2490,7 +2490,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 imatrix,
                 imatrix_tool,
                 threads,
-                kld: ojon_backend::kld::KldSettings { tool: perplexity_tool, corpus, gpu_layers, fit, context, chunks },
+                kld: ojon_backend::kld::KldSettings { tool: perplexity_tool, corpus, gpu_layers, fit, context, chunks, device: None },
                 keep_probes,
                 budget_p99,
                 resume,

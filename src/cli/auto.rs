@@ -69,6 +69,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
     let mut preset = Preset::Balanced;
     let mut corpus: Option<PathBuf> = None;
     let mut eval_corpus: Option<PathBuf> = None;
+    let mut device: Option<String> = None;
     let mut chunks = 24u32;
     let mut threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(4);
     let (mut confirm, mut resume, mut json) = (false, false, false);
@@ -81,6 +82,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             Some("--corpus") => corpus = Some(PathBuf::from(next_argument(&mut args, "calibration text")?)),
             Some("--eval-corpus") => eval_corpus = Some(PathBuf::from(next_argument(&mut args, "held-out text")?)),
             Some("--chunks") => chunks = text(next_argument(&mut args, "chunks")?, "chunks")?.parse().map_err(|_| invalid("chunks must be a number"))?,
+            Some("--device") => device = Some(text(next_argument(&mut args, "backend device list, e.g. Vulkan0")?, "device")?),
             Some("--threads") => threads = text(next_argument(&mut args, "threads")?, "threads")?.parse().map_err(|_| invalid("threads must be a number"))?,
             Some("--confirm") => confirm = true,
             Some("--resume") => resume = true,
@@ -106,7 +108,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
         imatrix: None,
         imatrix_tool: Some(imatrix_tool),
         threads,
-        kld: KldSettings { tool: perplexity_tool, corpus, gpu_layers: 99, fit: true, context: 512, chunks },
+        kld: KldSettings { tool: perplexity_tool, corpus, gpu_layers: 99, fit: true, context: 512, chunks, device },
         keep_probes: false,
         budget_p99: Some(p99),
         resume,

@@ -96,6 +96,8 @@ Commands:
   ojon minimax-checkpoint-run  <original-MiniMax-H3.safetensors> <new-NVFP4.safetensors> [same options] --confirm
   ojon minimax-w4a4-plan <local-MiniMax-H3-Diffusers-dir> <new-artifact-dir> [--component fl2va|ref2va|text_encoder] [--device cuda|xpu|cpu|auto] [--python python]
   ojon minimax-w4a4-run  <local-MiniMax-H3-Diffusers-dir> <new-artifact-dir> [same options] --confirm
+  ojon kld-reference <original.gguf> <new-reference.logits> --corpus heldout.txt [--ctx 512] [--chunks N] [--ngl 99|auto] [--device Vulkan0] [--tool llama-perplexity] [--json] --confirm   Save the original's logits once; the scale every quant is measured on
+  ojon kld-eval <candidate.gguf> [more.gguf ...] --reference <ref.logits> --corpus <same heldout.txt> [--original original.gguf] [--ctx 512] [--chunks N] [--ngl 99|auto] [--device Vulkan0] [--out receipt.json] [--json]   Mean/p99/max KLD of any GGUF (an online quant, an Ojon recipe) against the same original on the same text
   ojon lora-merge-plan <original-F16-GGUF> <adapter.gguf|peft-dir> <merged.gguf> [--scale 1.0] [--hf-base <hf-folder>] [--task-suite tasks.json] [--export-tool path] [--convert-script path] [--python python] [--json]   Plan LoRA-then-quant step one: merge through llama-export-lora; writes nothing
   ojon lora-merge-run  <original-F16-GGUF> <adapter.gguf|peft-dir> <merged.gguf> [same options] --confirm   Writes merged GGUF (+ converted adapter for a PEFT folder) and a receipt naming the task-suite gate and the auto-quant step
   ojon whisper-quant-plan <whisper-ggml.bin> <output-dir> [--formats q8_0,q5_0,q4_0] [--tool whisper-quantize] [--json]   Plan whisper.cpp quantization (q8_0 q5_0 q4_0 q5_1 q4_1); writes nothing

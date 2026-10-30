@@ -2,6 +2,7 @@
 
 pub mod audio;
 pub mod lora;
+pub mod kld;
 pub mod auto;
 pub mod common;
 pub mod diffusion;
@@ -42,6 +43,9 @@ pub fn run() -> io::Result<()> {
         return Ok(());
     }
     if learn::handle(cmd, &mut args)? {
+        return Ok(());
+    }
+    if kld::handle(cmd, &mut args)? {
         return Ok(());
     }
     if lora::handle(cmd, &mut args)? {

@@ -36,6 +36,10 @@ pub struct KldSettings {
     /// Limit the corpus to this many chunks (0 = whole corpus). Probes are many,
     /// so a bounded, identical slice per run keeps the search tractable and fair.
     pub chunks: u32,
+    /// Backend device list for llama-perplexity (`-dev`, e.g. `Vulkan0`); None
+    /// lets the tool use every device, which collides with a model already
+    /// served on one of them.
+    pub device: Option<String>,
 }
 
 impl KldSettings {
@@ -72,6 +76,9 @@ impl KldSettings {
         }
         if self.chunks > 0 {
             cmd.arg("--chunks").arg(self.chunks.to_string());
+        }
+        if let Some(d) = &self.device {
+            cmd.arg("-dev").arg(d);
         }
     }
 }
@@ -225,7 +232,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let corpus = dir.join("corpus.txt");
         std::fs::write(&corpus, "x".repeat(200)).unwrap();
-        let ok = KldSettings { tool: PathBuf::from("llama-perplexity"), corpus: corpus.clone(), gpu_layers: 99, fit: false, context: 512, chunks: 20 };
+        let ok = KldSettings { tool: PathBuf::from("llama-perplexity"), corpus: corpus.clone(), gpu_layers: 99, fit: false, context: 512, chunks: 20, device: None };
         assert!(ok.validate().is_ok());
         assert!(KldSettings { context: 500, ..ok.clone() }.validate().is_err());
         assert!(KldSettings { gpu_layers: 999, ..ok.clone() }.validate().is_err());

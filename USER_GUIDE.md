@@ -365,6 +365,27 @@ Vision scoring prefers `llama-mtmd-cli` when it is discovered (or given with
 `llama-cli` builds do not accept `--mmproj` / `--image`; only the rewritten
 `llama-cli` (shipped with `llama-cli-impl.dll`) and `llama-mtmd-cli` do.
 
+## Is this quant any good? `kld-reference` and `kld-eval`
+
+```sh
+ojon kld-reference Qwen3.8-27B-BF16.gguf qwen38.reference.logits --corpus corpus-eval.txt --chunks 8 --device Vulkan0 --confirm
+ojon kld-eval Qwen3.8-27B-UD-Q5_K_M.gguf Qwen3.8-27B-UD-Q4_K_XL.gguf recipe.gguf \
+     --reference qwen38.reference.logits --corpus corpus-eval.txt --chunks 8 --device Vulkan0 \
+     --original Qwen3.8-27B-BF16.gguf --out kld-eval-receipt.json
+```
+
+The recipe search's own measurement, exposed for any file: save the original's
+logits once on held-out text, then score every candidate against them with the
+same context, chunk count and tool. This is how an online quant and an Ojon
+recipe land on one scale (bytes, mean KLD with its uncertainty, p99, max). Use
+`--device` to keep the measurement on one GPU when another one is serving a
+model. The receipt (`ojon.kld_eval.v1`) states the claim: a similarity
+measurement between two files on this corpus, not a capability claim.
+
+Repeat noise, measured: the same q5_k file scored mean 0.024363 inside a recipe
+run and 0.024535 through `kld-eval` on one GPU (uncertainty ± 0.0007, p99
+0.139 vs 0.137). Differences smaller than that are not differences.
+
 ## LoRA that makes the original better, then quant
 
 ```sh

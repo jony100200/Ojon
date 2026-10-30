@@ -899,6 +899,7 @@ impl Workstation {
                         fit: true,
                         context: 512,
                         chunks: 40,
+                        device: None,
                     },
                     keep_probes: false,
                     budget_p99: None,

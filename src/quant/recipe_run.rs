@@ -907,7 +907,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let corpus = dir.join("c.txt");
         fs::write(&corpus, "y".repeat(300)).unwrap();
-        let kld = KldSettings { tool: PathBuf::from("llama-perplexity"), corpus, gpu_layers: 99, fit: false, context: 512, chunks: 10 };
+        let kld = KldSettings { tool: PathBuf::from("llama-perplexity"), corpus, gpu_layers: 99, fit: false, context: 512, chunks: 10, device: None };
         let job = RecipeJob {
             source: dir.join("missing.gguf"), output_dir: dir.clone(), base: "q5_k", floor: "iq2_s", budget_kld: 0.01,
             quantize_tool: PathBuf::from("llama-quantize"), imatrix: None, imatrix_tool: None, threads: 4, kld,
