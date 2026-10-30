@@ -1430,7 +1430,12 @@ pub fn harvest_agent_sessions(
         let parsed_episodes = if ext == "json" {
             parse_json_agent_run(&file_path).unwrap_or_default()
         } else if ext == "jsonl" {
-            parse_jsonl_agent_run(&file_path).unwrap_or_default()
+            // Claude Code session transcripts share the extension but not the schema.
+            if crate::learn::harvest_claude::is_claude_transcript(&file_path) {
+                crate::learn::harvest_claude::parse_claude_transcript(&file_path).unwrap_or_default()
+            } else {
+                parse_jsonl_agent_run(&file_path).unwrap_or_default()
+            }
         } else {
             Vec::new()
         };
