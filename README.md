@@ -28,6 +28,7 @@ Instead of juggling a dozen separate utilities, **Ojon aims to bring model optim
 | **Optimise Model** | Find a smaller version that still performs well on the tasks you care about. | Available workflows; expanding |
 | **One-Command Quant** | `auto-quant`: pick smallest / balanced / safest, press, get the smallest measured recipe plus a receipt. | Available |
 | **Measured Mixed Precision** | Find how low each tensor class can go within a KL-divergence budget, per model, and build the smallest recipe that stays inside it ([method](docs/RECIPE_SEARCH.md)). | Available (`recipe-plan` / `recipe-run` / `recipe-apply`) |
+| **Diffusion Precision Sweep** | Convert an image or video denoiser to every GGUF format, measure each against the reference on a fixed seed, keep the smallest that passes. | Available (`diffusion-sweep`) |
 | **Image Parity Gate** | Compare a diffusion GGUF quant against its reference on a fixed-seed ComfyUI workflow: PSNR and pixel differences, pass/fail, receipt. | Available (`diffusion-parity`) |
 | **Embedding Parity Gate** | Compare an embedding or reranker GGUF quant against its reference on your own texts: per-text cosine, neighbour overlap, Recall@k / NDCG@10, pass/fail, receipt. | Available (`embed-parity-plan` / `embed-parity-run`) |
 | **Calibration Corpus** | Turn your own chats, docs and code into a clean, deduplicated calibration file with a size report. | Available (`corpus-build`) |

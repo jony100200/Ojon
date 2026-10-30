@@ -1,5 +1,6 @@
 pub mod diffusion;
 pub mod diffusion_gguf;
+pub mod diffusion_sweep;
 pub mod gguf;
 pub mod hf;
 pub mod llama;

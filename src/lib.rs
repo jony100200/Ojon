@@ -50,6 +50,7 @@ pub use self::uncensor::uncensor_trace;
 // Models
 pub use self::models::diffusion;
 pub use self::models::diffusion_gguf;
+pub use self::models::diffusion_sweep;
 pub use self::models::gguf;
 pub use self::models::hf;
 pub use self::models::llama;

@@ -275,6 +275,92 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             }
             Ok(true)
         }
+        "diffusion-sweep-plan" | "diffusion-sweep-run" => {
+            // Image counterpart of recipe-run: convert each format, generate beside the
+            // reference on one fixed-seed workflow, keep the smallest that passes the gate.
+            let execute = cmd == "diffusion-sweep-run";
+            let source = PathBuf::from(next_argument(&mut args, "local denoiser safetensors")?);
+            let unet_dir = PathBuf::from(next_argument(&mut args, "ComfyUI models/unet directory (outputs land here)")?);
+            let mut tool = ojon_backend::discovered_path(BackendId::StableDiffusionCpp)
+                .unwrap_or_else(|| PathBuf::from("sd-cli"));
+            let mut kind = MediaKind::Image;
+            let mut layout = InputLayout::Diffusion;
+            let mut formats = String::from("q8_0,q5_0,q4_K,q4_0,q3_K");
+            let mut workflow: Option<PathBuf> = None;
+            let mut reference: Option<String> = None;
+            let mut server = String::from("http://127.0.0.1:8188");
+            let mut python = PathBuf::from("python");
+            let mut ffmpeg: Option<PathBuf> = None;
+            let mut min_psnr = 30.0f64;
+            let mut max_temporal_delta: Option<f64> = None;
+            let mut node_id: Option<String> = None;
+            let mut timeout_s = 1800u32;
+            let (mut confirmed, mut json) = (false, false);
+            let utf8 = |v: std::ffi::OsString, what: &str| -> io::Result<String> {
+                v.to_str().map(str::to_owned).ok_or_else(|| invalid(format!("{what} must be UTF-8")))
+            };
+            while let Some(opt) = args.next() {
+                match opt.to_str() {
+                    Some("--tool") => tool = PathBuf::from(next_argument(&mut args, "sd-cli")?),
+                    Some("--kind") => kind = MediaKind::parse(&utf8(next_argument(&mut args, "image|video")?, "kind")?)?,
+                    Some("--layout") => layout = InputLayout::parse(&utf8(next_argument(&mut args, "diffusion|checkpoint")?, "layout")?)?,
+                    Some("--formats") => formats = utf8(next_argument(&mut args, "comma-separated formats")?, "formats")?,
+                    Some("--workflow") => workflow = Some(PathBuf::from(next_argument(&mut args, "API-format workflow JSON")?)),
+                    Some("--reference-name") => reference = Some(utf8(next_argument(&mut args, "reference weights name")?, "reference name")?),
+                    Some("--server") => server = utf8(next_argument(&mut args, "ComfyUI server URL")?, "server")?,
+                    Some("--python") => python = PathBuf::from(next_argument(&mut args, "Python executable")?),
+                    Some("--ffmpeg") => ffmpeg = Some(PathBuf::from(next_argument(&mut args, "ffmpeg executable")?)),
+                    Some("--min-psnr") => min_psnr = utf8(next_argument(&mut args, "minimum PSNR dB")?, "min-psnr")?.parse().map_err(|_| invalid("min-psnr must be a number"))?,
+                    Some("--max-temporal-delta") => max_temporal_delta = Some(utf8(next_argument(&mut args, "max temporal delta")?, "max-temporal-delta")?.parse().map_err(|_| invalid("max-temporal-delta must be a number"))?),
+                    Some("--node-id") => node_id = Some(utf8(next_argument(&mut args, "loader node id")?, "node id")?),
+                    Some("--timeout") => timeout_s = utf8(next_argument(&mut args, "timeout seconds")?, "timeout")?.parse().map_err(|_| invalid("timeout must be integer seconds"))?,
+                    Some("--json") => json = true,
+                    Some("--confirm") if execute => confirmed = true,
+                    _ => return Err(invalid(format!("unknown diffusion-sweep option: {}", opt.to_string_lossy()))),
+                }
+            }
+            let workflow = workflow.ok_or_else(|| invalid("--workflow is required"))?;
+            let reference = reference.ok_or_else(|| invalid("--reference-name is required"))?;
+            let plan = ojon_backend::diffusion_sweep::prepare_diffusion_sweep(ojon_backend::diffusion_sweep::DiffusionSweepRequest {
+                source,
+                comfy_unet_dir: unet_dir,
+                tool,
+                kind,
+                layout,
+                formats: ojon_backend::diffusion_sweep::parse_formats(&formats)?,
+                workflow,
+                reference_name: reference,
+                server,
+                python,
+                ffmpeg,
+                min_psnr,
+                max_temporal_delta,
+                node_id,
+                timeout_s,
+            })?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&plan.plan_json())?);
+            } else {
+                println!(
+                    "sweep: {} formats ({}), {} generations, gate min PSNR {} dB{}",
+                    plan.request.formats.len(),
+                    plan.request.formats.join(","),
+                    plan.request.formats.len() * 2,
+                    plan.request.min_psnr,
+                    plan.request.max_temporal_delta.map(|t| format!(" + temporal delta <= {t}")).unwrap_or_default()
+                );
+            }
+            if !execute {
+                println!("next_step: ojon diffusion-sweep-run <same arguments> --confirm");
+                return Ok(true);
+            }
+            if !confirmed {
+                return Err(invalid("diffusion-sweep-run converts and generates for every format; add --confirm"));
+            }
+            let receipt = ojon_backend::diffusion_sweep::run_diffusion_sweep(&plan, |line| eprintln!("{line}"))?;
+            println!("receipt: {}", receipt.display());
+            Ok(true)
+        }
         "diffusion-parity" => {
             // Measured image parity: reference vs candidate on one fixed-seed ComfyUI workflow.
             let mut workflow: Option<PathBuf> = None;

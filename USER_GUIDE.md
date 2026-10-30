@@ -247,6 +247,21 @@ Local agents may call the JSON commands. They cannot control your computer throu
 
 ---
 
+## Diffusion precision sweep: the image counterpart of the recipe search
+
+```sh
+ojon diffusion-sweep-run flux-dev.safetensors "M:\ComfyUI\models\unet" --workflow flux_api.json \
+     --reference-name flux-dev-F16.gguf --formats q8_0,q5_0,q4_K,q4_0,q3_K --min-psnr 30 --confirm
+```
+
+Each format is converted with `sd-cli` into ComfyUI's UNet directory (the loader
+refers to files by name, so outputs must land there), then generated beside the
+reference on the same fixed-seed workflow through `diffusion-parity`. The
+receipt (`ojon.diffusion_sweep.v1`) lists every format with its size and
+worst-frame PSNR (and temporal delta for `--kind video`) and names the smallest
+format that passed the gate, or none. `diffusion-sweep-plan` prints the plan and
+converts nothing.
+
 ## Measured image parity for diffusion GGUF quants
 
 The language side gates a quant on KL divergence. For image and video models the

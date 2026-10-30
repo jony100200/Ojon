@@ -90,7 +90,7 @@ No embedding, reranker, ONNX, detection or segmentation command.
    Done when unit tests classify `WhisperForConditionalGeneration` as Speech,
    `T5ForConditionalGeneration` as not Diffusion, an mmproj (`clip`) as VLM,
    bge-m3 and Qwen3-Embedding as Embedding, and `ojon --help` lists the commands.
-2. **Diffusion precision sweep + multi-seed parity.** `diffusion-sweep-plan|run`:
+2. **DONE 2026-10-30 (`diffusion-sweep-plan|run`, one seed per run; multi-seed = several workflows). Diffusion precision sweep + multi-seed parity.** `diffusion-sweep-plan|run`:
    convert to q8_0, q5_0, q4_K, q4_0, q3_K; run the parity script over N prompts
    x M seeds; one receipt names the smallest format that passes `--min-psnr`, or
    none. Optional `sd-cli --tensor-type-rules` for sensitive blocks.
