@@ -14,6 +14,8 @@ pub mod quant_parity;
 pub mod recipe;
 pub mod recipe_run;
 pub mod sweep;
+pub mod wer;
+pub mod whisper_parity;
 
 pub use adaptive::*;
 pub use advanced::*;
@@ -31,3 +33,5 @@ pub use quant_parity::*;
 pub use recipe::*;
 pub use recipe_run::*;
 pub use sweep::*;
+pub use wer::*;
+pub use whisper_parity::*;

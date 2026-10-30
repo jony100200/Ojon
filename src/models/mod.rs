@@ -6,6 +6,7 @@ pub mod hf;
 pub mod llama;
 pub mod mmproj;
 pub mod model_build;
+pub mod whisper;
 pub mod orbitquant;
 pub mod comfy_checkpoint;
 
@@ -16,5 +17,6 @@ pub use hf::*;
 pub use llama::*;
 pub use mmproj::*;
 pub use model_build::*;
+pub use whisper::*;
 pub use orbitquant::*;
 pub use comfy_checkpoint::*;

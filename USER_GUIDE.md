@@ -365,6 +365,57 @@ Vision scoring prefers `llama-mtmd-cli` when it is discovered (or given with
 `llama-cli` builds do not accept `--mmproj` / `--image`; only the rewritten
 `llama-cli` (shipped with `llama-cli-impl.dll`) and `llama-mtmd-cli` do.
 
+## Speech: whisper.cpp quantize and WER gate
+
+whisper.cpp models are GGML `.bin` files, not GGUF, and whisper.cpp ships its
+own quantizer. `ojon probe ggml-base.bin` recognises them (`audio_speech`,
+format `ggml_bin`); `whisper-quant-*` runs the public `whisper-quantize` tool
+and `whisper-parity-*` measures what the quantization did to transcription.
+
+```sh
+# Plan only: validates the model and prints the exact whisper-quantize commands; writes nothing
+ojon whisper-quant-plan ggml-base.bin ./whisper-out --formats q8_0,q5_0,q4_0
+
+# Execute: one .bin per format plus whisper-quant-receipt.json (sizes, ratios, exact commands)
+ojon whisper-quant-run ggml-base.bin ./whisper-out --formats q8_0,q5_0,q4_0 --confirm
+
+# WER gate: original and candidates transcribe the same held-out clips
+ojon whisper-parity-plan ggml-base.bin ./whisper-out/ggml-base-q5_0.bin ./whisper-out/ggml-base-q4_0.bin     --clips clips.jsonl --language en --max-wer-delta 0.02
+ojon whisper-parity-run  ggml-base.bin ./whisper-out/ggml-base-q5_0.bin --clips clips.jsonl --confirm
+```
+
+Formats are whisper.cpp's scalar types `q8_0`, `q5_0`, `q4_0` (default set),
+`q5_1` and `q4_1`; the tool's usage is `whisper-quantize <in.bin> <out.bin>
+<type>` with the lower-case type name, as in `examples/quantize/quantize.cpp`.
+The executable is `whisper-quantize` in current builds (`quantize` in older
+ones); point `--tool` or `OJON_WHISPER_QUANTIZE` at it when it is not on PATH.
+Inputs must be whisper GGML `.bin`: the tool checks the GGML magic and does not
+read GGUF.
+
+The clips manifest is JSONL, one clip per line, 1..=512 clips, relative audio
+paths resolved against the manifest's folder:
+
+```json
+{"audio": "clips/0001.wav", "text": "the reference transcript of this clip"}
+{"audio": "clips/0002.wav", "text": "another one"}
+```
+
+Every model transcribes every clip with
+`whisper-cli -m <model> -f <clip> -nt -np -l <lang> -t <threads> -otxt -of <stem>`
+(flags from whisper.cpp `examples/cli`); the `<stem>.txt` output is scored
+against the manifest text with word error rate (lower-case, punctuation
+stripped, whitespace collapsed; word-level Levenshtein with substitution,
+insertion and deletion counts). The receipt (`ojon.whisper_parity.v1`) lists
+per-clip WER for every model, corpus WER (pooled errors over pooled reference
+words), the candidate-minus-original delta, pass/fail against
+`--max-wer-delta` (default 0.02), every command, and the transcripts folder.
+
+A pass means the candidate's WER on these clips is within the budget of the
+original's WER on the same clips. It is not a general accuracy claim: the
+original's own WER is whatever it is on your clips, and a clip set in one
+language or domain says nothing about another. The live runner is verified on
+the first real clip set; the pure parts (manifest, WER, gate) are unit-tested.
+
 ## Native image/video model weight compression (experimental)
 
 Ojon ships its **own Rust quantizer** for eligible 2D weight matrices in original F16, BF16 or F32 safetensors checkpoints. It uses bounded-memory per-group affine uniform quantization (2/3/4-bit); unrecognized and sensitive tensors are preserved without modification. There is no dependency on RebelUI, PyTorch or GPU drivers for this converter.
