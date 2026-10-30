@@ -140,7 +140,7 @@ pub fn prepare_recipe(job: RecipeJob) -> io::Result<RecipePlan> {
         if tool.as_os_str().is_empty() {
             return Err(invalid("imatrix executable missing"));
         }
-        if output_dir.join("calibration.imatrix").exists() {
+        if output_dir.join("calibration.imatrix.gguf").exists() {
             return Err(invalid("calibration.imatrix already exists in the output directory"));
         }
     }
@@ -267,7 +267,7 @@ where
     let mut imatrix_auto: Option<PathBuf> = None;
     if plan.job.imatrix.is_none() {
         if let Some(tool) = &plan.job.imatrix_tool {
-            let out = dir.join("calibration.imatrix");
+            let out = dir.join("calibration.imatrix.gguf");
             log(&format!("[ojon] importance matrix from the corpus with {}", plain(tool)));
             let im_plan = crate::quant::calibration::prepare_imatrix(
                 &plan.job.source, &plan.job.kld.corpus, &out, tool, plan.job.kld.gpu_layers, plan.job.kld.context)?;
@@ -366,9 +366,143 @@ where
     Ok(path)
 }
 
+/// Read the per-class levels and base out of a `recipe-receipt.json` (or a
+/// bare `ojon.kld_recipe.v1` object), so a measured recipe can be reused on
+/// another original of the same family without re-probing.
+pub fn levels_from_receipt(doc: &Value) -> io::Result<(&'static str, BTreeMap<TensorClass, &'static str>)> {
+    let recipe = if doc.get("schema").and_then(Value::as_str) == Some("ojon.kld_recipe_receipt.v1") {
+        doc.get("recipe").ok_or_else(|| invalid("receipt has no recipe object"))?
+    } else {
+        doc
+    };
+    if recipe.get("schema").and_then(Value::as_str) != Some("ojon.kld_recipe.v1") {
+        return Err(invalid("expected an ojon.kld_recipe.v1 recipe or an ojon.kld_recipe_receipt.v1 receipt"));
+    }
+    let base = recipe.get("base_level").and_then(Value::as_str).ok_or_else(|| invalid("recipe missing base_level"))?;
+    let base = ladder_name(base)?;
+    let mut levels = BTreeMap::new();
+    let map = recipe.get("levels").and_then(Value::as_object).ok_or_else(|| invalid("recipe missing levels"))?;
+    for (name, level) in map {
+        let class = TensorClass::parse(name).ok_or_else(|| invalid(format!("unknown tensor class '{name}' in recipe")))?;
+        let level = level.as_str().ok_or_else(|| invalid(format!("level for {name} must be a string")))?;
+        levels.insert(class, ladder_name(level)?);
+    }
+    if levels.is_empty() {
+        return Err(invalid("recipe has no class levels"));
+    }
+    Ok((base, levels))
+}
+
+/// Apply a measured recipe to `source` (an original F16/BF16 GGUF of the same
+/// family) without re-probing. When `verify` is given, a fresh reference is
+/// built from this source and the output's KLD is measured and reported; the
+/// transferred recipe is then only called within budget on that measurement.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_recipe<F>(
+    source: &Path,
+    output_dir: &Path,
+    receipt: &Path,
+    quantize_tool: &Path,
+    imatrix: Option<&Path>,
+    threads: usize,
+    verify: Option<(&KldSettings, f64)>,
+    mut log: F,
+) -> io::Result<PathBuf>
+where
+    F: FnMut(&str),
+{
+    let doc: Value = serde_json::from_slice(&fs::read(receipt)?).map_err(|e| invalid(format!("invalid recipe JSON: {e}")))?;
+    let (base, levels) = levels_from_receipt(&doc)?;
+    let source = source.canonicalize()?;
+    let info = inspect_gguf(&source)?;
+    if !matches!(info.file_type, Some(0 | 1 | 32)) {
+        return Err(invalid("recipe-apply requires an original F32/F16/BF16 GGUF"));
+    }
+    if !output_dir.is_dir() {
+        return Err(invalid("output directory must exist"));
+    }
+    let output_dir = output_dir.canonicalize()?;
+    let out_path = output_dir.join("recipe-applied.gguf");
+    if out_path.exists() || output_dir.join("recipe-applied-receipt.json").exists() {
+        return Err(invalid("recipe-applied output already exists in the output directory"));
+    }
+    // Only classes present in THIS model are pinned; a class the recipe knows but
+    // the model lacks is harmless, a class the model has but the recipe never saw
+    // stays at the base and is reported.
+    let present = class_elements(&inspect_gguf_tensors(&source)?);
+    let mut applied = BTreeMap::new();
+    let mut unseen = Vec::new();
+    for class in present.keys() {
+        match levels.get(class) {
+            Some(level) => {
+                applied.insert(*class, *level);
+            }
+            None => {
+                applied.insert(*class, base);
+                unseen.push(class.name());
+            }
+        }
+    }
+    let tt_path = output_dir.join("recipe-applied.tensor-types.txt");
+    fs::write(&tt_path, render_full(&applied))?;
+    log(&format!("[ojon] applying recipe (base {base}) to {}", plain(&source)));
+    let started = Instant::now();
+    let mut q = prepare_gguf(&source, &out_path, quantize_tool, main_precision_for(base)?, threads)?.with_tensor_type_file(&tt_path)?;
+    if let Some(im) = imatrix {
+        q = q.with_imatrix(im)?;
+    }
+    let done = quantize_gguf_with_log(&q, |line| log(line))?;
+    let mut receipt_json = json!({
+        "schema": "ojon.kld_recipe_applied.v1",
+        "source": plain(&source),
+        "source_bytes": info.file_bytes,
+        "recipe_from": plain(receipt),
+        "base_level": base,
+        "levels": applied.iter().map(|(c, l)| (c.name().to_string(), json!(l))).collect::<serde_json::Map<_, _>>(),
+        "classes_not_in_recipe_left_at_base": unseen,
+        "output": plain(&done.output),
+        "output_bytes": done.output_info.file_bytes,
+        "size_ratio_vs_source": done.output_info.file_bytes as f64 / info.file_bytes.max(1) as f64,
+        "quantize_seconds": started.elapsed().as_secs_f64(),
+        "verification": "none",
+        "claim": "transferred recipe; not measured on this model unless verification is present"
+    });
+    if let Some((settings, budget)) = verify {
+        let dump = save_reference_logits(&source, &output_dir.join("reference.logits"), settings, &mut log)?;
+        let k = measure_kld(&done.output, &dump, settings, &mut log)?;
+        // No base candidate here: the budget is absolute mean KLD against the original.
+        let within = k.mean <= budget + 1e-9;
+        log(&format!("[ojon] applied recipe: mean KLD {:.6} vs absolute budget {:.6} -> {}", k.mean, budget, if within { "within" } else { "OVER" }));
+        receipt_json["verification"] = json!({"kld": kld_json(&k), "absolute_mean_kld_budget": budget, "measured_within_budget": within});
+        receipt_json["claim"] = json!(if within {
+            "measured mean KLD within the absolute budget on this corpus slice; run the task suite before any capability claim"
+        } else {
+            "rejected: measured mean KLD exceeds the absolute budget; re-run recipe-run on this model"
+        });
+    }
+    let path = output_dir.join("recipe-applied-receipt.json");
+    write_new(&path, &serde_json::to_vec_pretty(&receipt_json)?)?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn levels_from_receipt_accepts_recipe_or_full_receipt_and_rejects_junk() {
+        let recipe = json!({"schema": "ojon.kld_recipe.v1", "base_level": "q5_k",
+                            "levels": {"expert_down": "iq4_xs", "attn_vo": "q5_k"}});
+        let (base, levels) = levels_from_receipt(&recipe).unwrap();
+        assert_eq!(base, "q5_k");
+        assert_eq!(levels[&TensorClass::ExpertDown], "iq4_xs");
+        let receipt = json!({"schema": "ojon.kld_recipe_receipt.v1", "recipe": recipe});
+        assert_eq!(levels_from_receipt(&receipt).unwrap().1.len(), 2);
+        assert!(levels_from_receipt(&json!({"schema": "other"})).is_err());
+        assert!(levels_from_receipt(&json!({"schema": "ojon.kld_recipe.v1", "base_level": "q5_k", "levels": {"bogus": "q4_k"}})).is_err());
+        assert!(levels_from_receipt(&json!({"schema": "ojon.kld_recipe.v1", "base_level": "q5_k", "levels": {"attn_vo": "q9_z"}})).is_err());
+        assert!(levels_from_receipt(&json!({"schema": "ojon.kld_recipe.v1", "base_level": "q5_k", "levels": {}})).is_err());
+    }
 
     #[test]
     fn main_precision_maps_only_measurable_bases() {

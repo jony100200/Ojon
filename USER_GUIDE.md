@@ -95,6 +95,18 @@ have, and `--budget-p99 <x>` adds a tail gate so the 99th-percentile per-token K
 may not rise more than `x` over the base either. Mean KLD alone can hide rare,
 large divergences on individual tokens.
 
+To reuse a measured recipe on another original of the same family (a new
+fine-tune, an uncensored variant) without re-probing:
+
+```sh
+ojon recipe-apply other-original-F16.gguf ./applied ./recipe-out/recipe-receipt.json      --corpus data/calibration.txt --verify-budget 0.05 --confirm
+```
+
+Classes the recipe never measured stay at the base and are listed in the
+receipt. With `--verify-budget`, a fresh reference is built from the new
+original and the output's mean KLD must stay under that absolute value;
+without it the receipt says plainly that nothing was measured on this model.
+
 Mean KLD is a distance between output distributions, not a task score. A recipe
 within budget still goes through the task suite before any capability claim.
 Typical budgets: 0.005 strict, 0.01 default, 0.02 relaxed; the receipt also

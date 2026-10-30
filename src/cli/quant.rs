@@ -2172,6 +2172,62 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             }
             Ok(true)
         }
+        "recipe-apply" => {
+            // Reuse a measured recipe on another original of the same family, optionally verifying KLD.
+            let source = PathBuf::from(next_argument(&mut args, "original F16/BF16 GGUF model")?);
+            let output_dir = PathBuf::from(next_argument(&mut args, "output directory")?);
+            let receipt = PathBuf::from(next_argument(&mut args, "recipe-receipt.json or recipe JSON")?);
+            let mut imatrix: Option<PathBuf> = None;
+            let mut quantize_tool = ojon_backend::discovery::resolve_backend_command(
+                BackendId::LlamaQuantize,
+                "llama-quantize",
+            )?;
+            let mut perplexity_tool = ojon_backend::discovery::resolve_backend_command(
+                BackendId::LlamaPerplexity,
+                "llama-perplexity",
+            )?;
+            let mut corpus: Option<PathBuf> = None;
+            let mut verify_budget: Option<f64> = None;
+            let (mut context, mut gpu_layers, mut chunks) = (512u32, 99u32, 40u32);
+            let mut threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(4);
+            let mut confirm = false;
+            let text = |v: std::ffi::OsString, what: &str| -> io::Result<String> {
+                v.to_str().map(str::to_owned).ok_or_else(|| invalid(format!("{what} requires UTF-8")))
+            };
+            while let Some(option) = args.next() {
+                match option.to_str() {
+                    Some("--imatrix") => imatrix = Some(PathBuf::from(next_argument(&mut args, "importance matrix file")?)),
+                    Some("--quantize-tool") => quantize_tool = PathBuf::from(next_argument(&mut args, "llama-quantize executable")?),
+                    Some("--perplexity-tool") => perplexity_tool = PathBuf::from(next_argument(&mut args, "llama-perplexity executable")?),
+                    Some("--corpus") => corpus = Some(PathBuf::from(next_argument(&mut args, "held-out text corpus")?)),
+                    Some("--verify-budget") => {
+                        verify_budget = Some(text(next_argument(&mut args, "absolute mean KLD budget")?, "verify-budget")?
+                            .parse::<f64>()
+                            .map_err(|_| invalid("verify-budget must be a number"))?)
+                    }
+                    Some("--ctx") => context = text(next_argument(&mut args, "context")?, "ctx")?.parse().map_err(|_| invalid("ctx must be a number"))?,
+                    Some("--ngl") => gpu_layers = text(next_argument(&mut args, "gpu layers")?, "ngl")?.parse().map_err(|_| invalid("ngl must be a number"))?,
+                    Some("--chunks") => chunks = text(next_argument(&mut args, "chunk limit")?, "chunks")?.parse().map_err(|_| invalid("chunks must be a number"))?,
+                    Some("--threads") => threads = text(next_argument(&mut args, "thread count")?, "threads")?.parse().map_err(|_| invalid("threads must be a number"))?,
+                    Some("--confirm") => confirm = true,
+                    _ => return Err(invalid(format!("unknown recipe-apply option: {}", option.to_string_lossy()))),
+                }
+            }
+            if !confirm {
+                return Err(invalid("recipe-apply writes a quantized model; add --confirm to execute"));
+            }
+            let settings = match (&corpus, verify_budget) {
+                (Some(c), Some(_)) => Some(ojon_backend::kld::KldSettings { tool: perplexity_tool, corpus: c.clone(), gpu_layers, context, chunks }),
+                (None, Some(_)) => return Err(invalid("--verify-budget needs --corpus")),
+                _ => None,
+            };
+            let verify = settings.as_ref().map(|s| (s, verify_budget.unwrap_or(0.0)));
+            let receipt_out = ojon_backend::recipe_run::apply_recipe(
+                &source, &output_dir, &receipt, &quantize_tool, imatrix.as_deref(), threads, verify, |line| eprintln!("{line}"),
+            )?;
+            println!("receipt: {}", receipt_out.display());
+            Ok(true)
+        }
         "recipe-plan" | "recipe-run" => {
             // KLD-gated mixed-precision recipe search: measure how low each tensor
             // class can go before the output distribution moves past a budget.
