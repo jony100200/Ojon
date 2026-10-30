@@ -16,6 +16,7 @@ pub mod curate;
 pub mod daemon;
 pub mod eval;
 pub mod harvest_claude;
+pub mod harvest_dolil;
 pub mod knowledge;
 pub mod packages;
 pub mod registry;

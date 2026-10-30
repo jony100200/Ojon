@@ -1433,6 +1433,8 @@ pub fn harvest_agent_sessions(
             // Claude Code session transcripts share the extension but not the schema.
             if crate::learn::harvest_claude::is_claude_transcript(&file_path) {
                 crate::learn::harvest_claude::parse_claude_transcript(&file_path).unwrap_or_default()
+            } else if crate::learn::harvest_dolil::is_dolil_run(&file_path) {
+                crate::learn::harvest_dolil::parse_dolil_run(&file_path).unwrap_or_default()
             } else {
                 parse_jsonl_agent_run(&file_path).unwrap_or_default()
             }
