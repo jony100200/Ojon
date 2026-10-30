@@ -425,6 +425,20 @@ pub fn base_advisory(base_level: &str, base_mean_kld: f64, budget_kld: f64) -> O
     }
 }
 
+/// llama-perplexity reports the mean KLD with a standard error. A budget that
+/// is not comfortably above twice that error cannot separate a real step from
+/// sampling noise; probes then come out below the base by chance.
+pub fn noise_advisory(base_uncertainty: Option<f64>, budget_kld: f64, chunks: u32) -> Option<String> {
+    let unc = base_uncertainty?;
+    if unc <= 0.0 || budget_kld >= 2.0 * unc {
+        return None;
+    }
+    let want = if chunks == 0 { 0 } else { ((2.0 * unc / budget_kld).powi(2) * chunks as f64).ceil() as u32 };
+    Some(format!(
+        "the base KLD standard error is {unc:.4}, so a budget of {budget_kld} is inside measurement noise (need > {:.4});          increase --chunks (about {} for this budget) or raise the budget before reading per-class deltas as real",
+        2.0 * unc, if want == 0 { "all available".to_string() } else { want.to_string() }))
+}
+
 /// Run the whole search. Returns the receipt path. Every step streams to `log`.
 pub fn run_recipe<F>(plan: &RecipePlan, mut log: F) -> io::Result<PathBuf>
 where
@@ -507,6 +521,10 @@ where
     log(&format!("[ojon] base: {:.2}% of source, mean KLD {:.6}", 100.0 * base.bytes as f64 / plan.source_bytes as f64, base_kld.mean));
     let base_advisory = base_advisory(base_level, base_kld.mean, plan.job.budget_kld);
     if let Some(note) = &base_advisory {
+        log(&format!("[ojon] advisory: {note}"));
+    }
+    let noise_advisory = noise_advisory(base_kld.mean_uncertainty, plan.job.budget_kld, plan.job.kld.chunks);
+    if let Some(note) = &noise_advisory {
         log(&format!("[ojon] advisory: {note}"));
     }
 
@@ -633,6 +651,7 @@ where
                   "measured_within_budget": within},
         "boundary_refinement": boundary_json,
         "base_advisory": base_advisory,
+        "noise_advisory": noise_advisory,
         "imatrix": plan.job.imatrix.as_ref().map(|p| plain(p)),
         "imatrix_computed_by_this_run": imatrix_auto.as_ref().map(|p| plain(p)),
         "calibration_corpus": plain(&calibration_corpus),
@@ -836,6 +855,15 @@ mod tests {
         assert!(base_advisory("q4_k", 0.06, 0.05).unwrap().contains("--base q5_k"));
         assert!(base_advisory("q6_k", 0.3, 0.0).unwrap().contains("--base q8_0"));
         assert!(base_advisory("q5_k", 0.03, 0.01).is_none()); // 3x budget, under 0.05: fine
+    }
+
+    #[test]
+    fn noise_advisory_compares_budget_to_twice_the_standard_error() {
+        assert!(noise_advisory(Some(0.001), 0.01, 12).is_none());
+        let n = noise_advisory(Some(0.008), 0.01, 6).unwrap();
+        assert!(n.contains("inside measurement noise") && n.contains("--chunks"), "{n}");
+        assert!(noise_advisory(None, 0.01, 6).is_none());
+        assert!(noise_advisory(Some(0.0), 0.01, 6).is_none());
     }
 
     #[test]
