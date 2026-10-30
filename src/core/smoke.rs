@@ -55,10 +55,7 @@ pub fn smoke_gguf(
         .stderr(Stdio::inherit())
         .status()?;
     if !status.success() {
-        return Err(io::Error::new(
-            ErrorKind::Other,
-            format!("llama-cli inference failed (status: {status})"),
-        ));
+        return Err(io::Error::other(format!("llama-cli inference failed (status: {status})")));
     }
     Ok(())
 }

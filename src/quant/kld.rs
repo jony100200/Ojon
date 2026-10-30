@@ -28,6 +28,10 @@ pub struct KldSettings {
     pub tool: PathBuf,
     pub corpus: PathBuf,
     pub gpu_layers: u32,
+    /// Let the tool choose the GPU layer count itself (`--fit on`, `-ngl` left
+    /// unset). Required for originals larger than VRAM: a fixed `-ngl 99` makes
+    /// the loader abort instead of spilling layers to the CPU.
+    pub fit: bool,
     pub context: u32,
     /// Limit the corpus to this many chunks (0 = whole corpus). Probes are many,
     /// so a bounded, identical slice per run keeps the search tractable and fair.
@@ -60,9 +64,12 @@ impl KldSettings {
             .arg("-f")
             .arg(&self.corpus)
             .arg("-c")
-            .arg(self.context.to_string())
-            .arg("-ngl")
-            .arg(self.gpu_layers.to_string());
+            .arg(self.context.to_string());
+        if self.fit {
+            cmd.arg("--fit").arg("on");
+        } else {
+            cmd.arg("-ngl").arg(self.gpu_layers.to_string());
+        }
         if self.chunks > 0 {
             cmd.arg("--chunks").arg(self.chunks.to_string());
         }
@@ -218,7 +225,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let corpus = dir.join("corpus.txt");
         std::fs::write(&corpus, "x".repeat(200)).unwrap();
-        let ok = KldSettings { tool: PathBuf::from("llama-perplexity"), corpus: corpus.clone(), gpu_layers: 99, context: 512, chunks: 20 };
+        let ok = KldSettings { tool: PathBuf::from("llama-perplexity"), corpus: corpus.clone(), gpu_layers: 99, fit: false, context: 512, chunks: 20 };
         assert!(ok.validate().is_ok());
         assert!(KldSettings { context: 500, ..ok.clone() }.validate().is_err());
         assert!(KldSettings { gpu_layers: 999, ..ok.clone() }.validate().is_err());

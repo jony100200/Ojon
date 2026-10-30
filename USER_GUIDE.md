@@ -88,7 +88,7 @@ Protocol, all through public `llama-quantize` and `llama-perplexity`:
    and `measured_within_budget`. A recipe over budget is reported as rejected and
    the base candidate stays the accepted output.
 
-Options worth knowing: `--imatrix auto` computes an importance matrix from the
+Options worth knowing: `--ngl auto` lets the tools split an original larger than VRAM across GPU and CPU (`--fit on`) instead of failing to load; `--imatrix auto` computes an importance matrix from the
 same corpus before any probe (low-bit levels depend on it; without one the search
 understates how low a class can go), `--imatrix <file>` reuses one you already
 have, and `--budget-p99 <x>` adds a tail gate so the 99th-percentile per-token KLD

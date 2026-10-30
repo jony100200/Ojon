@@ -2189,6 +2189,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let mut corpus: Option<PathBuf> = None;
             let mut verify_budget: Option<f64> = None;
             let (mut context, mut gpu_layers, mut chunks) = (512u32, 99u32, 40u32);
+            let mut fit = false;
             let mut threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(4);
             let mut confirm = false;
             let text = |v: std::ffi::OsString, what: &str| -> io::Result<String> {
@@ -2206,7 +2207,10 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                             .map_err(|_| invalid("verify-budget must be a number"))?)
                     }
                     Some("--ctx") => context = text(next_argument(&mut args, "context")?, "ctx")?.parse().map_err(|_| invalid("ctx must be a number"))?,
-                    Some("--ngl") => gpu_layers = text(next_argument(&mut args, "gpu layers")?, "ngl")?.parse().map_err(|_| invalid("ngl must be a number"))?,
+                    Some("--ngl") => {
+                        let v = text(next_argument(&mut args, "gpu layers or 'auto'")?, "ngl")?;
+                        if v == "auto" { fit = true; } else { gpu_layers = v.parse().map_err(|_| invalid("ngl must be a number or 'auto'"))?; }
+                    }
                     Some("--chunks") => chunks = text(next_argument(&mut args, "chunk limit")?, "chunks")?.parse().map_err(|_| invalid("chunks must be a number"))?,
                     Some("--threads") => threads = text(next_argument(&mut args, "thread count")?, "threads")?.parse().map_err(|_| invalid("threads must be a number"))?,
                     Some("--confirm") => confirm = true,
@@ -2217,7 +2221,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 return Err(invalid("recipe-apply writes a quantized model; add --confirm to execute"));
             }
             let settings = match (&corpus, verify_budget) {
-                (Some(c), Some(_)) => Some(ojon_backend::kld::KldSettings { tool: perplexity_tool, corpus: c.clone(), gpu_layers, context, chunks }),
+                (Some(c), Some(_)) => Some(ojon_backend::kld::KldSettings { tool: perplexity_tool, corpus: c.clone(), gpu_layers, fit, context, chunks }),
                 (None, Some(_)) => return Err(invalid("--verify-budget needs --corpus")),
                 _ => None,
             };
@@ -2250,6 +2254,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 "llama-perplexity",
             )?;
             let (mut context, mut gpu_layers, mut chunks) = (512u32, 99u32, 40u32);
+            let mut fit = false;
             let mut threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(4);
             let (mut keep_probes, mut confirm, mut json) = (false, false, false);
             let text = |v: std::ffi::OsString, what: &str| -> io::Result<String> {
@@ -2286,7 +2291,10 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     Some("--quantize-tool") => quantize_tool = PathBuf::from(next_argument(&mut args, "llama-quantize executable")?),
                     Some("--perplexity-tool") => perplexity_tool = PathBuf::from(next_argument(&mut args, "llama-perplexity executable")?),
                     Some("--ctx") => context = text(next_argument(&mut args, "context")?, "ctx")?.parse().map_err(|_| invalid("ctx must be a number"))?,
-                    Some("--ngl") => gpu_layers = text(next_argument(&mut args, "gpu layers")?, "ngl")?.parse().map_err(|_| invalid("ngl must be a number"))?,
+                    Some("--ngl") => {
+                        let v = text(next_argument(&mut args, "gpu layers or 'auto'")?, "ngl")?;
+                        if v == "auto" { fit = true; } else { gpu_layers = v.parse().map_err(|_| invalid("ngl must be a number or 'auto'"))?; }
+                    }
                     Some("--chunks") => chunks = text(next_argument(&mut args, "chunk limit")?, "chunks")?.parse().map_err(|_| invalid("chunks must be a number"))?,
                     Some("--threads") => threads = text(next_argument(&mut args, "thread count")?, "threads")?.parse().map_err(|_| invalid("threads must be a number"))?,
                     Some("--keep-probes") => keep_probes = true,
@@ -2312,7 +2320,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 imatrix,
                 imatrix_tool,
                 threads,
-                kld: ojon_backend::kld::KldSettings { tool: perplexity_tool, corpus, gpu_layers, context, chunks },
+                kld: ojon_backend::kld::KldSettings { tool: perplexity_tool, corpus, gpu_layers, fit, context, chunks },
                 keep_probes,
                 budget_p99,
             })?;

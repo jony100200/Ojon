@@ -96,6 +96,26 @@ fn ladder_name(level: &str) -> io::Result<&'static str> {
         .ok_or_else(|| invalid(format!("unknown ladder level '{level}'")))
 }
 
+
+/// The recipe search is defined for transformer language towers. A vision
+/// projector (`mmproj`, architecture `clip`) or any GGUF without attention or
+/// FFN blocks must be refused up front, not after an hour of probes: its
+/// tensors would still match some class patterns by name.
+pub fn not_a_language_model(architecture: Option<&str>, present: &BTreeMap<TensorClass, u64>) -> Option<String> {
+    if matches!(architecture, Some("clip") | Some("mmproj")) {
+        return Some(format!(
+            "{} is a vision projector (architecture {}); run the recipe search on the language model GGUF and keep the projector as is",
+            "this file", architecture.unwrap_or("?")));
+    }
+    let has_attention = present.contains_key(&TensorClass::AttnQk) || present.contains_key(&TensorClass::AttnVo);
+    let has_ffn = [TensorClass::FfnGateUp, TensorClass::FfnDown, TensorClass::ExpertGateUp, TensorClass::ExpertDown]
+        .iter().any(|c| present.contains_key(c));
+    if !has_attention || !has_ffn {
+        return Some("no transformer attention/FFN blocks recognised; the recipe search needs a language model GGUF".to_string());
+    }
+    None
+}
+
 pub fn prepare_recipe(job: RecipeJob) -> io::Result<RecipePlan> {
     if job.threads == 0 {
         return Err(invalid("threads must be positive"));
@@ -151,8 +171,8 @@ pub fn prepare_recipe(job: RecipeJob) -> io::Result<RecipePlan> {
     }
     let tensors = inspect_gguf_tensors(&source)?;
     let present = class_elements(&tensors);
-    if present.is_empty() {
-        return Err(invalid("no quantizable tensor class recognised in this GGUF"));
+    if let Some(reason) = not_a_language_model(info.architecture.as_deref(), &present) {
+        return Err(invalid(reason));
     }
     let probes = probe_matrix(job.base, &present, job.floor)?;
     if probes.is_empty() {
@@ -270,7 +290,9 @@ where
             let out = dir.join("calibration.imatrix.gguf");
             log(&format!("[ojon] importance matrix from the corpus with {}", plain(tool)));
             let im_plan = crate::quant::calibration::prepare_imatrix(
-                &plan.job.source, &plan.job.kld.corpus, &out, tool, plan.job.kld.gpu_layers, plan.job.kld.context)?;
+                &plan.job.source, &plan.job.kld.corpus, &out, tool,
+                if plan.job.kld.fit { crate::quant::calibration::GPU_LAYERS_FIT } else { plan.job.kld.gpu_layers },
+                plan.job.kld.context)?;
             let saved = crate::quant::calibration::run_imatrix(&im_plan, |line| log(line))?;
             plan_used.job.imatrix = Some(saved.clone());
             imatrix_auto = Some(saved);
@@ -505,6 +527,19 @@ mod tests {
     }
 
     #[test]
+    fn vision_projectors_and_blockless_files_are_refused() {
+        let mut lm = BTreeMap::new();
+        lm.insert(TensorClass::AttnQk, 10u64);
+        lm.insert(TensorClass::FfnDown, 10u64);
+        assert!(not_a_language_model(Some("qwen3"), &lm).is_none());
+        assert!(not_a_language_model(Some("clip"), &lm).unwrap().contains("vision projector"));
+        let mut proj = BTreeMap::new();
+        proj.insert(TensorClass::AttnQk, 10u64); // mmproj attention without FFN classes
+        assert!(not_a_language_model(Some("qwen2vl"), &proj).is_some());
+        assert!(not_a_language_model(None, &BTreeMap::new()).is_some());
+    }
+
+    #[test]
     fn main_precision_maps_only_measurable_bases() {
         assert_eq!(main_precision_for("q5_k").unwrap().as_str(), "Q5_K_M");
         assert_eq!(main_precision_for("q4_k").unwrap().as_str(), "Q4_K_M");
@@ -545,7 +580,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let corpus = dir.join("c.txt");
         fs::write(&corpus, "y".repeat(300)).unwrap();
-        let kld = KldSettings { tool: PathBuf::from("llama-perplexity"), corpus, gpu_layers: 99, context: 512, chunks: 10 };
+        let kld = KldSettings { tool: PathBuf::from("llama-perplexity"), corpus, gpu_layers: 99, fit: false, context: 512, chunks: 10 };
         let job = RecipeJob {
             source: dir.join("missing.gguf"), output_dir: dir.clone(), base: "q5_k", floor: "iq2_s", budget_kld: 0.01,
             quantize_tool: PathBuf::from("llama-quantize"), imatrix: None, imatrix_tool: None, threads: 4, kld,

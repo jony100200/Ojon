@@ -13,6 +13,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 fn invalid(s: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, s.into())
 }
+/// Sentinel for `gpu_layers`: leave `-ngl` unset and pass `--fit on`, so a
+/// model larger than VRAM is split by the tool instead of failing to load.
+pub const GPU_LAYERS_FIT: u32 = u32::MAX;
+
 #[derive(Debug)]
 pub struct ImatrixPlan {
     pub model: PathBuf,
@@ -56,7 +60,7 @@ pub fn prepare_imatrix(
     if !(256..=32768).contains(&context) || !context.is_multiple_of(32) {
         return Err(invalid("context must be 256..32768 and divisible by 32"));
     }
-    if gpu_layers > 512 {
+    if gpu_layers > 512 && gpu_layers != GPU_LAYERS_FIT {
         return Err(invalid("GPU offload layers must be 0..=512"));
     }
     if tool.as_os_str().is_empty() {
@@ -167,10 +171,13 @@ pub fn run_imatrix<F: FnMut(&str)>(plan: &ImatrixPlan, mut log: F) -> io::Result
         .arg(&tmp)
         .arg("--output-format")
         .arg("gguf")
-        .arg("--no-ppl")
-        .arg("-ngl")
-        .arg(plan.gpu_layers.to_string())
-        .arg("-c")
+        .arg("--no-ppl");
+    if plan.gpu_layers == GPU_LAYERS_FIT {
+        cmd.arg("--fit").arg("on");
+    } else {
+        cmd.arg("-ngl").arg(plan.gpu_layers.to_string());
+    }
+    cmd.arg("-c")
         .arg(plan.context.to_string())
         .current_dir(&stage.0);
     log("[ojon] generating calibrated importance matrix with installed public llama-imatrix");
