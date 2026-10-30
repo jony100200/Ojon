@@ -66,9 +66,36 @@ impl ModelProbe {
         })
     }
 }
+/// whisper.cpp / legacy ggml container magic: the u32 `0x67676d6c` ("ggml") read
+/// little-endian from offset 0. GGUF uses "GGUF" instead and is handled separately.
+const GGML_FILE_MAGIC: u32 = 0x6767_6d6c;
+
+/// Split a descriptor into lowercase alphanumeric tokens so that short names
+/// such as `dit`, `e5` or `clip` only match as whole words, never as substrings
+/// of `ForConditionalGeneration`, `gemma3` or `eclipse`.
+fn tokens(lower: &str) -> impl Iterator<Item = &str> {
+    lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+}
+fn has_token(lower: &str, words: &[&str]) -> bool {
+    tokens(lower).any(|t| words.contains(&t))
+}
+/// GGUF `general.architecture = "clip"` is a multimodal projector (mmproj), not a
+/// standalone model. Token match, so `siglip` or `eclipse` do not qualify.
+fn is_vision_projector(architecture: &str) -> bool {
+    has_token(&architecture.to_ascii_lowercase(), &["clip"])
+}
+fn projector_note(architecture: &str) -> String {
+    format!(
+        "architecture '{architecture}' is a vision projector (mmproj) for a language GGUF, not a standalone model; quantizing it is not wired here"
+    )
+}
 fn category_from(text: &str, has_vision_config: bool) -> (ModelCategory, &'static str) {
     let s = text.to_ascii_lowercase();
     // These are only hints. Never authorize a conversion based on substring matching.
+    // Order matters: Speech and Embedding run before Diffusion so encoder-decoder
+    // names (`*ForConditionalGeneration`) are never mistaken for a DiT.
     if has_vision_config
         || [
             "qwen2_vl",
@@ -90,26 +117,9 @@ fn category_from(text: &str, has_vision_config: bool) -> (ModelCategory, &'stati
         ]
         .iter()
         .any(|x| s.contains(x))
+        || has_token(&s, &["clip"])
     {
         return (ModelCategory::VisionLanguage, "heuristic");
-    }
-    if [
-        "flux",
-        "wan",
-        "ltx",
-        "diffusion",
-        "dit",
-        "unet",
-        "stable_diffusion",
-        "hunyuanvideo",
-        "hunyuan_video",
-        "z_image",
-        "qwen_image",
-    ]
-    .iter()
-    .any(|x| s.contains(x))
-    {
-        return (ModelCategory::Diffusion, "heuristic");
     }
     if [
         "whisper",
@@ -130,19 +140,60 @@ fn category_from(text: &str, has_vision_config: bool) -> (ModelCategory, &'stati
         "reranker",
         "embedding",
         "sentence_transformer",
+        "nomic-embed",
+        "nomic_embed",
+        "bert", // BertModel, XLMRobertaModel, RobertaModel, ModernBert, DistilBert
         "bge_",
         "e5_",
         "gte_",
     ]
     .iter()
     .any(|x| s.contains(x))
+        || has_token(&s, &["bge", "e5", "gte"])
     {
         return (ModelCategory::EmbeddingOrReranker, "heuristic");
+    }
+    if [
+        "flux",
+        "wan",
+        "ltx",
+        "diffusion",
+        "unet",
+        "stable_diffusion",
+        "hunyuanvideo",
+        "hunyuan_video",
+        "z_image",
+        "qwen_image",
+    ]
+    .iter()
+    .any(|x| s.contains(x))
+        || has_token(&s, &["dit"])
+    {
+        return (ModelCategory::Diffusion, "heuristic");
     }
     if !s.is_empty() && s != "unknown" {
         return (ModelCategory::Language, "weak_guess");
     }
     (ModelCategory::Unknown, "unknown")
+}
+/// Classification for a named source (HF folder, GGUF model name / file stem).
+/// The name is consulted only when the metadata says plain Language or Unknown,
+/// and only for the words `embedding` / `reranker`: Qwen3-Embedding ships an
+/// ordinary `Qwen3ForCausalLM` config and the folder name is the sole hint.
+/// No other name word can override the architecture.
+fn category_for_source(
+    descriptor: &str,
+    name: &str,
+    has_vision_config: bool,
+) -> (ModelCategory, &'static str) {
+    let (category, confidence) = category_from(descriptor, has_vision_config);
+    if matches!(category, ModelCategory::Language | ModelCategory::Unknown) {
+        let lower = name.to_ascii_lowercase();
+        if lower.contains("embedding") || lower.contains("reranker") {
+            return (ModelCategory::EmbeddingOrReranker, "heuristic");
+        }
+    }
+    (category, confidence)
 }
 fn load_json(path: &Path, max: u64) -> io::Result<Value> {
     let size = fs::metadata(path)?.len();
@@ -366,6 +417,48 @@ fn inspect_ojonq(path: &Path) -> io::Result<ModelProbe> {
     })
 }
 
+/// whisper.cpp GGML `.bin`: accepted by magic only. Reads 8 bytes (magic + the
+/// first hparam, whisper's `n_vocab`); never the tensors. No converter is wired.
+fn inspect_ggml_bin(path: &Path) -> io::Result<ModelProbe> {
+    let mut f = File::open(path)?;
+    let size = f.metadata()?.len();
+    let mut head = [0u8; 8];
+    if size < head.len() as u64 {
+        return Err(invalid("short .bin file; not a GGML container"));
+    }
+    f.read_exact(&mut head)?;
+    let magic = u32::from_le_bytes(head[..4].try_into().unwrap());
+    if magic != GGML_FILE_MAGIC {
+        return Err(invalid(
+            "unsupported .bin; only whisper.cpp GGML (magic 'ggml') is recognised, PyTorch pickles are not",
+        ));
+    }
+    // whisper vocabularies: 51864 (English-only), 51865 (multilingual), 51866 (large-v3).
+    let n_vocab = i32::from_le_bytes(head[4..8].try_into().unwrap());
+    let whisper_vocab = matches!(n_vocab, 51_864..=51_866);
+    let (identification, confidence) = if whisper_vocab {
+        (format!("whisper ggml (n_vocab={n_vocab})"), "heuristic")
+    } else {
+        ("ggml container (whisper-style assumed)".to_owned(), "weak_guess")
+    };
+    Ok(ModelProbe {
+        path: path.to_path_buf(),
+        format: "ggml_bin",
+        category: ModelCategory::Speech,
+        identification,
+        confidence,
+        bytes: size,
+        tensor_count: None,
+        conversion_route: "none",
+        conversion_status: "no_wired_converter",
+        notes: vec![
+            "GGML magic matched; hparams beyond the first field and tensor payloads were not read.".into(),
+            "The 'ggml' magic is shared with legacy pre-GGUF llama containers; whisper is inferred from the vocabulary size.".into(),
+            "whisper.cpp quantization and a WER gate are not wired yet (roadmap task 5).".into(),
+        ],
+    })
+}
+
 pub fn probe_model(input: &Path) -> io::Result<ModelProbe> {
     let path = input.canonicalize()?;
     let metadata = fs::metadata(&path)?;
@@ -391,8 +484,15 @@ pub fn probe_model(input: &Path) -> io::Result<ModelProbe> {
             })
             .unwrap_or_default();
         let descriptor = format!("{model_type} {architectures}");
-        let (category, confidence) =
-            category_from(&descriptor, value.get("vision_config").is_some());
+        let folder_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let (category, confidence) = category_for_source(
+            &descriptor,
+            &folder_name,
+            value.get("vision_config").is_some(),
+        );
         let mut total = 0u64;
         let mut count = 0usize;
         for entry in fs::read_dir(&path)?.take(8192) {
@@ -442,22 +542,32 @@ pub fn probe_model(input: &Path) -> io::Result<ModelProbe> {
                     .architecture
                     .clone()
                     .unwrap_or_else(|| "unknown".to_owned());
-                let (category, confidence) = category_from(&desc, false);
+                let name_hint = format!(
+                    "{} {}",
+                    gguf.model_name.clone().unwrap_or_default(),
+                    path.file_stem().map(|s| s.to_string_lossy()).unwrap_or_default()
+                );
+                let (category, confidence) = category_for_source(&desc, &name_hint, false);
+                let mut notes = vec![
+                    "GGUF header and tensor catalog inspected; tensor bytes and runtime compatibility not verified.".into(),
+                    "Quantizing an already heavily quantized source may not be beneficial; prefer F16/BF16 input.".into(),
+                ];
+                if is_vision_projector(&desc) {
+                    notes.insert(0, projector_note(&desc));
+                }
                 Ok(ModelProbe {
                     path,format:"gguf",category,identification:desc,confidence,
                     bytes:gguf.file_bytes,tensor_count:Some(gguf.tensor_count),
                     conversion_route:"public_llama_cpp_llama_quantize",
                     conversion_status:"candidate_only_requires_installed_backend_compatibility",
-                    notes:vec![
-                        "GGUF header and tensor catalog inspected; tensor bytes and runtime compatibility not verified.".into(),
-                        "Quantizing an already heavily quantized source may not be beneficial; prefer F16/BF16 input.".into(),
-                    ],
+                    notes,
                 })
             }
             "safetensors" => inspect_safetensors(&path),
             "ojonq" => inspect_ojonq(&path),
+            "bin" => inspect_ggml_bin(&path),
             _ => Err(invalid(
-                "unsupported model source; use GGUF, a safetensors file or HF checkpoint directory",
+                "unsupported model source; use GGUF, a safetensors file, a whisper.cpp GGML .bin or HF checkpoint directory",
             )),
         }
     }
@@ -477,5 +587,132 @@ mod tests {
             ModelCategory::Diffusion
         );
         assert_eq!(category_from("unknown", false).0, ModelCategory::Unknown);
+    }
+
+    // Task 1.1: `dit` must be a whole token, and Speech / Embedding are checked
+    // before Diffusion, so `ForConditionalGeneration` no longer reads as DiT.
+    #[test]
+    fn conditional_generation_is_not_diffusion() {
+        assert_eq!(
+            category_from("whisper WhisperForConditionalGeneration", false).0,
+            ModelCategory::Speech
+        );
+        // T5 / BART are encoder-decoder text models: Language (weak guess), never Diffusion.
+        let (t5, t5_conf) = category_from("t5 T5ForConditionalGeneration", false);
+        assert_eq!(t5, ModelCategory::Language);
+        assert_eq!(t5_conf, "weak_guess");
+        assert_eq!(
+            category_from("bart BartForConditionalGeneration", false).0,
+            ModelCategory::Language
+        );
+        // A DiT architecture on its own is still diffusion, in any case.
+        assert_eq!(category_from("DiT", false).0, ModelCategory::Diffusion);
+        assert_eq!(category_from("dit", false).0, ModelCategory::Diffusion);
+        assert_eq!(category_from("pixart_dit", false).0, ModelCategory::Diffusion);
+        // `dit` buried inside another word is not a token.
+        assert_eq!(category_from("editor", false).0, ModelCategory::Language);
+    }
+
+    // Task 1.2: a GGUF mmproj carries general.architecture = "clip".
+    #[test]
+    fn clip_projector_is_vision_language() {
+        let (category, confidence) = category_from("clip", false);
+        assert_eq!(category, ModelCategory::VisionLanguage);
+        assert_eq!(confidence, "heuristic");
+        assert!(is_vision_projector("clip"));
+        assert!(is_vision_projector("CLIP"));
+        assert!(!is_vision_projector("qwen3"));
+        let note = projector_note("clip");
+        assert!(note.contains("projector"));
+    }
+
+    // Task 1.3: encoder / embedding / reranker hints.
+    #[test]
+    fn embedding_and_reranker_hints() {
+        assert_eq!(
+            category_from("xlm-roberta XLMRobertaModel", false).0,
+            ModelCategory::EmbeddingOrReranker
+        );
+        assert_eq!(
+            category_from("bert BertModel", false).0,
+            ModelCategory::EmbeddingOrReranker
+        );
+        assert_eq!(
+            category_from("roberta RobertaModel", false).0,
+            ModelCategory::EmbeddingOrReranker
+        );
+        for name in ["bge-m3", "e5-large-v2", "gte-large", "nomic-embed-text-v1.5", "BGE_RERANKER"] {
+            assert_eq!(
+                category_from(name, false).0,
+                ModelCategory::EmbeddingOrReranker,
+                "{name}"
+            );
+        }
+        // `e5` / `gte` / `bge` are whole tokens only.
+        assert_eq!(category_from("gemma3", false).0, ModelCategory::Language);
+        assert_eq!(category_from("qwen2.5", false).0, ModelCategory::Language);
+    }
+
+    #[test]
+    fn embedding_name_hint_wins_over_causal_lm_architecture_only_for_those_words() {
+        // Qwen3-Embedding ships a plain Qwen3ForCausalLM config; the folder name is the hint.
+        let (category, confidence) =
+            category_for_source("qwen3 Qwen3ForCausalLM", "Qwen3-Embedding-0.6B", false);
+        assert_eq!(category, ModelCategory::EmbeddingOrReranker);
+        assert_eq!(confidence, "heuristic");
+        assert_eq!(
+            category_for_source("qwen3 Qwen3ForCausalLM", "Qwen3-Reranker-0.6B", false).0,
+            ModelCategory::EmbeddingOrReranker
+        );
+        // Any other folder word does not override the architecture.
+        assert_eq!(
+            category_for_source("qwen3 Qwen3ForCausalLM", "Qwen3-0.6B-Instruct", false).0,
+            ModelCategory::Language
+        );
+        assert_eq!(
+            category_for_source("qwen3 Qwen3ForCausalLM", "flux-dit-folder", false).0,
+            ModelCategory::Language
+        );
+        // The name hint never demotes a stronger classification.
+        assert_eq!(
+            category_for_source("llava LlavaForConditionalGeneration", "my-embedding", true).0,
+            ModelCategory::VisionLanguage
+        );
+    }
+
+    // Task 1.4: whisper.cpp GGML `.bin` is accepted by magic and classified as Speech.
+    #[test]
+    fn ggml_bin_probes_as_speech_without_converter() {
+        let dir = std::env::temp_dir().join(format!(
+            "ojon-probe-ggml-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("ggml-base.en.bin");
+        let mut bytes = Vec::with_capacity(16);
+        bytes.extend_from_slice(&GGML_FILE_MAGIC.to_le_bytes());
+        bytes.extend_from_slice(&51_864i32.to_le_bytes()); // whisper n_vocab
+        bytes.extend_from_slice(&[0u8; 8]);
+        assert_eq!(bytes.len(), 16);
+        fs::write(&file, &bytes).unwrap();
+
+        let probe = probe_model(&file).unwrap();
+        assert_eq!(probe.format, "ggml_bin");
+        assert_eq!(probe.category, ModelCategory::Speech);
+        assert_eq!(probe.conversion_route, "none");
+        assert_eq!(probe.conversion_status, "no_wired_converter");
+        assert_eq!(probe.bytes, 16);
+        assert!(probe.identification.contains("whisper"));
+        assert_eq!(probe.as_json()["category"], "audio_speech");
+
+        // A `.bin` without the GGML magic is still rejected at the door.
+        let other = dir.join("pytorch_model.bin");
+        fs::write(&other, b"PK................").unwrap();
+        assert!(probe_model(&other).is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
