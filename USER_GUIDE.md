@@ -57,6 +57,20 @@ ojon autoround-plan "./models/hf-original" "./models/out\q5-calibrated" --bits 5
 
 To execute, use `autoround-run` with the same options and `--confirm`. Ojon checks that GGUF output metadata exists, not that the model runs or meets a quality threshold. Compare against existing llama.cpp K/IQ conversions using held-out data and a verified target loader. See Intel's upstream AutoRound step-by-step guide.
 
+## From original to accepted quant, in order
+
+1. `imatrix-run` (or `recipe-run --imatrix auto`) on chat-style calibration text.
+2. `recipe-plan` then `recipe-run --confirm`: the smallest per-class recipe within a
+   KL-divergence budget, measured, with the boundary refinement and a receipt.
+3. Task suite on the accepted file (`task_eval` / the Optimize workflow): KL
+   divergence bounds the distribution shift, the suite measures answer flips.
+4. `bench-*` on the target hardware: size and KLD say nothing about tokens per
+   second on your card.
+5. For image/video GGUF: `diffusion-parity` against the reference on a fixed seed.
+6. For a sibling model: `recipe-apply` with `--verify-budget` instead of a new search.
+
+Each step writes its own receipt; nothing earlier is overwritten.
+
 ## Measured mixed-precision recipe: smallest size within a KL-divergence budget
 
 `sweep-*` picks one whole-model format. `recipe-*` goes further: it measures, per
