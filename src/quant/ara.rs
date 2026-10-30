@@ -112,7 +112,7 @@ fn config(v: &Value) -> io::Result<Config> {
     let preserve = number(v, "preserve_good_weight")?;
     let steer = number(v, "steer_bad_weight")?;
     let overcorrect = number(v, "overcorrect_weight")?;
-    if preserve < 0.0 || steer <= 0.0 || overcorrect < 0.0 || overcorrect > 1.0 {
+    if preserve < 0.0 || steer <= 0.0 || !(0.0..=1.0).contains(&overcorrect) {
         return Err(invalid("invalid ARA loss weight"));
     }
     let row_norms = v

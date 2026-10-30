@@ -39,7 +39,7 @@ pub struct PplSettings {
 }
 impl PplSettings {
     pub fn validate(&self) -> io::Result<()> {
-        if !(256..=32768).contains(&self.context) || self.context % 32 != 0 {
+        if !(256..=32768).contains(&self.context) || !self.context.is_multiple_of(32) {
             return Err(invalid("context must be 256..=32768 and divisible by 32"));
         }
         if self.gpu_layers > 512 {

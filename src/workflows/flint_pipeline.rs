@@ -842,7 +842,7 @@ fn parse_metric_pair(line: &str, label: &str) -> Option<(f64, f64)> {
     }
     let after_colon = line.split_once(':')?.1.trim();
     let parts: Vec<&str> = after_colon
-        .split(|c| c == '±' || c == '+' || c == '/')
+        .split(['±', '+', '/'])
         .filter(|s| !s.is_empty() && *s != "-")
         .collect();
     if parts.len() < 2 {

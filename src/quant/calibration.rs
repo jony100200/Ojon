@@ -53,7 +53,7 @@ pub fn prepare_imatrix(
     gpu_layers: u32,
     context: u32,
 ) -> io::Result<ImatrixPlan> {
-    if !(256..=32768).contains(&context) || context % 32 != 0 {
+    if !(256..=32768).contains(&context) || !context.is_multiple_of(32) {
         return Err(invalid("context must be 256..32768 and divisible by 32"));
     }
     if gpu_layers > 512 {

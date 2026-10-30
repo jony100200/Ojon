@@ -114,7 +114,7 @@ pub fn parse_iso_date_to_days(iso_str: &str) -> Option<i64> {
         return None;
     }
     let d: u32 = trimmed.get(8..10)?.parse().ok()?;
-    if m < 1 || m > 12 || d < 1 || d > 31 {
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
         return None;
     }
     Some(days_since_epoch(y, m, d))

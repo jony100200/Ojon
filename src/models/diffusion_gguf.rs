@@ -406,8 +406,8 @@ pub fn prepare_gguf_smoke(
         || height < 128
         || width > 1536
         || height > 1536
-        || width % 64 != 0
-        || height % 64 != 0
+        || !width.is_multiple_of(64)
+        || !height.is_multiple_of(64)
     {
         return Err(bad(
             "steps 1..100, width/height 128..1536 and multiples of 64 required",

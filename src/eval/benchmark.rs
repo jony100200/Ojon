@@ -97,7 +97,7 @@ fn total_model_bytes(first: &Path, first_bytes: u64) -> io::Result<u64> {
     let count: usize = total
         .parse()
         .map_err(|_| invalid("invalid split model shard count"))?;
-    if part != "00001" || count < 2 || count > 128 {
+    if part != "00001" || !(2..=128).contains(&count) {
         return Err(invalid(
             "benchmark a split GGUF using its first -00001-of-XXXXX.gguf shard (max 128 shards)",
         ));

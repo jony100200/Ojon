@@ -315,7 +315,7 @@ pub fn parse_iso_date_to_epoch(date_str: &str) -> Option<u64> {
     let month: usize = parts[1].parse().ok()?;
     let day: usize = parts[2].parse().ok()?;
 
-    if year < 1970 || month < 1 || month > 12 || day < 1 || day > 31 {
+    if year < 1970 || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
 
