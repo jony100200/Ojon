@@ -902,6 +902,7 @@ impl Workstation {
                     },
                     keep_probes: false,
                     budget_p99: None,
+                    resume: false,
                 })
                 .map_err(|e| e.to_string())?;
                 let path = plan.write_plan().map_err(|e| e.to_string())?;

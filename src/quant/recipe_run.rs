@@ -79,6 +79,10 @@ pub struct RecipeJob {
     /// per-token KLD within `base_p99 + budget_p99`. Mean KLD hides rare but
     /// large divergences on individual tokens; this catches them.
     pub budget_p99: Option<f64>,
+    /// Continue a run in an output directory that already holds a plan, the
+    /// reference logits, the base candidate and a progress ledger. Finished
+    /// probes are reused from `recipe-progress.jsonl`; failed ones are retried.
+    pub resume: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -146,9 +150,16 @@ pub fn prepare_recipe(job: RecipeJob) -> io::Result<RecipePlan> {
         return Err(invalid("output directory must exist"));
     }
     let output_dir = job.output_dir.canonicalize()?;
-    for name in ["recipe-plan.json", "recipe-receipt.json", "recipe.gguf", "reference.logits"] {
+    for name in ["recipe-receipt.json", "recipe.gguf"] {
         if output_dir.join(name).exists() {
-            return Err(invalid(format!("{name} already exists in the output directory; use an empty directory")));
+            return Err(invalid(format!("{name} already exists in the output directory; this search is finished, use a new directory")));
+        }
+    }
+    if !job.resume {
+        for name in ["recipe-plan.json", "reference.logits", PROGRESS_FILE] {
+            if output_dir.join(name).exists() {
+                return Err(invalid(format!("{name} already exists in the output directory; use an empty directory or --resume")));
+            }
         }
     }
     if let Some(im) = &job.imatrix {
@@ -160,8 +171,8 @@ pub fn prepare_recipe(job: RecipeJob) -> io::Result<RecipePlan> {
         if tool.as_os_str().is_empty() {
             return Err(invalid("imatrix executable missing"));
         }
-        if output_dir.join("calibration.imatrix.gguf").exists() {
-            return Err(invalid("calibration.imatrix already exists in the output directory"));
+        if !job.resume && output_dir.join("calibration.imatrix.gguf").exists() {
+            return Err(invalid("calibration.imatrix.gguf already exists in the output directory"));
         }
     }
     if let Some(p99) = job.budget_p99 {
@@ -208,6 +219,7 @@ impl RecipePlan {
             "imatrix": self.job.imatrix.as_ref().map(|p| plain(p)),
             "imatrix_auto_tool": self.job.imatrix_tool.as_ref().map(|p| plain(p)),
             "budget_p99": self.job.budget_p99,
+            "resume": self.job.resume,
             "execution": "plan_only",
             "claim": "none; every number in the receipt is measured, and KLD is a distribution distance, not a task score"
         })
@@ -215,6 +227,9 @@ impl RecipePlan {
 
     pub fn write_plan(&self) -> io::Result<PathBuf> {
         let path = self.job.output_dir.join("recipe-plan.json");
+        if self.job.resume && path.exists() {
+            return Ok(path);
+        }
         write_new(&path, &serde_json::to_vec_pretty(&self.plan_json())?)?;
         Ok(path)
     }
@@ -254,7 +269,12 @@ where
     let tt_path = dir.join(format!("{stem}.tensor-types.txt"));
     let out_path = dir.join(format!("{stem}.gguf"));
     if out_path.exists() {
-        return Err(invalid(format!("refusing to overwrite {}", out_path.display())));
+        if plan.job.resume && stem.starts_with("probe-") {
+            // a probe the previous run never finished measuring: redo it
+            fs::remove_file(&out_path)?;
+        } else {
+            return Err(invalid(format!("refusing to overwrite {}", out_path.display())));
+        }
     }
     fs::write(&tt_path, render_full(levels))?;
     let started = Instant::now();
@@ -269,6 +289,68 @@ where
 
 fn kld_json(s: &KldStats) -> Value {
     json!({"mean": s.mean, "mean_uncertainty": s.mean_uncertainty, "median": s.median, "p99": s.p99, "max": s.max, "seconds": s.seconds})
+}
+
+pub const PROGRESS_FILE: &str = "recipe-progress.jsonl";
+
+/// Append-only ledger of finished steps, one JSON object per line, so a run
+/// that dies after hours keeps every measured probe.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Progress {
+    pub base: Option<(u64, KldStats)>,
+    pub probes: BTreeMap<(TensorClass, &'static str), (u64, KldStats)>,
+}
+
+fn kld_from_json(v: &Value) -> Option<KldStats> {
+    Some(KldStats {
+        mean: v.get("mean")?.as_f64()?,
+        mean_uncertainty: v.get("mean_uncertainty").and_then(Value::as_f64),
+        median: v.get("median").and_then(Value::as_f64),
+        p99: v.get("p99").and_then(Value::as_f64),
+        max: v.get("max").and_then(Value::as_f64),
+        seconds: v.get("seconds").and_then(Value::as_f64).unwrap_or(0.0),
+    })
+}
+
+/// Parse a ledger. Malformed lines fail the whole load: a half-written line
+/// means the previous run died mid-write and the user should look, not trust.
+pub fn parse_progress(text: &str) -> io::Result<Progress> {
+    let mut out = Progress::default();
+    for (n, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: Value = serde_json::from_str(line).map_err(|e| invalid(format!("{PROGRESS_FILE} line {}: {e}", n + 1)))?;
+        let bytes = v.get("bytes").and_then(Value::as_u64).ok_or_else(|| invalid(format!("{PROGRESS_FILE} line {}: missing bytes", n + 1)))?;
+        let kld = v.get("kld").and_then(kld_from_json).ok_or_else(|| invalid(format!("{PROGRESS_FILE} line {}: missing kld", n + 1)))?;
+        match v.get("kind").and_then(Value::as_str) {
+            Some("base") => out.base = Some((bytes, kld)),
+            Some("probe") => {
+                let class = v.get("class").and_then(Value::as_str).and_then(TensorClass::parse)
+                    .ok_or_else(|| invalid(format!("{PROGRESS_FILE} line {}: bad class", n + 1)))?;
+                let level = v.get("level").and_then(Value::as_str).map(ladder_name).transpose()?
+                    .ok_or_else(|| invalid(format!("{PROGRESS_FILE} line {}: bad level", n + 1)))?;
+                out.probes.insert((class, level), (bytes, kld));
+            }
+            _ => return Err(invalid(format!("{PROGRESS_FILE} line {}: unknown kind", n + 1))),
+        }
+    }
+    Ok(out)
+}
+
+fn load_progress(dir: &Path) -> io::Result<Progress> {
+    let path = dir.join(PROGRESS_FILE);
+    if !path.exists() {
+        return Ok(Progress::default());
+    }
+    parse_progress(&fs::read_to_string(path)?)
+}
+
+fn append_progress(dir: &Path, entry: &Value) -> io::Result<()> {
+    let mut f = fs::OpenOptions::new().create(true).append(true).open(dir.join(PROGRESS_FILE))?;
+    f.write_all(serde_json::to_string(entry)?.as_bytes())?;
+    f.write_all(b"\n")
 }
 
 /// Run the whole search. Returns the receipt path. Every step streams to `log`.
@@ -288,6 +370,11 @@ where
     if plan.job.imatrix.is_none() {
         if let Some(tool) = &plan.job.imatrix_tool {
             let out = dir.join("calibration.imatrix.gguf");
+            if plan.job.resume && out.is_file() {
+                log(&format!("[ojon] resume: reusing importance matrix {}", plain(&out)));
+                plan_used.job.imatrix = Some(out.clone());
+                imatrix_auto = Some(out);
+            } else {
             log(&format!("[ojon] importance matrix from the corpus with {}", plain(tool)));
             let im_plan = crate::quant::calibration::prepare_imatrix(
                 &plan.job.source, &plan.job.kld.corpus, &out, tool,
@@ -296,17 +383,35 @@ where
             let saved = crate::quant::calibration::run_imatrix(&im_plan, |line| log(line))?;
             plan_used.job.imatrix = Some(saved.clone());
             imatrix_auto = Some(saved);
+            }
         }
     }
     let plan = &plan_used;
+    let progress = if plan.job.resume { load_progress(&dir)? } else { Progress::default() };
 
-    log(&format!("[ojon] reference logits for {} ({} chunks of {} ctx)", plain(&plan.job.source), plan.job.kld.chunks, plan.job.kld.context));
-    let dump = save_reference_logits(&plan.job.source, &dir.join("reference.logits"), &plan.job.kld, &mut log)?;
+    let dump = if plan.job.resume && dir.join("reference.logits").is_file() {
+        log("[ojon] resume: reusing reference.logits");
+        dir.join("reference.logits")
+    } else {
+        log(&format!("[ojon] reference logits for {} ({} chunks of {} ctx)", plain(&plan.job.source), plan.job.kld.chunks, plan.job.kld.context));
+        save_reference_logits(&plan.job.source, &dir.join("reference.logits"), &plan.job.kld, &mut log)?
+    };
 
     let all_base: BTreeMap<TensorClass, &'static str> = plan.present.keys().map(|c| (*c, base_level)).collect();
-    log(&format!("[ojon] base candidate: every class at {base_level}"));
-    let base = quantize_with(plan, &format!("base-{base_level}"), &all_base, &mut log)?;
-    let base_kld = measure_kld(&base.path, &dump, &plan.job.kld, &mut log)?;
+    let base_path = dir.join(format!("base-{base_level}.gguf"));
+    let (base, base_kld) = match (&progress.base, base_path.is_file()) {
+        (Some((bytes, kld)), true) if plan.job.resume => {
+            log(&format!("[ojon] resume: reusing base candidate {}", plain(&base_path)));
+            (Quantized { path: base_path.clone(), bytes: *bytes, seconds: 0.0 }, kld.clone())
+        }
+        _ => {
+            log(&format!("[ojon] base candidate: every class at {base_level}"));
+            let base = quantize_with(plan, &format!("base-{base_level}"), &all_base, &mut log)?;
+            let kld = measure_kld(&base.path, &dump, &plan.job.kld, &mut log)?;
+            append_progress(&dir, &json!({"kind": "base", "level": base_level, "bytes": base.bytes, "kld": kld_json(&kld)}))?;
+            (base, kld)
+        }
+    };
     log(&format!("[ojon] base: {:.2}% of source, mean KLD {:.6}", 100.0 * base.bytes as f64 / plan.source_bytes as f64, base_kld.mean));
 
     let mut rows = Vec::new();
@@ -315,6 +420,13 @@ where
         let mut levels = all_base.clone();
         levels.insert(probe.class, probe.level);
         let stem = probe_stem(probe.class, probe.level);
+        if let Some((bytes, k)) = progress.probes.get(&(probe.class, probe.level)) {
+            log(&format!("[ojon] probe {}/{}: {} at {} (resumed: mean KLD {:.6})", i + 1, plan.probes.len(), probe.class.name(), probe.level, k.mean));
+            rows.push(json!({"class": probe.class.name(), "level": probe.level, "status": "measured", "resumed": true, "bytes": bytes,
+                             "kld": kld_json(k), "kld_delta_vs_base": k.mean - base_kld.mean}));
+            measured.push(Measured { class: probe.class, level: probe.level, mean_kld: k.mean });
+            continue;
+        }
         log(&format!("[ojon] probe {}/{}: {} at {}", i + 1, plan.probes.len(), probe.class.name(), probe.level));
         let outcome = quantize_with(plan, &stem, &levels, &mut log).and_then(|q| {
             let k = measure_kld(&q.path, &dump, &plan.job.kld, &mut log)?;
@@ -326,6 +438,8 @@ where
                 rows.push(json!({"class": probe.class.name(), "level": probe.level, "status": "measured", "bytes": q.bytes,
                                  "quantize_seconds": q.seconds, "kld": kld_json(&k), "kld_delta_vs_base": k.mean - base_kld.mean}));
                 measured.push(Measured { class: probe.class, level: probe.level, mean_kld: k.mean });
+                append_progress(&dir, &json!({"kind": "probe", "class": probe.class.name(), "level": probe.level,
+                                              "bytes": q.bytes, "quantize_seconds": q.seconds, "kld": kld_json(&k)}))?;
                 if !plan.job.keep_probes {
                     let _ = fs::remove_file(&q.path);
                 }
@@ -540,6 +654,20 @@ mod tests {
     }
 
     #[test]
+    fn progress_ledger_roundtrips_and_fails_closed_on_damage() {
+        let base = json!({"kind": "base", "level": "q5_k", "bytes": 100, "kld": {"mean": 0.02, "p99": 0.1, "seconds": 3.0}});
+        let probe = json!({"kind": "probe", "class": "attn_vo", "level": "q4_k", "bytes": 90, "kld": {"mean": 0.03}});
+        let text = format!("{}{}{}{}", base, '\n', probe, '\n');
+        let p = parse_progress(&text).unwrap();
+        assert_eq!(p.base.as_ref().unwrap().0, 100);
+        assert_eq!(p.base.as_ref().unwrap().1.p99, Some(0.1));
+        assert_eq!(p.probes[&(TensorClass::AttnVo, "q4_k")].1.mean, 0.03);
+        assert!(parse_progress(r#"{"kind": "probe", "class": "nope", "level": "q4_k", "bytes": 1, "kld": {"mean": 0.1}}"#).is_err());
+        assert!(parse_progress(r#"{"kind": "base", "bytes": 1"#).is_err()); // truncated line
+        assert!(parse_progress("").unwrap().base.is_none());
+    }
+
+    #[test]
     fn main_precision_maps_only_measurable_bases() {
         assert_eq!(main_precision_for("q5_k").unwrap().as_str(), "Q5_K_M");
         assert_eq!(main_precision_for("q4_k").unwrap().as_str(), "Q4_K_M");
@@ -584,7 +712,7 @@ mod tests {
         let job = RecipeJob {
             source: dir.join("missing.gguf"), output_dir: dir.clone(), base: "q5_k", floor: "iq2_s", budget_kld: 0.01,
             quantize_tool: PathBuf::from("llama-quantize"), imatrix: None, imatrix_tool: None, threads: 4, kld,
-            keep_probes: false, budget_p99: None,
+            keep_probes: false, budget_p99: None, resume: false,
         };
         assert!(prepare_recipe(RecipeJob { budget_p99: Some(-0.5), ..job.clone() }).is_err());
         assert!(prepare_recipe(RecipeJob { budget_kld: 2.0, ..job.clone() }).is_err());

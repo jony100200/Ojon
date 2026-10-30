@@ -2256,7 +2256,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let (mut context, mut gpu_layers, mut chunks) = (512u32, 99u32, 40u32);
             let mut fit = false;
             let mut threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(4);
-            let (mut keep_probes, mut confirm, mut json) = (false, false, false);
+            let (mut keep_probes, mut confirm, mut json, mut resume) = (false, false, false, false);
             let text = |v: std::ffi::OsString, what: &str| -> io::Result<String> {
                 v.to_str().map(str::to_owned).ok_or_else(|| invalid(format!("{what} requires UTF-8")))
             };
@@ -2298,6 +2298,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     Some("--chunks") => chunks = text(next_argument(&mut args, "chunk limit")?, "chunks")?.parse().map_err(|_| invalid("chunks must be a number"))?,
                     Some("--threads") => threads = text(next_argument(&mut args, "thread count")?, "threads")?.parse().map_err(|_| invalid("threads must be a number"))?,
                     Some("--keep-probes") => keep_probes = true,
+                    Some("--resume") if execute => resume = true,
                     Some("--json") => json = true,
                     Some("--confirm") if execute => confirm = true,
                     _ => return Err(invalid(format!("unknown recipe option: {}", option.to_string_lossy()))),
@@ -2323,6 +2324,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 kld: ojon_backend::kld::KldSettings { tool: perplexity_tool, corpus, gpu_layers, fit, context, chunks },
                 keep_probes,
                 budget_p99,
+                resume,
             })?;
             let plan_path = plan.write_plan()?;
             if json {
