@@ -389,6 +389,14 @@ suite through `quant-compare-run` with the base as reference and the merged
 file as the candidate: quantize the merged file only if it holds or beats the
 base, or the quant inherits an unmeasured change.
 
+Live check (2026-10-30): a zero-delta rank-8 adapter on two tensors of
+Qwen3-0.6B F16 merged through `lora-merge-run` in one pass; the tool reported
+2 merged / 311 written, and every tensor of the output was numerically equal to
+the base (the only byte-level difference was a negative zero becoming positive
+zero in the F32 round trip). A real adapter from `learn-train-run` is the next
+test; the pure parts (adapter detection, base precision check, command
+rendering, never-overwrite) are unit-tested.
+
 ## Speech: whisper.cpp quantize and WER gate
 
 whisper.cpp models are GGML `.bin` files, not GGUF, and whisper.cpp ships its

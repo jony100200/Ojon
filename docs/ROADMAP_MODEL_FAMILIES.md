@@ -135,7 +135,7 @@ flow. Two items this adds to the list above:
   Needs a measured gate (prompt-set pass rate plus parity on unrelated prompts).
   Start: a `diffusion-uncensor-plan` that only audits which route the model
   allows, no weights touched.
-- **DONE 2026-10-30 (`lora-merge-plan|run`: GGUF or PEFT adapter, F16/BF16/F32 base check, receipt names the `quant-compare-run` gate and the `auto-quant` step).** LoRA that makes the original better, then quant. The `learn/` fine-tune
+- **DONE 2026-10-30 (`lora-merge-plan|run`: GGUF or PEFT adapter, F16/BF16/F32 base check, receipt names the `quant-compare-run` gate and the `auto-quant` step; live-verified on a zero-delta adapter over Qwen3-0.6B F16: 311 tensors, 2 merged, output numerically equal to base).** LoRA that makes the original better, then quant. The `learn/` fine-tune
   path is planned; the recipe search already accepts any original GGUF, so the
   order is: merge LoRA into the original (llama.cpp `llama-export-lora`), then
   `auto-quant`. Gate the merged original against the base original with the
