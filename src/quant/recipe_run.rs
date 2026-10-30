@@ -484,6 +484,8 @@ where
                 &plan.job.source, &calibration_corpus, &out, tool,
                 if plan.job.kld.fit { crate::quant::calibration::GPU_LAYERS_FIT } else { plan.job.kld.gpu_layers },
                 plan.job.kld.context)?;
+            let mut im_plan = im_plan;
+            im_plan.device = plan.job.kld.device.clone();
             let saved = crate::quant::calibration::run_imatrix(&im_plan, |line| log(line))?;
             plan_used.job.imatrix = Some(saved.clone());
             imatrix_auto = Some(saved);

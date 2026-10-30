@@ -26,6 +26,8 @@ pub struct ImatrixPlan {
     pub context: u32,
     pub model_bytes: u64,
     pub corpus_bytes: u64,
+    /// Backend device list (`-dev`), so the pass stays off a GPU that is serving.
+    pub device: Option<String>,
 }
 impl ImatrixPlan {
     pub fn json(&self) -> Value {
@@ -122,6 +124,7 @@ pub fn prepare_imatrix(
         context,
         model_bytes: m.file_bytes,
         corpus_bytes,
+            device: None,
     })
 }
 struct Stage(PathBuf);
@@ -173,9 +176,19 @@ pub fn run_imatrix<F: FnMut(&str)>(plan: &ImatrixPlan, mut log: F) -> io::Result
     } else {
         cmd.arg("-ngl").arg(plan.gpu_layers.to_string());
     }
+    // Batch = context: the host logits buffer scales with n_batch x vocab
+    // (2 GiB at the default 2048 on a 248k vocab) and that allocation is what
+    // fails first on a machine near its commit limit.
     cmd.arg("-c")
         .arg(plan.context.to_string())
-        .current_dir(&stage.0);
+        .arg("-b")
+        .arg(plan.context.to_string())
+        .arg("-ub")
+        .arg(plan.context.to_string());
+    if let Some(d) = &plan.device {
+        cmd.arg("-dev").arg(d);
+    }
+    cmd.current_dir(&stage.0);
     log("[ojon] generating calibrated importance matrix with installed public llama-imatrix");
     run_with_log(&mut cmd, |line| log(line))?;
     let bytes = fs::metadata(&tmp)?.len();
