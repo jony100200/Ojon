@@ -26,6 +26,7 @@ pub enum Integration {
 pub enum BackendId {
     LlamaQuantize,
     LlamaCli,
+    LlamaMtmdCli,
     LlamaServer,
     LlamaBench,
     LlamaPerplexity,
@@ -51,7 +52,7 @@ pub struct BackendSpec {
     pub role: &'static str,
 }
 
-const SPECS: [BackendSpec; 14] = [
+const SPECS: [BackendSpec; 15] = [
     BackendSpec {
         id: BackendId::LlamaQuantize,
         name: "llama.cpp quantizer",
@@ -69,6 +70,15 @@ const SPECS: [BackendSpec; 14] = [
         website: "https://github.com/ggml-org/llama.cpp/releases",
         integration: Integration::Wired,
         role: "GGUF text-model inference smoke check",
+    },
+    BackendSpec {
+        id: BackendId::LlamaMtmdCli,
+        name: "llama.cpp multimodal CLI",
+        executable_names: &["llama-mtmd-cli", "llama-mtmd-cli.exe"],
+        override_env: "OJON_LLAMA_MTMD_CLI",
+        website: "https://github.com/ggml-org/llama.cpp/blob/master/tools/mtmd/README.md",
+        integration: Integration::Wired,
+        role: "VLM vision-suite scoring with --mmproj and --image; preferred over llama-cli for quant-parity vision tests",
     },
     BackendSpec {
         id: BackendId::LlamaServer,
