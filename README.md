@@ -81,7 +81,7 @@ cargo run --locked --features gui --bin ojon-gui
 cargo run --locked --bin ojon -- backends
 ```
 
-Read the [User Guide](USER_GUIDE.md) for setup and supported workflows. For video quantisation, follow the [MiniMax H3 W4A4/NVFP4 guide](docs/MINIMAX_H3.md), which distinguishes packed W4A4 components from ComfyUI-compatible NVFP4 safetensors. More detailed developer information lives in the [Technical Reference](docs/TECHNICAL_REFERENCE.md).
+Read the [User Guide](USER_GUIDE.md) for setup and supported workflows. For video quantisation, follow the [MiniMax H3 W4A4/NVFP4 guide](docs/MINIMAX_H3.md), which distinguishes packed W4A4 components from ComfyUI-compatible NVFP4 safetensors. The measured mixed-precision method is in [Recipe Search](docs/RECIPE_SEARCH.md); per-family coverage and the ranked next tasks are in the [Model-Family Roadmap](docs/ROADMAP_MODEL_FAMILIES.md).
 
 ## Where we're heading
 
