@@ -13,7 +13,6 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -355,7 +354,7 @@ where
     let staging = make_staging_directory(&plan.output)?;
     let stage_file = staging.0.join("quantized.gguf");
     eprintln!("Ojon: launching configured llama.cpp quantizer; source weights are read-only.");
-    let mut cmd = Command::new(&plan.executable);
+    let mut cmd = crate::jobs::tool_command(&plan.executable);
     if let Some(mib) = plan.max_buffer_mib {
         cmd.arg("--max-buffer-size").arg(mib.to_string());
     }

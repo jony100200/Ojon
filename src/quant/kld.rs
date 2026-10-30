@@ -17,7 +17,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use crate::gguf::inspect_gguf;
-use crate::jobs::run_with_log;
+use crate::jobs::{run_with_log, tool_command};
 
 fn invalid(s: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, s.into())
@@ -129,7 +129,7 @@ where
     if dump.exists() {
         return Err(invalid(format!("reference dump already exists: {}", dump.display())));
     }
-    let mut cmd = Command::new(&settings.tool);
+    let mut cmd = tool_command(&settings.tool);
     settings.common_args(&mut cmd, original);
     cmd.arg("--save-all-logits").arg(dump);
     run_with_log(&mut cmd, |line| log(line))?;
@@ -154,7 +154,7 @@ where
     let started = Instant::now();
     let mut stats = KldStats::default();
     let mut seen_mean = false;
-    let mut cmd = Command::new(&settings.tool);
+    let mut cmd = tool_command(&settings.tool);
     settings.common_args(&mut cmd, candidate);
     cmd.arg("--kl-divergence").arg("--kl-divergence-base").arg(dump);
     run_with_log(&mut cmd, |line| {

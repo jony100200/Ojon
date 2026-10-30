@@ -209,6 +209,24 @@ pub fn capture_with_timeout_measured(
 const MAX_LINE_BYTES: usize = 2048;
 const MAX_TOTAL_LOG_BYTES: usize = 8 * 1024 * 1024;
 
+/// Build a `Command` for an external tool from a user-supplied path.
+///
+/// On Windows the loader derives the executable's own directory, the first
+/// place dependent DLLs are searched, from the path string as given. A path
+/// with forward slashes (common from shells, JSON and cross-platform scripts)
+/// can make that lookup miss, so the tool's `ggml.dll` / `llama.dll` are then
+/// picked up from PATH, and an older copy there fails with
+/// `0xc0000139` (entry point not found). Normalise to backslashes first.
+pub fn tool_command(tool: &Path) -> Command {
+    if cfg!(windows) {
+        let text = tool.to_string_lossy();
+        if text.contains('/') {
+            return Command::new(text.replace('/', "\\"));
+        }
+    }
+    Command::new(tool)
+}
+
 /// Streams stdout/stderr text from an existing, explicitly selected backend.
 /// The callback must be cheap; GUI callers should forward events to a channel.
 /// Lines longer than MAX_LINE_BYTES are split into fragments to bound memory.
@@ -634,5 +652,24 @@ mod tests {
         assert!(loaded[0]
             .summary_note
             .contains("Interrupted session detected"));
+    }
+}
+
+#[cfg(test)]
+mod tool_command_tests {
+    use super::tool_command;
+    use std::path::Path;
+
+    #[test]
+    fn forward_slashes_are_normalised_on_windows_only() {
+        let cmd = tool_command(Path::new("D:/tools/llama-quantize.exe"));
+        let program = cmd.get_program().to_string_lossy().into_owned();
+        if cfg!(windows) {
+            assert_eq!(program, r"D:\tools\llama-quantize.exe");
+        } else {
+            assert_eq!(program, "D:/tools/llama-quantize.exe");
+        }
+        let plain = tool_command(Path::new("llama-quantize"));
+        assert_eq!(plain.get_program().to_string_lossy(), "llama-quantize");
     }
 }

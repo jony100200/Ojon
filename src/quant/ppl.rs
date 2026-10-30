@@ -11,7 +11,6 @@ use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -78,7 +77,7 @@ where
     }
     let started = Instant::now();
     let mut estimate = None;
-    let mut cmd = Command::new(&settings.tool);
+    let mut cmd = crate::jobs::tool_command(&settings.tool);
     cmd.arg("-m")
         .arg(model)
         .arg("-f")

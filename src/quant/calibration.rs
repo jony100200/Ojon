@@ -8,7 +8,6 @@ use serde_json::{json, Value};
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn invalid(s: impl Into<String>) -> io::Error {
@@ -159,7 +158,7 @@ pub fn run_imatrix<F: FnMut(&str)>(plan: &ImatrixPlan, mut log: F) -> io::Result
         .ok_or_else(|| invalid("output parent missing"))?;
     let stage = allocate_stage(parent)?;
     let tmp = stage.0.join("imatrix.gguf");
-    let mut cmd = Command::new(&plan.tool);
+    let mut cmd = crate::jobs::tool_command(&plan.tool);
     cmd.arg("-m")
         .arg(&plan.model)
         .arg("-f")

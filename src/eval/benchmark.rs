@@ -54,7 +54,7 @@ impl BenchPlan {
         })
     }
     pub fn command(&self) -> Command {
-        let mut command = Command::new(&self.tool);
+        let mut command = crate::jobs::tool_command(&self.tool);
         command
             .arg("-m")
             .arg(&self.model)
