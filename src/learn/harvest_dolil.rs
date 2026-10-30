@@ -124,6 +124,15 @@ pub fn parse_dolil_run(path: &Path) -> io::Result<Vec<CollectedEpisode>> {
     }
     let answered = !response.is_empty();
     let mut ep = CollectedEpisode::new(format!("dolil:{run_id}"), run_id, "dolil", "dolil-local-model", goal, response);
+    // The run file's modification time is when the run happened; the curator's
+    // recency window sorts sessions by it, so harvest time would be a lie.
+    if let Ok(meta) = fs::metadata(path) {
+        if let Ok(modified) = meta.modified() {
+            if let Ok(d) = modified.duration_since(std::time::UNIX_EPOCH) {
+                ep.timestamp_epoch_s = d.as_secs();
+            }
+        }
+    }
     ep.tool_calls = tool_calls;
     ep.tool_results = Some(vec![serde_json::json!({
         "receipts_succeeded": ok, "receipts_failed": failed, "model_errors": model_errors,
