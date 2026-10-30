@@ -14,10 +14,11 @@ use crate::task_eval::{
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 fn invalid(s: impl Into<String>) -> io::Error {
@@ -184,6 +185,12 @@ pub struct QuantParityOptions {
     pub min_saving_percent: f64,
     pub vision_suite: Option<PathBuf>,
     pub mmproj: Option<PathBuf>,
+    /// Projector used for the candidate runs only; the reference keeps
+    /// `mmproj`. Makes the projector a quantization variable.
+    pub mmproj_candidate: Option<PathBuf>,
+    /// Tool for vision scoring. `None` means: `llama-mtmd-cli` if discovered,
+    /// otherwise `eval_tool`. Resolved once in `prepare_quant_parity`.
+    pub vision_tool: Option<PathBuf>,
     /// Optional same-corpus perplexity gate against the existing Q4 reference.
     pub ppl_corpus: Option<PathBuf>,
     pub ppl_tool: PathBuf,
@@ -209,6 +216,8 @@ impl Default for QuantParityOptions {
             min_saving_percent: 5.0,
             vision_suite: None,
             mmproj: None,
+            mmproj_candidate: None,
+            vision_tool: None,
             ppl_corpus: None,
             ppl_tool: PathBuf::from("llama-perplexity"),
             ppl_context: 2048,
@@ -251,6 +260,8 @@ impl QuantParityPlan {
             "min_saving_percent":self.options.min_saving_percent,
             "vision_suite_tasks":self.vision.as_ref().map(|v|v.tasks.len()),
             "mmproj":self.options.mmproj.as_ref().map(|p|p.to_string_lossy().to_string()),
+            "mmproj_candidate":self.options.mmproj_candidate.as_ref().map(|p|p.to_string_lossy().to_string()),
+            "vision_tool":self.vision.as_ref().map(|_|vision_tool(&self.options).to_string_lossy().to_string()),
             "ppl_corpus":self.options.ppl_corpus.as_ref().map(|p|p.to_string_lossy().to_string()),
             "max_relative_ppl_regression_pct":self.options.max_ppl_regression_pct,
             "quality_claim":"NO_EXPERIMENT_RUN",
@@ -360,12 +371,29 @@ pub fn prepare_quant_parity(
         if inspect_gguf(&mm)?.tensor_count == 0 {
             return Err(invalid("mmproj GGUF empty"));
         }
+        if let Some(candidate) = options.mmproj_candidate.take() {
+            let candidate = candidate.canonicalize()?;
+            validate_mmproj_candidate(&mm, &candidate)?;
+            if inspect_gguf(&candidate)?.tensor_count == 0 {
+                return Err(invalid("candidate mmproj GGUF empty"));
+            }
+            options.mmproj_candidate = Some(candidate);
+        }
         options.mmproj = Some(mm);
+        if options.vision_tool.is_none() {
+            options.vision_tool =
+                crate::discovery::discovered_path(crate::discovery::BackendId::LlamaMtmdCli);
+        }
         Some(vision_suite(path)?)
     } else {
         if options.mmproj.is_some() {
             return Err(invalid(
                 "mmproj without vision suite cannot prove visual parity",
+            ));
+        }
+        if options.mmproj_candidate.is_some() {
+            return Err(invalid(
+                "--mmproj-candidate needs --vision-suite and --mmproj (the reference projector)",
             ));
         }
         None
@@ -406,48 +434,113 @@ fn matches_vision(task: &VisionTask, answer: &str) -> bool {
         answer.trim().replace("\r\n", "\n") == task.expected.trim().replace("\r\n", "\n")
     }
 }
+/// The candidate-side projector must be a distinct existing file. Pure path
+/// check; GGUF content is verified by the caller.
+pub(crate) fn validate_mmproj_candidate(reference: &Path, candidate: &Path) -> io::Result<()> {
+    if !candidate.is_file() {
+        return Err(invalid("--mmproj-candidate must be an existing GGUF file"));
+    }
+    if candidate == reference {
+        return Err(invalid(
+            "--mmproj-candidate must differ from --mmproj; identical projectors make it no variable",
+        ));
+    }
+    Ok(())
+}
+/// Vision scorer: `llama-mtmd-cli` when discovered or configured, else the
+/// text evaluation CLI.
+pub(crate) fn vision_tool(options: &QuantParityOptions) -> &Path {
+    options
+        .vision_tool
+        .as_deref()
+        .unwrap_or(options.eval_tool.as_path())
+}
+/// `llama-mtmd-cli` rejects `--no-display-prompt` and `--simple-io` (they are
+/// registered for the completion/CLI examples only in `common/arg.cpp`), so
+/// those two flags are passed only to a non-mtmd tool.
+///
+/// Measured 2026-10-30 against KS_llama.cpp (commit 3ad011262): in
+/// `common/arg.cpp`, `--mmproj` is registered for `LLAMA_EXAMPLE_MTMD` and
+/// `LLAMA_EXAMPLE_SERVER`; `--image` for `LLAMA_EXAMPLE_MTMD` and
+/// `LLAMA_EXAMPLE_CLI`. Only the rewritten `llama-cli` (the one shipped with a
+/// `llama-cli-impl.dll`) is in the CLI example set; older `llama-cli` builds
+/// reject both flags, which is why `llama-mtmd-cli` is preferred here. The
+/// `build-vulkan\bin\Release\llama-cli.exe` (2026-10-27) crashed with
+/// 0xC0000005 on `--help` (its `mtmd.dll` is dated 2026-10-29, newer than the
+/// exe), so its flag list could not be read at runtime.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn vision_eval_args(
+    tool: &Path,
+    model: &Path,
+    mmproj: &Path,
+    image: &Path,
+    prompt: &str,
+    tokens: u32,
+    gpu_layers: i32,
+    device: Option<&str>,
+) -> Vec<OsString> {
+    let is_mtmd = tool
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.to_ascii_lowercase().contains("mtmd"));
+    let mut args: Vec<OsString> = vec![
+        "-m".into(),
+        model.into(),
+        "--mmproj".into(),
+        mmproj.into(),
+        "--image".into(),
+        image.into(),
+        "-p".into(),
+        prompt.into(),
+        "-n".into(),
+        tokens.to_string().into(),
+        "-ngl".into(),
+        gpu_layers.to_string().into(),
+        "--temp".into(),
+        "0".into(),
+        "-s".into(),
+        "42".into(),
+    ];
+    if !is_mtmd {
+        args.push("--no-display-prompt".into());
+        args.push("--simple-io".into());
+    }
+    args.push("--offline".into());
+    if let Some(d) = device {
+        args.push("-dev".into());
+        args.push(d.into());
+    }
+    args
+}
 pub(crate) fn vision_score(
     options: &QuantParityOptions,
     vision: &VisionSuite,
     model: &Path,
+    mmproj: &Path,
     log: &mut impl FnMut(&str),
 ) -> io::Result<Value> {
-    let mm = options
-        .mmproj
-        .as_ref()
-        .ok_or_else(|| invalid("mmproj missing"))?;
+    let tool = vision_tool(options);
     let mut passed = 0usize;
     let mut details = Vec::new();
     for task in &vision.tasks {
         log(&format!(
-            "[ojon] vision test {} using {}",
+            "[ojon] vision test {} using {} + {}",
             task.id,
-            model.display()
+            model.display(),
+            mmproj.display()
         ));
-        let mut cmd = Command::new(&options.eval_tool);
-        cmd.arg("-m")
-            .arg(model)
-            .arg("--mmproj")
-            .arg(mm)
-            .arg("--image")
-            .arg(&task.image)
-            .arg("-p")
-            .arg(&task.prompt)
-            .arg("-n")
-            .arg(options.tokens.to_string())
-            .arg("-ngl")
-            .arg(options.gpu_layers.to_string())
-            .arg("--temp")
-            .arg("0")
-            .arg("-s")
-            .arg("42")
-            .arg("--no-display-prompt")
-            .arg("--simple-io")
-            .arg("--offline")
-            .stdin(Stdio::null());
-        if let Some(d) = &options.device {
-            cmd.arg("-dev").arg(d);
-        }
+        let mut cmd = crate::jobs::tool_command(tool);
+        cmd.args(vision_eval_args(
+            tool,
+            model,
+            mmproj,
+            &task.image,
+            &task.prompt,
+            options.tokens,
+            options.gpu_layers,
+            options.device.as_deref(),
+        ))
+        .stdin(Stdio::null());
         let start = Instant::now();
         let output = cmd.output()?;
         if !output.status.success() {
@@ -474,7 +567,16 @@ pub(crate) fn vision_score(
             "answer":answer.chars().take(8192).collect::<String>()}));
     }
     Ok(json!({"passed":passed,"total":vision.tasks.len(),
-        "accuracy_pct":100.0*passed as f64/vision.tasks.len() as f64,"tests":details}))
+        "accuracy_pct":100.0*passed as f64/vision.tasks.len() as f64,
+        "mmproj":mmproj.to_string_lossy(),"tool":tool.to_string_lossy(),"tests":details}))
+}
+/// Evidence scope label for one candidate row.
+pub(crate) fn evidence_scope(vision: bool, projector_varied: bool) -> &'static str {
+    match (vision, projector_varied) {
+        (true, true) => "TEXT_AND_VISION_TASK_SUITE_ONLY_PROJECTOR_VARIED",
+        (true, false) => "TEXT_AND_VISION_TASK_SUITE_ONLY",
+        (false, _) => "TEXT_TASK_SUITE_ONLY_VISION_NOT_VERIFIED",
+    }
 }
 pub(crate) fn task_parity(report: &Value, max_loss: f64) -> (bool, Value) {
     let base = &report["baseline"]["metrics"];
@@ -746,11 +848,22 @@ pub fn run_quant_parity(plan: &QuantParityPlan, mut log: impl FnMut(&str)) -> io
         let mut vision_evidence = Value::Null;
         if task_pass && plan.vision.is_some() {
             let test = (|| {
+                let reference_mmproj = plan
+                    .options
+                    .mmproj
+                    .as_deref()
+                    .ok_or_else(|| invalid("mmproj missing"))?;
+                let candidate_mmproj = plan
+                    .options
+                    .mmproj_candidate
+                    .as_deref()
+                    .unwrap_or(reference_mmproj);
                 if base_vision.is_none() {
                     base_vision = Some(vision_score(
                         &plan.options,
                         plan.vision.as_ref().unwrap(),
                         &plan.baseline,
+                        reference_mmproj,
                         &mut log,
                     )?);
                 }
@@ -758,6 +871,7 @@ pub fn run_quant_parity(plan: &QuantParityPlan, mut log: impl FnMut(&str)) -> io
                     &plan.options,
                     plan.vision.as_ref().unwrap(),
                     &output,
+                    candidate_mmproj,
                     &mut log,
                 )
             })();
@@ -768,6 +882,9 @@ pub fn run_quant_parity(plan: &QuantParityPlan, mut log: impl FnMut(&str)) -> io
                     let c = candidate["accuracy_pct"].as_f64().unwrap_or(-1.0);
                     vision_pass = b > 0.0 && c + plan.options.max_loss_points + 1e-10 >= b;
                     vision_evidence = json!({"reference":reference,"candidate":candidate,
+                        "reference_mmproj":plan.options.mmproj.as_ref().map(|p|p.to_string_lossy().to_string()),
+                        "candidate_mmproj":plan.options.mmproj_candidate.as_ref().or(plan.options.mmproj.as_ref()).map(|p|p.to_string_lossy().to_string()),
+                        "projector_varied":plan.options.mmproj_candidate.is_some(),
                         "pass":vision_pass});
                 }
                 Err(e) => {
@@ -814,11 +931,10 @@ pub fn run_quant_parity(plan: &QuantParityPlan, mut log: impl FnMut(&str)) -> io
             }
         }
         let measured_pass = task_pass && vision_pass && ppl_pass;
-        let scope = if plan.vision.is_some() {
-            "TEXT_AND_VISION_TASK_SUITE_ONLY"
-        } else {
-            "TEXT_TASK_SUITE_ONLY_VISION_NOT_VERIFIED"
-        };
+        let scope = evidence_scope(
+            plan.vision.is_some(),
+            plan.options.mmproj_candidate.is_some(),
+        );
         if measured_pass && best.as_ref().is_none_or(|(_, n)| size < *n) {
             best = Some((output.clone(), size));
         }
@@ -846,6 +962,9 @@ pub fn run_quant_parity(plan: &QuantParityPlan, mut log: impl FnMut(&str)) -> io
         "ppl_corpus":plan.options.ppl_corpus.as_ref().map(|p|p.to_string_lossy().to_string()),
         "baseline_perplexity":baseline_ppl,
         "vision_suite_count":plan.vision.as_ref().map(|x|x.tasks.len()),
+        "mmproj":plan.options.mmproj.as_ref().map(|p|p.to_string_lossy().to_string()),
+        "mmproj_candidate":plan.options.mmproj_candidate.as_ref().map(|p|p.to_string_lossy().to_string()),
+        "vision_tool":plan.vision.as_ref().map(|_|vision_tool(&plan.options).to_string_lossy().to_string()),
         "results":rows,
         "provisional_smallest_measured_candidate":best.as_ref()
             .map(|(p,_)|p.to_string_lossy().to_string()),
@@ -907,5 +1026,82 @@ mod tests {
             ..t
         };
         assert!(!matches_vision(&e, "the item is blue"));
+    }
+    #[test]
+    fn mmproj_candidate_must_be_a_distinct_existing_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "ojon-parity-mmproj-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let reference = dir.join("mmproj-f16.gguf");
+        let candidate = dir.join("mmproj-q8_0.gguf");
+        fs::write(&reference, b"r").unwrap();
+        fs::write(&candidate, b"c").unwrap();
+        assert!(validate_mmproj_candidate(&reference, &reference).is_err());
+        assert!(validate_mmproj_candidate(&reference, &dir.join("missing.gguf")).is_err());
+        assert!(validate_mmproj_candidate(&reference, &candidate).is_ok());
+        let _ = fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn evidence_scope_names_a_varied_projector() {
+        assert_eq!(
+            evidence_scope(true, true),
+            "TEXT_AND_VISION_TASK_SUITE_ONLY_PROJECTOR_VARIED"
+        );
+        assert_eq!(evidence_scope(true, false), "TEXT_AND_VISION_TASK_SUITE_ONLY");
+        assert_eq!(
+            evidence_scope(false, true),
+            "TEXT_TASK_SUITE_ONLY_VISION_NOT_VERIFIED"
+        );
+        let defaults = QuantParityOptions::default();
+        assert!(defaults.mmproj_candidate.is_none() && defaults.vision_tool.is_none());
+    }
+    #[test]
+    fn vision_tool_prefers_configured_mtmd_cli_and_drops_cli_only_flags() {
+        let plain = QuantParityOptions::default();
+        assert_eq!(vision_tool(&plain), Path::new("llama-cli"));
+        let with_mtmd = QuantParityOptions {
+            vision_tool: Some(PathBuf::from("tools/llama-mtmd-cli.exe")),
+            ..QuantParityOptions::default()
+        };
+        assert_eq!(vision_tool(&with_mtmd), Path::new("tools/llama-mtmd-cli.exe"));
+        let text = |args: Vec<OsString>| {
+            args.iter()
+                .map(|a| a.to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+        };
+        let cli = text(vision_eval_args(
+            Path::new("llama-cli"),
+            Path::new("m.gguf"),
+            Path::new("mm.gguf"),
+            Path::new("i.png"),
+            "what colour",
+            64,
+            0,
+            Some("Vulkan0"),
+        ));
+        assert!(cli.contains(&"--no-display-prompt".to_string()));
+        assert!(cli.contains(&"--simple-io".to_string()));
+        assert_eq!(cli[2..4], ["--mmproj".to_string(), "mm.gguf".to_string()]);
+        assert_eq!(cli[cli.len() - 2..], ["-dev".to_string(), "Vulkan0".to_string()]);
+        let mtmd = text(vision_eval_args(
+            Path::new("tools/llama-mtmd-cli.exe"),
+            Path::new("m.gguf"),
+            Path::new("mm.gguf"),
+            Path::new("i.png"),
+            "what colour",
+            64,
+            0,
+            None,
+        ));
+        assert!(!mtmd.contains(&"--no-display-prompt".to_string()));
+        assert!(!mtmd.contains(&"--simple-io".to_string()));
+        assert!(mtmd.contains(&"--offline".to_string()));
+        assert_eq!(mtmd[4..6], ["--image".to_string(), "i.png".to_string()]);
     }
 }

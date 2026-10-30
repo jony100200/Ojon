@@ -1084,6 +1084,18 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                             "matching vision projector GGUF",
                         )?));
                     }
+                    Some("--mmproj-candidate") => {
+                        options.mmproj_candidate = Some(PathBuf::from(next_argument(
+                            &mut args,
+                            "candidate-side vision projector GGUF",
+                        )?));
+                    }
+                    Some("--vision-tool") => {
+                        options.vision_tool = Some(PathBuf::from(next_argument(
+                            &mut args,
+                            "llama-mtmd-cli path",
+                        )?));
+                    }
                     Some("--json") => json = true,
                     Some("--confirm") => confirmed = true,
                     _ => {

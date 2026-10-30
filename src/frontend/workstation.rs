@@ -2651,6 +2651,7 @@ impl Workstation {
                                 let label = match backend.spec.id {
                                     BackendId::LlamaQuantize => "GGUF converter",
                                     BackendId::LlamaCli => "GGUF inference",
+                                    BackendId::LlamaMtmdCli => "VLM vision scoring (mtmd)",
                                     BackendId::LlamaServer=>"Persistent task-evaluation server",
                                     BackendId::LlamaBench => "GGUF performance benchmark",
                                     BackendId::LlamaPerplexity => "GGUF quality / PPL",

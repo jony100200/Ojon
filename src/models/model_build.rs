@@ -4,16 +4,14 @@
 //! the explicitly installed upstream llama.cpp Python converter and quantizer.
 //! This workflow does not download models or perform quality evaluation.
 
-use crate::gguf::inspect_gguf;
 use crate::hf::{inspect_hf_folder, prepare_hf, quantize_hf_with_log};
-use crate::jobs::run_with_log;
 use crate::llama::Precision;
+use crate::mmproj::{config_has_vision_tower, convert_mmproj_into, MmprojPrecision};
 use crate::model_edit::{prepare_model_abliteration, run_model_abliteration};
 use serde_json::{json, Value};
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn invalid(s: impl Into<String>) -> io::Error {
@@ -100,15 +98,7 @@ pub fn prepare_model_build(request: ModelBuildRequest<'_>) -> io::Result<ModelBu
         .read_to_end(&mut raw)?;
     let metadata: Value = serde_json::from_slice(&raw)
         .map_err(|e| invalid(format!("invalid model config.json: {e}")))?;
-    let mt = metadata
-        .get("model_type")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let is_vlm = metadata.get("vision_config").is_some()
-        || mt.contains("vlm")
-        || mt.contains("_vl")
-        || mt.contains("vision");
+    let is_vlm = config_has_vision_tower(&metadata);
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -253,34 +243,14 @@ pub fn run_model_build(
     if plan.is_vlm {
         log("[ojon] converting VLM projector (Q8_0, separate from language GGUF)");
         let expected = stage.0.join("mmproj.gguf");
-        let mut cmd = Command::new(&plan.python);
-        cmd.arg(&plan.converter)
-            .arg(&edited)
-            .arg("--mmproj")
-            .arg("--outfile")
-            .arg(&expected)
-            .arg("--outtype")
-            .arg("q8_0");
-        run_with_log(&mut cmd, |line| log(line))?;
-        // Certain llama.cpp revisions add a second 'mmproj-' prefix to
-        // user-supplied output names. Detect the two exact known variants.
-        let alternative = stage.0.join("mmproj-mmproj.gguf");
-        let generated = if expected.is_file() {
-            &expected
-        } else if alternative.is_file() {
-            &alternative
-        } else {
-            return Err(invalid(
-                "mmproj converter did not generate expected vision GGUF",
-            ));
-        };
-        let info = inspect_gguf(generated)?;
-        if info.tensor_count == 0 {
-            return Err(invalid("vision mmproj GGUF has zero tensors"));
-        }
-        if generated != &expected {
-            fs::rename(generated, &expected)?;
-        }
+        let info = convert_mmproj_into(
+            &plan.python,
+            &plan.converter,
+            &edited,
+            &expected,
+            MmprojPrecision::Q8_0,
+            &mut log,
+        )?;
         mmproj_bytes = Some(info.file_bytes);
     }
     let receipt = json!({

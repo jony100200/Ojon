@@ -98,6 +98,9 @@ budget or whether the base candidate is the one to keep.
    second on your card.
 5. For image/video GGUF: `diffusion-parity` against the reference on a fixed seed.
 6. For a sibling model: `recipe-apply` with `--verify-budget` instead of a new search.
+7. For a VLM: `quantize-hf --mmproj-out` for the projector, then `quant-parity-run
+   --vision-suite --mmproj [--mmproj-candidate]` so the projector precision is
+   measured too, not inherited.
 
 Each step writes its own receipt; nothing earlier is overwritten.
 
@@ -323,6 +326,44 @@ reproduces the reference's geometry on this set. It is a similarity
 measurement between two models, not a retrieval or reranking benchmark: there
 are no relevance labels, the reference's ranking stands in for them, and a
 candidate can agree with a reference that is itself poor at the task.
+
+## VLM projector as a quantization variable
+
+A vision-language model is two GGUF files: the language tower and the
+multimodal projector (`mmproj`). `quantize-hf` converts the projector in the
+same run when the source `config.json` carries a vision tower (`vision_config`
+or a VLM `model_type`); on a text-only source `--mmproj-out` is refused.
+
+```sh
+ojon quantize-hf ./Qwen2-VL-2B ./out/qwen2vl-Q4_K_M.gguf --precision Q4_K_M      --mmproj-out ./out/mmproj-f16.gguf                       # default --mmproj-precision f16
+ojon quantize-hf ./Qwen2-VL-2B ./out/qwen2vl-Q4_K_M-b.gguf --precision Q4_K_M      --mmproj-out ./out/mmproj-q8_0.gguf --mmproj-precision q8_0
+```
+
+`--mmproj-precision` is `f16` (default), `bf16` or `q8_0`, the three types the
+upstream converter accepts for `--mmproj`. The projector is never overwritten.
+The text receipt gains `mmproj.path`, `mmproj.precision`, `mmproj.bytes` and
+`mmproj.vision_inference_test=NOT_RUN`; a JSON sidecar
+`<mmproj>.ojon-receipt.json` (`ojon.mmproj_receipt.v1`) carries the same
+`mmproj` object. Conversion loads nothing into a runtime.
+
+`quant-parity-plan|run` then scores the projector choice. `--mmproj` stays
+with the reference; `--mmproj-candidate` is used for every candidate run:
+
+```sh
+ojon quant-parity-run qwen2vl-F16.gguf qwen2vl-F16.gguf suite.json ./parity      --precisions Q4_K_M --vision-suite vision.json      --mmproj ./out/mmproj-f16.gguf --mmproj-candidate ./out/mmproj-q8_0.gguf --confirm
+```
+
+The candidate projector must be an existing GGUF distinct from `--mmproj`.
+Both paths are recorded in the plan and in the report (`mmproj`,
+`mmproj_candidate`, per-row `vision.reference_mmproj` /
+`vision.candidate_mmproj`), and the row's `evidence_scope` becomes
+`TEXT_AND_VISION_TASK_SUITE_ONLY_PROJECTOR_VARIED`. Without
+`--mmproj-candidate` nothing changes: one projector feeds both sides.
+
+Vision scoring prefers `llama-mtmd-cli` when it is discovered (or given with
+`--vision-tool`), falling back to the configured `--eval-tool`. Older
+`llama-cli` builds do not accept `--mmproj` / `--image`; only the rewritten
+`llama-cli` (shipped with `llama-cli-impl.dll`) and `llama-mtmd-cli` do.
 
 ## Native image/video model weight compression (experimental)
 

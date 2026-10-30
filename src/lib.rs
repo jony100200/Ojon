@@ -54,6 +54,7 @@ pub use self::models::diffusion_sweep;
 pub use self::models::gguf;
 pub use self::models::hf;
 pub use self::models::llama;
+pub use self::models::mmproj;
 pub use self::models::model_build;
 
 // Eval
