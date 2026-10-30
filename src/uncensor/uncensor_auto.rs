@@ -11,8 +11,8 @@ use crate::gguf_edit::{prepare_gguf_abliteration_value, run_gguf_abliteration};
 use crate::jobs::run_with_log;
 use crate::llama::{prepare_gguf, quantize_gguf_with_log, Precision};
 use crate::method_select::choose_edit_method;
-use crate::refusal::{prepare_refusal_eval_with_server, run_refusal_eval};
-use crate::task_eval::{prepare_eval_with_server, run_eval_reusing_baseline};
+use crate::refusal::{prepare_refusal_eval_with_server, run_refusal_eval, RefusalEvalRequest};
+use crate::task_eval::{prepare_eval_with_server, run_eval_reusing_baseline, EvalRequest};
 use serde_json::{json, Value};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, ErrorKind, Write};
@@ -625,16 +625,16 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
         .collect::<Vec<_>>();
     // 2. Baseline refusal measurement on the untouched original.
     let baseline_refusal_path = staging.0.join("baseline-refusal.json");
-    let baseline_refusal_plan = prepare_refusal_eval_with_server(
-        &plan.source,
-        &plan.request.refusal_probes,
-        &plan.request.runtime,
-        plan.request.server_runtime.as_deref(),
-        plan.request.gpu_layers,
-        plan.request.device.as_deref(),
-        plan.request.refusal_tokens,
-        &baseline_refusal_path,
-    )?;
+    let baseline_refusal_plan = prepare_refusal_eval_with_server(RefusalEvalRequest {
+        model: &plan.source,
+        suite: &plan.request.refusal_probes,
+        tool: &plan.request.runtime,
+        server_tool: plan.request.server_runtime.as_deref(),
+        gpu_layers: plan.request.gpu_layers,
+        device: plan.request.device.as_deref(),
+        tokens: plan.request.refusal_tokens,
+        report: &baseline_refusal_path,
+    })?;
     log("Measuring refusal behaviour of the original model");
     let baseline_refusal = run_refusal_eval(&baseline_refusal_plan, &mut log)?;
     let baseline_refusal_rate = crate::refusal::refusal_rate_from_report(&baseline_refusal)?;
@@ -669,17 +669,17 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
         let capability_path = staging
             .0
             .join(format!("{}-capability.json", candidate.name));
-        let capability_plan = prepare_eval_with_server(
-            &plan.request.capability_suite,
-            &plan.source,
-            &[(candidate.name.clone(), candidate.staged.clone())],
-            &plan.request.runtime,
-            plan.request.server_runtime.as_deref(),
-            plan.request.gpu_layers,
-            plan.request.device.as_deref(),
-            plan.request.task_tokens,
-            &capability_path,
-        )?;
+        let capability_plan = prepare_eval_with_server(EvalRequest {
+            suite: &plan.request.capability_suite,
+            baseline: &plan.source,
+            candidates: &[(candidate.name.clone(), candidate.staged.clone())],
+            tool: &plan.request.runtime,
+            server_tool: plan.request.server_runtime.as_deref(),
+            gpu_layers: plan.request.gpu_layers,
+            device: plan.request.device.as_deref(),
+            tokens: plan.request.task_tokens,
+            report: &capability_path,
+        })?;
         log(&format!(
             "Measuring held-out capability of candidate {}",
             candidate.name
@@ -696,16 +696,16 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
         }
 
         let report_path = staging.0.join(format!("{}-refusal.json", candidate.name));
-        let refusal_plan = prepare_refusal_eval_with_server(
-            &candidate.staged,
-            &plan.request.refusal_probes,
-            &plan.request.runtime,
-            plan.request.server_runtime.as_deref(),
-            plan.request.gpu_layers,
-            plan.request.device.as_deref(),
-            plan.request.refusal_tokens,
-            &report_path,
-        )?;
+        let refusal_plan = prepare_refusal_eval_with_server(RefusalEvalRequest {
+            model: &candidate.staged,
+            suite: &plan.request.refusal_probes,
+            tool: &plan.request.runtime,
+            server_tool: plan.request.server_runtime.as_deref(),
+            gpu_layers: plan.request.gpu_layers,
+            device: plan.request.device.as_deref(),
+            tokens: plan.request.refusal_tokens,
+            report: &report_path,
+        })?;
         log(&format!(
             "Measuring refusal behaviour of candidate {}",
             candidate.name
@@ -884,31 +884,31 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
                 .map(|t| t.as_json())
                 .unwrap_or(Value::Null);
             let q_refusal_path = staging.0.join("quantized-refusal.json");
-            let q_refusal_plan = prepare_refusal_eval_with_server(
-                quant_out,
-                &plan.request.refusal_probes,
-                &plan.request.runtime,
-                plan.request.server_runtime.as_deref(),
-                plan.request.gpu_layers,
-                plan.request.device.as_deref(),
-                plan.request.refusal_tokens,
-                &q_refusal_path,
-            )?;
+            let q_refusal_plan = prepare_refusal_eval_with_server(RefusalEvalRequest {
+                model: quant_out,
+                suite: &plan.request.refusal_probes,
+                tool: &plan.request.runtime,
+                server_tool: plan.request.server_runtime.as_deref(),
+                gpu_layers: plan.request.gpu_layers,
+                device: plan.request.device.as_deref(),
+                tokens: plan.request.refusal_tokens,
+                report: &q_refusal_path,
+            })?;
             let q_refusal_report = run_refusal_eval(&q_refusal_plan, &mut log)?;
             let q_refusal_rate = crate::refusal::refusal_rate_from_report(&q_refusal_report)?;
 
             let q_cap_path = staging.0.join("quantized-capability.json");
-            let q_cap_plan = prepare_eval_with_server(
-                &plan.request.capability_suite,
-                &plan.source,
-                &[(String::from("quantized_final"), quant_out.clone())],
-                &plan.request.runtime,
-                plan.request.server_runtime.as_deref(),
-                plan.request.gpu_layers,
-                plan.request.device.as_deref(),
-                plan.request.task_tokens,
-                &q_cap_path,
-            )?;
+            let q_cap_plan = prepare_eval_with_server(EvalRequest {
+                suite: &plan.request.capability_suite,
+                baseline: &plan.source,
+                candidates: &[(String::from("quantized_final"), quant_out.clone())],
+                tool: &plan.request.runtime,
+                server_tool: plan.request.server_runtime.as_deref(),
+                gpu_layers: plan.request.gpu_layers,
+                device: plan.request.device.as_deref(),
+                tokens: plan.request.task_tokens,
+                report: &q_cap_path,
+            })?;
             let q_cap_report = crate::task_eval::run_eval_reusing_baseline(
                 &q_cap_plan,
                 Some(&capability),

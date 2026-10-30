@@ -172,7 +172,7 @@ pub use settings::{load_settings, save_settings, settings_path, LocalSettings};
 pub use smoke::{smoke_gguf, smoke_gguf_capture, SmokeCapture};
 pub use sweep::{execute_sweep, parse_precisions, prepare_sweep, SweepPlan};
 pub use task_eval::{
-    inspect_task_suite, parse_eval_suite, prepare_eval, run_eval, EvalPlan, EvalSuite,
+    inspect_task_suite, parse_eval_suite, prepare_eval, run_eval, EvalPlan, EvalRequest, EvalSuite,
 };
 pub use train::{prepare_train, run_train, TrainPlan};
 pub use uncensor_auto::{prepare_uncensor_auto, run_uncensor_auto, UncensorAutoRequest};

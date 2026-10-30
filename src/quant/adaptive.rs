@@ -3,7 +3,7 @@
 //! no heuristic guess is described as observed activation sensitivity.
 use crate::gguf::{inspect_gguf, inspect_gguf_tensors, read_imatrix_energy};
 use crate::llama::{prepare_gguf, quantize_gguf_with_log, Precision};
-use crate::task_eval::{prepare_eval_with_server, run_eval_reusing_baseline};
+use crate::task_eval::{prepare_eval_with_server, run_eval_reusing_baseline, EvalRequest};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -821,17 +821,17 @@ pub fn run_adaptive(plan: &AdaptivePlan, mut log: impl FnMut(&str)) -> io::Resul
         } else {
             (|| {
                 let candidate = vec![(label.clone(), output.clone())];
-                let test = prepare_eval_with_server(
-                    &plan.suite,
-                    &plan.reference,
-                    &candidate,
-                    &plan.eval_tool,
-                    plan.server_tool.as_deref(),
-                    plan.gpu_layers,
-                    plan.device.as_deref(),
-                    plan.tokens,
-                    &evidence,
-                )?;
+                let test = prepare_eval_with_server(EvalRequest {
+                    suite: &plan.suite,
+                    baseline: &plan.reference,
+                    candidates: &candidate,
+                    tool: &plan.eval_tool,
+                    server_tool: plan.server_tool.as_deref(),
+                    gpu_layers: plan.gpu_layers,
+                    device: plan.device.as_deref(),
+                    tokens: plan.tokens,
+                    report: &evidence,
+                })?;
                 run_eval_reusing_baseline(&test, baseline_tasks.as_ref(), |line| log(line))
             })()
         };

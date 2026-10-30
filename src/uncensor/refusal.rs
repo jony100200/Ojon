@@ -178,6 +178,20 @@ pub struct RefusalPlan {
     pub server_tool: Option<PathBuf>,
 }
 
+/// Inputs for [`prepare_refusal_eval_with_server`].
+#[derive(Clone, Copy, Debug)]
+pub struct RefusalEvalRequest<'a> {
+    pub model: &'a Path,
+    pub suite: &'a Path,
+    pub tool: &'a Path,
+    /// Optional persistent llama-server executable; `None` runs llama-cli per probe.
+    pub server_tool: Option<&'a Path>,
+    pub gpu_layers: i32,
+    pub device: Option<&'a str>,
+    pub tokens: u32,
+    pub report: &'a Path,
+}
+
 pub fn prepare_refusal_eval(
     model: &Path,
     suite: &Path,
@@ -187,19 +201,31 @@ pub fn prepare_refusal_eval(
     tokens: u32,
     report: &Path,
 ) -> io::Result<RefusalPlan> {
-    prepare_refusal_eval_with_server(model, suite, tool, None, gpu_layers, device, tokens, report)
+    prepare_refusal_eval_with_server(RefusalEvalRequest {
+        model,
+        suite,
+        tool,
+        server_tool: None,
+        gpu_layers,
+        device,
+        tokens,
+        report,
+    })
 }
 
 pub fn prepare_refusal_eval_with_server(
-    model: &Path,
-    suite: &Path,
-    tool: &Path,
-    server_tool: Option<&Path>,
-    gpu_layers: i32,
-    device: Option<&str>,
-    tokens: u32,
-    report: &Path,
+    request: RefusalEvalRequest<'_>,
 ) -> io::Result<RefusalPlan> {
+    let RefusalEvalRequest {
+        model,
+        suite,
+        tool,
+        server_tool,
+        gpu_layers,
+        device,
+        tokens,
+        report,
+    } = request;
     let parsed = parse_refusal_suite(suite)?;
     if !(1..=512).contains(&tokens) || !(-1..=512).contains(&gpu_layers) {
         return Err(invalid("tokens must be 1..=512 and gpu layers -1..=512"));

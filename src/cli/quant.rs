@@ -1358,15 +1358,17 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             }
             let baseline = baseline.ok_or_else(|| invalid("--baseline is required"))?;
             let plan = ojon_backend::task_eval::prepare_eval_with_server(
-                &suite,
-                &baseline,
-                &candidates,
-                &tool,
-                server_tool.as_deref(),
-                gpu_layers,
-                device.as_deref(),
-                tokens,
-                &output,
+                ojon_backend::task_eval::EvalRequest {
+                    suite: &suite,
+                    baseline: &baseline,
+                    candidates: &candidates,
+                    tool: &tool,
+                    server_tool: server_tool.as_deref(),
+                    gpu_layers,
+                    device: device.as_deref(),
+                    tokens,
+                    report: &output,
+                },
             )?;
             if execute {
                 if !confirm {

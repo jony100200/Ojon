@@ -436,28 +436,30 @@ fn finish(
         let baseline =
             baseline.ok_or_else(|| invalid("refusal measurement needs a GGUF baseline"))?;
         let gpu = plan.request.gpu_layers.min(512) as i32;
-        let before_plan = crate::refusal::prepare_refusal_eval_with_server(
-            baseline,
-            suite,
-            &plan.request.runtime,
-            None,
-            gpu,
-            None,
-            REFUSAL_TOKENS,
-            &report_path(&plan.output, ".ojon-refusal-before.json"),
-        )?;
+        let before_plan =
+            crate::refusal::prepare_refusal_eval_with_server(crate::refusal::RefusalEvalRequest {
+                model: baseline,
+                suite,
+                tool: &plan.request.runtime,
+                server_tool: None,
+                gpu_layers: gpu,
+                device: None,
+                tokens: REFUSAL_TOKENS,
+                report: &report_path(&plan.output, ".ojon-refusal-before.json"),
+            })?;
         log("Measuring refusal behaviour of the original model");
         let before = crate::refusal::run_refusal_eval(&before_plan, &mut *log)?;
-        let after_plan = crate::refusal::prepare_refusal_eval_with_server(
-            &plan.output,
-            suite,
-            &plan.request.runtime,
-            None,
-            gpu,
-            None,
-            REFUSAL_TOKENS,
-            &report_path(&plan.output, ".ojon-refusal-after.json"),
-        )?;
+        let after_plan =
+            crate::refusal::prepare_refusal_eval_with_server(crate::refusal::RefusalEvalRequest {
+                model: &plan.output,
+                suite,
+                tool: &plan.request.runtime,
+                server_tool: None,
+                gpu_layers: gpu,
+                device: None,
+                tokens: REFUSAL_TOKENS,
+                report: &report_path(&plan.output, ".ojon-refusal-after.json"),
+            })?;
         log("Measuring refusal behaviour of the produced model");
         let after = crate::refusal::run_refusal_eval(&after_plan, &mut *log)?;
         let before_rate = crate::refusal::refusal_rate_from_report(&before)?;
@@ -470,16 +472,17 @@ fn finish(
     if let Some(suite) = &plan.request.task_suite {
         let baseline =
             baseline.ok_or_else(|| invalid("capability measurement needs a GGUF baseline"))?;
-        let report = crate::task_eval::prepare_eval(
+        let report = crate::task_eval::prepare_eval(crate::task_eval::EvalRequest {
             suite,
             baseline,
-            &[("produced".to_owned(), plan.output.clone())],
-            &plan.request.runtime,
-            plan.request.gpu_layers.min(512) as i32,
-            None,
-            TASK_TOKENS,
-            &report_path(&plan.output, ".ojon-tasks.json"),
-        )?;
+            candidates: &[("produced".to_owned(), plan.output.clone())],
+            tool: &plan.request.runtime,
+            server_tool: None,
+            gpu_layers: plan.request.gpu_layers.min(512) as i32,
+            device: None,
+            tokens: TASK_TOKENS,
+            report: &report_path(&plan.output, ".ojon-tasks.json"),
+        })?;
         log("Measuring held-out functional capability of the original and produced models");
         let eval = crate::task_eval::run_eval(&report, |line| log(line))?;
         task_summary = json!({"measurement":"MEASURED_FUNCTIONAL_SUITE",

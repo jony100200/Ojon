@@ -648,14 +648,16 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 .or_else(|| discovered_path(BackendId::LlamaCli))
                 .ok_or_else(|| invalid("no llama-cli discovered; pass --tool"))?;
             let plan = ojon_backend::refusal::prepare_refusal_eval_with_server(
-                &model,
-                &suite,
-                &tool,
-                server.as_deref(),
-                gpu_layers,
-                device.as_deref(),
-                tokens,
-                &report,
+                ojon_backend::refusal::RefusalEvalRequest {
+                    model: &model,
+                    suite: &suite,
+                    tool: &tool,
+                    server_tool: server.as_deref(),
+                    gpu_layers,
+                    device: device.as_deref(),
+                    tokens,
+                    report: &report,
+                },
             )?;
             if execute {
                 let result =
