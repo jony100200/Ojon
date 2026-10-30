@@ -31,6 +31,7 @@ Instead of juggling a dozen separate utilities, **Ojon aims to bring model optim
 | **Diffusion Precision Sweep** | Convert an image or video denoiser to every GGUF format, measure each against the reference on a fixed seed, keep the smallest that passes. | Available (`diffusion-sweep`) |
 | **Image Parity Gate** | Compare a diffusion GGUF quant against its reference on a fixed-seed ComfyUI workflow: PSNR and pixel differences, pass/fail, receipt. | Available (`diffusion-parity`) |
 | **Embedding Parity Gate** | Compare an embedding or reranker GGUF quant against its reference on your own texts: per-text cosine, neighbour overlap, Recall@k / NDCG@10, pass/fail, receipt. | Available (`embed-parity-plan` / `embed-parity-run`) |
+| **Speech Quant + WER Gate** | Quantize a whisper.cpp model with its own `whisper-quantize` (q8_0 / q5_0 / q4_0) and gate each candidate on word error rate against the original on your own clips. | Available (`whisper-quant-plan` / `whisper-quant-run` / `whisper-parity-plan` / `whisper-parity-run`) |
 | **Calibration Corpus** | Turn your own chats, docs and code into a clean, deduplicated calibration file with a size report. | Available (`corpus-build`) |
 | **Compare Before & After** | Check size, model behaviour and performance rather than guessing. | Available workflows; expanding |
 | **Uncensor Model** | Explore reduced refusal behaviour while testing whether useful abilities are preserved. | Experimental; automation in development |

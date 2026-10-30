@@ -59,10 +59,11 @@ metric).
 
 ## Audio
 
-Detected only, and the detection is wrong: the diffusion substring check runs
-first and matches `"dit"` inside `ForConditionalGeneration`, so Whisper, T5 and
-BART HF folders classify as Diffusion. `whisper-cli` is discovered but
-`DiscoveryOnly`. No convert, quantize, quality or smoke command.
+Whisper GGML `.bin` probes as Speech (task 1). `whisper-quant-plan|run`
+quantizes through whisper.cpp's `whisper-quantize`; `whisper-parity-plan|run`
+gates candidates on word error rate against the original on held-out clips
+(task 5). HF Whisper folders are classified but not converted; TTS, codec and
+non-whisper ASR families remain detection only.
 
 ## Utility (OCR, embeddings, rerankers, detection, segmentation)
 
@@ -102,9 +103,12 @@ No embedding, reranker, ONNX, detection or segmentation command.
    --mmproj-precision f16|bf16|q8_0`; `quant-parity --mmproj-candidate`; discover
    `llama-mtmd-cli`. Done when (Q4_K_M + mmproj f16) vs (Q4_K_M + mmproj q8_0) are
    scored against the F16 reference on one vision suite.
-5. **whisper.cpp quantize + WER gate.** `whisper-quant-run` (q8_0, q5_0, q4_0)
+5. **DONE 2026-10-30 (`whisper-quant-plan|run`, `whisper-parity-plan|run`; runner verified on first live clip set). whisper.cpp quantize + WER gate.** `whisper-quant-run` (q8_0, q5_0, q4_0)
    and `whisper-parity-run` (held-out clips, WER vs reference transcripts and vs
-   the original model, `--max-wer-delta`).
+   the original model, `--max-wer-delta`). Flags taken from whisper.cpp master
+   `examples/quantize/quantize.cpp` and `examples/cli/cli.cpp`; `BackendId::WhisperQuantize`
+   added, `WhisperCpp` now Wired. Caveat: no whisper.cpp build was on this
+   machine, so the live transcribe/quantize path is confirmed on the first real run.
 6. **DONE 2026-10-30 (`diffusion-parity --kind video`). Video temporal parity.** ffmpeg frame extraction in the parity script,
    per-frame PSNR (min, mean) plus a temporal-consistency delta;
    `diffusion-parity --kind video`.
