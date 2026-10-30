@@ -11,7 +11,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
         "flint-inspect" => {
             let path = PathBuf::from(next_argument(&mut args, "Flint GGUF file or directory")?);
             let mut json = false;
-            while let Some(opt) = args.next() {
+            for opt in args.by_ref() {
                 if opt.to_str() == Some("--json") {
                     json = true;
                 }
@@ -49,7 +49,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
         "flint-pipeline-plan" => {
             let path = PathBuf::from(next_argument(&mut args, "Flint GGUF file or directory")?);
             let mut json = false;
-            while let Some(opt) = args.next() {
+            for opt in args.by_ref() {
                 if opt.to_str() == Some("--json") {
                     json = true;
                 }
@@ -189,7 +189,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let reference = PathBuf::from(next_argument(&mut args, "reference _logits_ dump")?);
             let candidate = PathBuf::from(next_argument(&mut args, "candidate _logits_ dump")?);
             let mut json = false;
-            while let Some(opt) = args.next() {
+            for opt in args.by_ref() {
                 match opt.to_str() {
                     Some("--json") => json = true,
                     _ => {

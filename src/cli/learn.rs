@@ -146,7 +146,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
         }
         "learn-utility-models" => {
             let mut json = false;
-            while let Some(opt) = args.next() {
+            for opt in args.by_ref() {
                 match opt.to_str() {
                     Some("--json") => json = true,
                     _ => {
@@ -240,7 +240,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let output_path =
                 PathBuf::from(next_argument(&mut args, "output sanitized JSONL file")?);
             let mut json = false;
-            while let Some(opt) = args.next() {
+            for opt in args.by_ref() {
                 match opt.to_str() {
                     Some("--json") => json = true,
                     _ => {
@@ -420,7 +420,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 "promoted pointer destination JSON file",
             )?);
             let mut json = false;
-            while let Some(opt) = args.next() {
+            for opt in args.by_ref() {
                 match opt.to_str() {
                     Some("--json") => json = true,
                     _ => {
@@ -906,7 +906,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let install_root =
                 PathBuf::from(next_argument(&mut args, "installation root directory")?);
             let mut json = false;
-            while let Some(opt) = args.next() {
+            for opt in args.by_ref() {
                 match opt.to_str() {
                     Some("--json") => json = true,
                     _ => {
@@ -938,7 +938,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let install_root =
                 PathBuf::from(next_argument(&mut args, "installation root directory")?);
             let mut json = false;
-            while let Some(opt) = args.next() {
+            for opt in args.by_ref() {
                 match opt.to_str() {
                     Some("--json") => json = true,
                     _ => {

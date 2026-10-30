@@ -105,7 +105,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
         "dataset-audit" => {
             let path = PathBuf::from(next_argument(&mut args, "dataset file (.jsonl or .json)")?);
             let mut json = false;
-            while let Some(opt) = args.next() {
+            for opt in args.by_ref() {
                 match opt.to_str() {
                     Some("--json") => json = true,
                     _ => {

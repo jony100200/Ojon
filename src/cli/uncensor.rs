@@ -296,7 +296,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let recipe = PathBuf::from(next_argument(&mut args, "direction recipe JSON")?);
             let output = PathBuf::from(next_argument(&mut args, "new edited GGUF")?);
             let (mut confirmed, mut json) = (false, false);
-            while let Some(option) = args.next() {
+            for option in args.by_ref() {
                 match option.to_str() {
                     Some("--confirm") => confirmed = true,
                     Some("--json") => json = true,
@@ -397,7 +397,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let recipe = PathBuf::from(next_argument(&mut args, "direction recipe JSON")?);
             let output = PathBuf::from(next_argument(&mut args, "new model output folder")?);
             let (mut confirmed, mut json) = (false, false);
-            while let Some(option) = args.next() {
+            for option in args.by_ref() {
                 match option.to_str() {
                     Some("--confirm") => confirmed = true,
                     Some("--json") => json = true,
@@ -441,7 +441,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let recipe = PathBuf::from(next_argument(&mut args, "direction recipe JSON")?);
             let output = PathBuf::from(next_argument(&mut args, "new output safetensors shard")?);
             let (mut confirmed, mut json) = (false, false);
-            while let Some(option) = args.next() {
+            for option in args.by_ref() {
                 match option.to_str() {
                     Some("--confirm") => confirmed = true,
                     Some("--json") => json = true,

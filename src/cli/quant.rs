@@ -18,7 +18,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 "output low-rank edit recipe JSON",
             )?);
             let (mut confirmed, mut json) = (false, false);
-            while let Some(arg) = args.next() {
+            for arg in args.by_ref() {
                 match arg.to_str() {
                     Some("--confirm") => confirmed = true,
                     Some("--json") => json = true,
@@ -772,7 +772,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let imatrix = PathBuf::from(next_argument(&mut args, "GGUF calibration imatrix")?);
             let output = PathBuf::from(next_argument(&mut args, "new sensitivity JSON")?);
             let mut confirm = false;
-            while let Some(arg) = args.next() {
+            for arg in args.by_ref() {
                 match arg.to_str() {
                     Some("--confirm") => confirm = true,
                     _ => return Err(invalid("sensitivity-extract supports only --confirm")),
@@ -1258,7 +1258,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
         "task-suite-check" => {
             let path = PathBuf::from(next_argument(&mut args, "held-out task suite JSON")?);
             let mut json = false;
-            while let Some(option) = args.next() {
+            for option in args.by_ref() {
                 match option.to_str() {
                     Some("--json") if !json => json = true,
                     _ => {
