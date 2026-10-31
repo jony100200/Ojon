@@ -18,6 +18,7 @@ pub mod daemon;
 pub mod eval;
 pub mod harvest_claude;
 pub mod harvest_dolil;
+pub mod harvest_kimi;
 pub mod job;
 pub mod job_preflight;
 #[cfg(test)]
@@ -33,8 +34,8 @@ pub mod watch;
 pub use collector::{
     assess_collector_liveness, default_utility_models, extract_episode_metadata,
     harvest_agent_sessions, redact_json_secrets, redact_secrets, CollectedEpisode,
-    CollectorLiveness, CollectorStats, EpisodeOutcome, ExtractedEpisodeMetadata, HarvestReceipt,
-    LearnCollector, ToolCallRecord, UtilityModelSpec,
+    CollectorLiveness, CollectorStats, EpisodeOutcome, EpisodeProvenance, ExtractedEpisodeMetadata,
+    HarvestReceipt, LearnCollector, ToolCallRecord, UtilityModelSpec,
 };
 pub use curate::{
     export_to_llamafactory, has_deterministic_verification, load_episodes_from_jsonl,

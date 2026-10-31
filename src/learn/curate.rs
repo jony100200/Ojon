@@ -44,6 +44,8 @@ impl Default for DualBufferConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CuratedBatch {
     pub total_source_episodes: usize,
+    pub verified_source_episodes: usize,
+    pub duplicates_skipped: usize,
     pub anchor_episodes: Vec<CollectedEpisode>,
     pub recency_episodes: Vec<CollectedEpisode>,
     pub dpo_pairs: Vec<DpoPreferencePair>,
@@ -54,6 +56,8 @@ pub struct CuratedBatch {
 pub struct DpoPreferencePair {
     pub pair_id: String,
     pub session_id: String,
+    pub task_family_id: String,
+    pub repository_id: String,
     pub system_prompt: Option<String>,
     pub user_prompt: String,
     pub chosen_response: String,
@@ -63,14 +67,19 @@ pub struct DpoPreferencePair {
     pub reward_delta: f64,
 }
 
-/// Summary report returned after curating and exporting datasets.
+/// Summary receipt returned after curating and exporting datasets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CurationReceipt {
     pub total_input_episodes: usize,
+    pub collected_episode_count: usize,
+    pub verified_source_episode_count: usize,
+    pub duplicates_skipped: usize,
     pub anchor_count: usize,
     pub recency_count: usize,
     pub sft_sample_count: usize,
     pub dpo_pair_count: usize,
+    pub trained_sample_count: usize,
+    pub training_executed: bool,
     pub export_dir: PathBuf,
     pub sft_file: PathBuf,
     pub dpo_file: PathBuf,
@@ -99,6 +108,7 @@ pub fn generate_tool_decline_anchors() -> Vec<CollectedEpisode> {
             git_diff: None,
             unit_tests_passed: Some(true),
             is_redacted: false,
+            provenance: None,
         },
         CollectedEpisode {
             schema: "ojon.learn.v1".to_string(),
@@ -118,6 +128,7 @@ pub fn generate_tool_decline_anchors() -> Vec<CollectedEpisode> {
             git_diff: None,
             unit_tests_passed: Some(true),
             is_redacted: false,
+            provenance: None,
         },
         CollectedEpisode {
             schema: "ojon.learn.v1".to_string(),
@@ -137,6 +148,7 @@ pub fn generate_tool_decline_anchors() -> Vec<CollectedEpisode> {
             git_diff: None,
             unit_tests_passed: Some(true),
             is_redacted: false,
+            provenance: None,
         },
     ]
 }
@@ -159,8 +171,16 @@ pub fn partition_dual_buffer(
 ) -> CuratedBatch {
     let mut verified_episodes: Vec<CollectedEpisode> = Vec::new();
     let mut session_map: HashMap<String, Vec<CollectedEpisode>> = HashMap::new();
+    let mut seen_episode_ids = HashSet::new();
+    let mut seen_sft_content = HashSet::new();
+    let mut duplicates_skipped = 0usize;
+    let mut verified_source_episodes = 0usize;
 
     for raw_ep in episodes {
+        if !seen_episode_ids.insert(raw_ep.episode_id.clone()) {
+            duplicates_skipped += 1;
+            continue;
+        }
         let mut ep = raw_ep.clone();
         if ep.outcome == EpisodeOutcome::VerifiedSuccess && !has_deterministic_verification(&ep) {
             if ep.unit_tests_passed == Some(false) {
@@ -179,11 +199,22 @@ pub fn partition_dual_buffer(
         if ep.outcome == EpisodeOutcome::VerifiedSuccess
             && ep.scalar_reward >= config.min_sft_reward
         {
+            let content_key = serde_json::to_string(&(
+                &ep.system_prompt,
+                &ep.user_prompt,
+                &ep.assistant_response,
+                &ep.tool_calls,
+            ))
+            .unwrap_or_else(|_| ep.episode_id.clone());
+            if !seen_sft_content.insert(content_key) {
+                duplicates_skipped += 1;
+                continue;
+            }
+            verified_source_episodes += 1;
             verified_episodes.push(ep);
         }
     }
 
-    // Sort sessions chronologically by the max timestamp of their episodes
     let mut session_timestamps: Vec<(String, u64)> = session_map
         .iter()
         .map(|(sid, list)| {
@@ -193,7 +224,6 @@ pub fn partition_dual_buffer(
         .collect();
     session_timestamps.sort_by_key(|(_, ts)| *ts);
 
-    // Identify the K most recent sessions for the Recency Window
     let recent_session_ids: HashSet<String> = if session_timestamps.len() > config.recency_window_k
     {
         let skip_count = session_timestamps.len() - config.recency_window_k;
@@ -208,10 +238,8 @@ pub fn partition_dual_buffer(
             .collect()
     };
 
-    // Separate into anchor and recency candidates
     let mut anchor_episodes: Vec<CollectedEpisode> = Vec::new();
     let mut recency_episodes: Vec<CollectedEpisode> = Vec::new();
-
     if config.include_tool_decline_anchors {
         anchor_episodes.extend(generate_tool_decline_anchors());
     }
@@ -222,7 +250,6 @@ pub fn partition_dual_buffer(
         } else if recent_session_ids.contains(&ep.session_id) {
             recency_episodes.push(ep);
         } else {
-            // Older session: if anchor ratio target is not yet met, keep as anchor candidate
             let target_anchor_count =
                 ((recency_episodes.len() + 1) as f64 * config.anchor_ratio).ceil() as usize;
             if anchor_episodes.len() < target_anchor_count {
@@ -231,8 +258,8 @@ pub fn partition_dual_buffer(
         }
     }
 
-    // Pairwise Preference / DPO Extraction
     let mut dpo_pairs: Vec<DpoPreferencePair> = Vec::new();
+    let mut seen_pair_content = HashSet::new();
     for (session_id, list) in &session_map {
         let successes: Vec<&CollectedEpisode> = list
             .iter()
@@ -245,31 +272,57 @@ pub fn partition_dual_buffer(
 
         for succ in &successes {
             for ret in &retries {
-                // If they share a similar user prompt or are within the same session
-                if succ.user_prompt.trim() == ret.user_prompt.trim()
-                    || (!succ.assistant_response.is_empty() && !ret.assistant_response.is_empty())
+                if succ.user_prompt.trim() != ret.user_prompt.trim()
+                    || succ.assistant_response == ret.assistant_response
+                    || ret.timestamp_epoch_s > succ.timestamp_epoch_s
                 {
-                    dpo_pairs.push(DpoPreferencePair {
-                        pair_id: format!("pair-{}-{}", succ.episode_id, ret.episode_id),
-                        session_id: session_id.clone(),
-                        system_prompt: succ
-                            .system_prompt
-                            .clone()
-                            .or_else(|| ret.system_prompt.clone()),
-                        user_prompt: succ.user_prompt.clone(),
-                        chosen_response: succ.assistant_response.clone(),
-                        rejected_response: ret.assistant_response.clone(),
-                        chosen_tool_calls: succ.tool_calls.clone(),
-                        rejected_tool_calls: ret.tool_calls.clone(),
-                        reward_delta: succ.scalar_reward - ret.scalar_reward,
-                    });
+                    continue;
                 }
+                let pair_content = (
+                    &succ.user_prompt,
+                    &succ.assistant_response,
+                    &ret.assistant_response,
+                );
+                if !seen_pair_content.insert(pair_content) {
+                    duplicates_skipped += 1;
+                    continue;
+                }
+                let task_family_id = succ
+                    .provenance
+                    .as_ref()
+                    .or(ret.provenance.as_ref())
+                    .map(|source| source.task_family_id.clone())
+                    .unwrap_or_else(|| session_id.clone());
+                let repository_id = succ
+                    .provenance
+                    .as_ref()
+                    .or(ret.provenance.as_ref())
+                    .and_then(|source| source.repository_id.clone())
+                    .unwrap_or_else(|| succ.app_id.clone());
+                dpo_pairs.push(DpoPreferencePair {
+                    pair_id: format!("pair-{}-{}", succ.episode_id, ret.episode_id),
+                    session_id: session_id.clone(),
+                    task_family_id,
+                    repository_id,
+                    system_prompt: succ
+                        .system_prompt
+                        .clone()
+                        .or_else(|| ret.system_prompt.clone()),
+                    user_prompt: succ.user_prompt.clone(),
+                    chosen_response: succ.assistant_response.clone(),
+                    rejected_response: ret.assistant_response.clone(),
+                    chosen_tool_calls: succ.tool_calls.clone(),
+                    rejected_tool_calls: ret.tool_calls.clone(),
+                    reward_delta: succ.scalar_reward - ret.scalar_reward,
+                });
             }
         }
     }
 
     CuratedBatch {
         total_source_episodes: episodes.len(),
+        verified_source_episodes,
+        duplicates_skipped,
         anchor_episodes,
         recency_episodes,
         dpo_pairs,
@@ -338,7 +391,29 @@ fn episode_to_messages(ep: &CollectedEpisode) -> Value {
         }));
     }
 
-    json!({ "messages": messages })
+    let task_family_id = ep
+        .provenance
+        .as_ref()
+        .map(|source| source.task_family_id.clone())
+        .unwrap_or_else(|| ep.session_id.clone());
+    let repository_id = ep
+        .provenance
+        .as_ref()
+        .and_then(|source| source.repository_id.clone())
+        .unwrap_or_else(|| ep.app_id.clone());
+    json!({
+        "source_task_id": ep.episode_id,
+        "parent_session_id": ep.session_id,
+        "task_family_id": task_family_id,
+        "repo_id": repository_id,
+        "outcome": ep.outcome.as_str(),
+        "verification": {
+            "kind": "recorded_execution",
+            "passed": ep.unit_tests_passed,
+        },
+        "provenance": ep.provenance,
+        "messages": messages,
+    })
 }
 
 /// Export a curated batch to a standard LLaMA-Factory compatible directory.
@@ -411,6 +486,11 @@ pub fn export_to_llamafactory(
         convs.push(json!({ "role": "user", "content": pair.user_prompt }));
 
         let dpo_obj = json!({
+            "source_task_id": pair.pair_id,
+            "parent_session_id": pair.session_id,
+            "task_family_id": pair.task_family_id,
+            "repo_id": pair.repository_id,
+            "reward_delta": pair.reward_delta,
             "conversations": convs,
             "chosen": {
                 "role": "assistant",
@@ -469,17 +549,27 @@ pub fn export_to_llamafactory(
     )?;
     info_file.flush()?;
 
-    Ok(CurationReceipt {
+    let receipt = CurationReceipt {
         total_input_episodes: batch.total_source_episodes,
+        collected_episode_count: batch.total_source_episodes,
+        verified_source_episode_count: batch.verified_source_episodes,
+        duplicates_skipped: batch.duplicates_skipped,
         anchor_count: batch.anchor_episodes.len(),
         recency_count: batch.recency_episodes.len(),
         sft_sample_count: sft_count,
         dpo_pair_count: dpo_count,
+        trained_sample_count: 0,
+        training_executed: false,
         export_dir: output_dir.to_path_buf(),
         sft_file: sft_path,
         dpo_file: dpo_path,
         dataset_info_file: info_path,
-    })
+    };
+    let mut receipt_file = File::create(output_dir.join("curation_receipt.json"))?;
+    serde_json::to_writer_pretty(&mut receipt_file, &receipt)?;
+    writeln!(receipt_file)?;
+    receipt_file.flush()?;
+    Ok(receipt)
 }
 
 /// Read all collected episodes from a JSONL file (or collector directory containing `episodes_*.jsonl`).
@@ -564,12 +654,13 @@ mod tests {
             git_diff: None,
             unit_tests_passed: Some(outcome == EpisodeOutcome::VerifiedSuccess),
             is_redacted: false,
+            provenance: None,
         }
     }
 
     #[test]
     fn test_dual_buffer_partitioning() {
-        let episodes = vec![
+        let mut episodes = vec![
             // Older session 1 (failed)
             dummy_ep(
                 "ep-01",
@@ -618,6 +709,8 @@ mod tests {
                 false,
             ),
         ];
+        episodes[3].user_prompt = "Repair the same parser task".into();
+        episodes[4].user_prompt = "Repair the same parser task".into();
 
         let config = DualBufferConfig {
             anchor_ratio: 0.10,
@@ -643,6 +736,31 @@ mod tests {
             "Assistant answer for ep-04-fail"
         );
         assert_eq!(batch.dpo_pairs[0].reward_delta, 2.0); // 1.0 - (-1.0)
+    }
+
+    #[test]
+    fn deduplicates_sft_and_refuses_cross_task_dpo_pairs() {
+        let success = dummy_ep(
+            "success",
+            "session",
+            EpisodeOutcome::VerifiedSuccess,
+            20,
+            false,
+        );
+        let failure = dummy_ep("failure", "session", EpisodeOutcome::FailedRetry, 10, false);
+        let mut same_id = success.clone();
+        same_id.episode_id = "success-copy".into();
+        let batch = partition_dual_buffer(
+            &[success.clone(), failure, success.clone(), same_id],
+            &DualBufferConfig {
+                include_tool_decline_anchors: false,
+                ..DualBufferConfig::default()
+            },
+        );
+        assert!(batch.dpo_pairs.is_empty());
+        assert_eq!(batch.verified_source_episodes, 1);
+        assert_eq!(batch.duplicates_skipped, 2);
+        assert_eq!(batch.recency_episodes.len(), 1);
     }
 
     #[test]
@@ -679,6 +797,15 @@ mod tests {
         assert!(receipt.sft_file.exists());
         assert!(receipt.dpo_file.exists());
         assert!(receipt.dataset_info_file.exists());
+        assert_eq!(receipt.trained_sample_count, 0);
+        assert!(!receipt.training_executed);
+        assert!(temp_dir.join("curation_receipt.json").is_file());
+        let sft_text = fs::read_to_string(temp_dir.join("sft_train.jsonl")).unwrap();
+        let sft_row: Value = serde_json::from_str(sft_text.lines().next().unwrap()).unwrap();
+        assert!(sft_row.get("source_task_id").is_some());
+        assert!(sft_row.get("parent_session_id").is_some());
+        assert!(sft_row.get("task_family_id").is_some());
+        assert!(sft_row.get("repo_id").is_some());
 
         // Validate dataset_info.json is valid JSON
         let info_str = fs::read_to_string(&receipt.dataset_info_file).unwrap();

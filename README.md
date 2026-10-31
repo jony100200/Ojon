@@ -100,12 +100,13 @@ cargo run --locked --bin ojon -- learn-daemon-run --data-dir collector --sources
     {"id": "claude", "agent": "claude", "path": "~/.claude/projects"},
     {"id": "dolil", "agent": "dolil", "path": "agent_runs"},
     {"id": "pothik", "agent": "pothik", "path": "runs"},
+    {"id": "kimi", "agent": "kimi", "path": "~/.kimi-code/sessions"},
     {"id": "agy", "agent": "agy", "path": "transcripts"}
   ]
 }
 ```
 
-`agent` is `agy`, `claude`, `dolil`, `pothik`, or `auto`. The daemon stats those directories and opens a `.json` or `.jsonl` file only after its size or modification time changes. Episodes are deduplicated, secrets in the captured text are redacted, and a diff is stored without being treated as a passing test. `daemon_status.json` reports per-agent counts, the last collection time, errors, and `healthy`, `degraded`, or `stopped`.
+`agent` is `agy`, `claude`, `dolil`, `kimi`, `pothik`, or `auto`. The daemon stats those directories and opens a `.json` or `.jsonl` file only after its size or modification time changes. Episodes are deduplicated, secrets in the captured text are redacted, and a diff is stored without being treated as a passing test. Kimi wire imports keep assistant text and tool evidence without reasoning traces; every imported episode records its source session, event IDs, line span and record hash. Curation exports task/session/repository metadata and a `curation_receipt.json` that separates collected, verified, duplicate, exported and trained counts. DPO pairs require the same prompt and a later verified repair. `daemon_status.json` reports per-agent counts, the last collection time, errors, and `healthy`, `degraded`, or `stopped`.
 
 Read the [User Guide](USER_GUIDE.md) for setup and supported workflows. For video quantisation, follow the [MiniMax H3 W4A4/NVFP4 guide](docs/MINIMAX_H3.md), which distinguishes packed W4A4 components from ComfyUI-compatible NVFP4 safetensors. The measured mixed-precision method is in [Recipe Search](docs/RECIPE_SEARCH.md).
 

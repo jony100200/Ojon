@@ -325,6 +325,22 @@ pub struct ToolCallRecord {
     pub arguments: Value,
 }
 
+/// Source evidence for one captured episode. Paths stay out of the dataset;
+/// the session, file name, event IDs, line span and record hash locate the raw evidence.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EpisodeProvenance {
+    pub source_format: String,
+    pub source_session_id: String,
+    pub source_file: String,
+    pub source_record_sha256: String,
+    pub source_line_start: u64,
+    pub source_line_end: u64,
+    pub source_event_ids: Vec<String>,
+    pub workspace_id: Option<String>,
+    pub repository_id: Option<String>,
+    pub task_family_id: String,
+}
+
 /// Complete captured interaction episode.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CollectedEpisode {
@@ -345,6 +361,8 @@ pub struct CollectedEpisode {
     pub git_diff: Option<String>,
     pub unit_tests_passed: Option<bool>,
     pub is_redacted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<EpisodeProvenance>,
 }
 
 impl CollectedEpisode {
@@ -378,6 +396,7 @@ impl CollectedEpisode {
             git_diff: None,
             unit_tests_passed: None,
             is_redacted: false,
+            provenance: None,
         }
     }
 
@@ -1615,7 +1634,7 @@ pub struct HarvestReceipt {
 }
 
 /// Parse one session file. `agent` selects the harvester (`agy`, `claude`, `dolil`,
-/// `pothik`, or `auto`). Callers deduplicate by `episode_id`.
+/// `kimi`, `pothik`, or `auto`). Callers deduplicate by `episode_id`.
 pub(crate) fn parse_session_file(path: &Path, agent: &str) -> io::Result<Vec<CollectedEpisode>> {
     let ext = path
         .extension()
@@ -1626,14 +1645,17 @@ pub(crate) fn parse_session_file(path: &Path, agent: &str) -> io::Result<Vec<Col
     match kind.as_str() {
         "claude" if ext == "jsonl" => crate::learn::harvest_claude::parse_claude_transcript(path),
         "dolil" if ext == "jsonl" => crate::learn::harvest_dolil::parse_dolil_run(path),
+        "kimi" if ext == "jsonl" => crate::learn::harvest_kimi::parse_kimi_wire(path),
         "agy" | "pothik" if ext == "json" => parse_json_agent_run(path),
         "agy" | "pothik" if ext == "jsonl" => parse_jsonl_agent_run(path),
-        "claude" | "dolil" => Ok(Vec::new()),
+        "claude" | "dolil" | "kimi" => Ok(Vec::new()),
         _ => {
             if ext == "json" {
                 parse_json_agent_run(path)
             } else if ext == "jsonl" {
-                if crate::learn::harvest_claude::is_claude_transcript(path) {
+                if crate::learn::harvest_kimi::is_kimi_wire(path) {
+                    crate::learn::harvest_kimi::parse_kimi_wire(path)
+                } else if crate::learn::harvest_claude::is_claude_transcript(path) {
                     crate::learn::harvest_claude::parse_claude_transcript(path)
                 } else if crate::learn::harvest_dolil::is_dolil_run(path) {
                     crate::learn::harvest_dolil::parse_dolil_run(path)
