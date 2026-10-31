@@ -134,7 +134,7 @@ Commands:
   ojon smoke     <model.gguf> [--tool <llama-cli>] [--tokens 16] [--gpu-layers 0] [--prompt text]
   ojon plan      <input.gguf> <output.gguf> [options]
   ojon quantize  <input.gguf> <output.gguf> [options]
-  ojon learn-collector-status [--data-dir <path>] [--json]
+  ojon learn-collector-status [--port <port>] [--data-dir <path>] [--json]
   ojon learn-collector-start  [--port <port>] [--data-dir <path>] [--non-blocking]
   ojon learn-harvest          <agent-runs-dir> [--data-dir <path>] [--json]   Harvest agent session logs into collector episodes (verified, failed, unverified; secrets redacted)
   ojon learn-dataset-list     [--category <name>] [--json]

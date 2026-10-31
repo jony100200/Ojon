@@ -193,7 +193,8 @@ pub use uncensor_trace::{prepare_uncensor_from_trace, run_uncensor_from_trace, U
 
 // Learn
 pub use self::learn::{
-    apply_supersession, collector, compute_content_hash, create_knowledge_item,
+    apply_supersession, assess_collector_liveness, collector, compute_content_hash,
+    create_knowledge_item,
     create_knowledge_pack, create_model_release, create_skill_pack, curate, daemon,
     default_utility_models, eval as learn_eval, evaluate_and_promote, execute_training_plan,
     export_to_llamafactory, extract_clean_text, extract_episode_metadata,
@@ -204,7 +205,8 @@ pub use self::learn::{
     partition_dual_buffer, probe_host_hardware, redact_json_secrets, redact_secrets, registry,
     rollback_package, sanitize_untrusted_knowledge, save_knowledge_store, sha256_bytes, sha256_hex,
     temporal, train as learn_train, verify_package_integrity, AugmentedPromptResponse,
-    CandidateModelEvaluation, CandidateType, CollectedEpisode, CollectorStats, CuratedBatch,
+    CandidateModelEvaluation, CandidateType, CollectedEpisode, CollectorLiveness, CollectorStats,
+    CuratedBatch,
     CurationReceipt, DaemonConfig, DaemonStatus, DatasetCatalogEntry, DatasetCategory,
     DpoPreferencePair, DualBufferConfig, EpisodeOutcome, ExtractedEpisodeMetadata, GateCheckResult,
     HardwareDiagnosis, HardwareTier, HarvestReceipt, ImportReceipt, InstallReceipt, KnowledgeItem,

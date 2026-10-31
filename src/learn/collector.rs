@@ -8,15 +8,17 @@
 //! 2. Multi-turn episode span reconstruction and tool-call JSON buffering.
 //! 3. Ground-truth outcome verification tagging (compiler/tests/schema check/user correction).
 //! 4. Thread-safe persistence and real-time capture telemetry.
+//! 5. Cross-process liveness via the loopback listener and `daemon_status.json`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -716,6 +718,8 @@ impl LearnCollector {
         let unver = self.unverified.load(Ordering::SeqCst);
         let red = self.redacted_count.load(Ordering::SeqCst);
         CollectorStats {
+            // This flag is only the in-process server. A fresh collector is always
+            // inactive; call `assess_collector_liveness` for another process.
             is_active: self.is_running.load(Ordering::SeqCst),
             listen_port: port,
             storage_dir: self.storage_dir.to_string_lossy().to_string(),
@@ -793,6 +797,153 @@ impl LearnCollector {
     /// Signal running server thread to shut down.
     pub fn stop(&self) {
         self.is_running.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Cross-process collector liveness. A new object's `is_running == false` is not a state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CollectorLiveness {
+    #[serde(rename = "RUNNING")]
+    Running,
+    #[serde(rename = "STOPPED")]
+    Stopped,
+    #[serde(rename = "UNREACHABLE")]
+    Unreachable,
+    #[serde(rename = "STALE_HEARTBEAT")]
+    StaleHeartbeat,
+}
+
+impl CollectorLiveness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "RUNNING",
+            Self::Stopped => "STOPPED",
+            Self::Unreachable => "UNREACHABLE",
+            Self::StaleHeartbeat => "STALE_HEARTBEAT",
+        }
+    }
+}
+
+/// Daemon heartbeats are written every `poll_interval_s` (default 30s).
+/// Three missed intervals means the writer is gone.
+const HEARTBEAT_STALE_AFTER_SECS: u64 = 90;
+/// Windows loopback refusal can take about two seconds before WSAECONNREFUSED.
+/// A shorter bound classifies a stopped port as unreachable.
+const LISTENER_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
+const DAEMON_HEARTBEAT_FILE: &str = "daemon_status.json";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListenerProbe {
+    Up,
+    Down,
+    Unreachable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeartbeatObservation {
+    Absent,
+    Unreadable,
+    Record { running: bool, age_s: u64 },
+}
+
+#[derive(Deserialize)]
+struct DaemonHeartbeatFile {
+    running: bool,
+    last_heartbeat_epoch_s: u64,
+}
+
+/// Probe `127.0.0.1:<port>` and, when that listener is down, the daemon heartbeat
+/// in `storage_dir/daemon_status.json`. Does not read this process's `is_running`.
+pub fn assess_collector_liveness(storage_dir: &Path, port: u16) -> CollectorLiveness {
+    let probe = probe_loopback_http(port, LISTENER_PROBE_TIMEOUT);
+    let heartbeat = read_heartbeat_file(
+        &storage_dir.join(DAEMON_HEARTBEAT_FILE),
+        unix_now_s(),
+    );
+    classify_liveness(probe, heartbeat)
+}
+
+fn unix_now_s() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn probe_loopback_http(port: u16, timeout: Duration) -> ListenerProbe {
+    // `connect_timeout` reports a refused loopback port as a timeout on Windows.
+    // A blocking connect distinguishes refusal, and the channel bounds the wait.
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(TcpStream::connect(addr));
+    });
+    let mut stream = match rx.recv_timeout(timeout) {
+        Ok(Ok(connected)) => connected,
+        Ok(Err(err)) if is_connection_refused(&err) => return ListenerProbe::Down,
+        Ok(Err(_)) | Err(_) => return ListenerProbe::Unreachable,
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    let request = b"GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    if stream.write_all(request).is_err() || stream.flush().is_err() {
+        return ListenerProbe::Unreachable;
+    }
+    let mut buf = [0u8; 8];
+    let mut filled = 0usize;
+    while filled < 5 {
+        match stream.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return ListenerProbe::Unreachable,
+        }
+    }
+    if buf[..filled].starts_with(b"HTTP/") {
+        ListenerProbe::Up
+    } else {
+        ListenerProbe::Unreachable
+    }
+}
+
+fn is_connection_refused(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::ConnectionRefused || err.raw_os_error() == Some(10061)
+}
+
+fn read_heartbeat_file(path: &Path, now_epoch_s: u64) -> HeartbeatObservation {
+    if !path.is_file() {
+        return HeartbeatObservation::Absent;
+    }
+    let Ok(text) = fs::read_to_string(path) else {
+        return HeartbeatObservation::Unreadable;
+    };
+    let Ok(parsed) = serde_json::from_str::<DaemonHeartbeatFile>(&text) else {
+        return HeartbeatObservation::Unreadable;
+    };
+    HeartbeatObservation::Record {
+        running: parsed.running,
+        age_s: now_epoch_s.saturating_sub(parsed.last_heartbeat_epoch_s),
+    }
+}
+
+fn classify_liveness(probe: ListenerProbe, heartbeat: HeartbeatObservation) -> CollectorLiveness {
+    if probe == ListenerProbe::Up {
+        return CollectorLiveness::Running;
+    }
+    match heartbeat {
+        HeartbeatObservation::Record { running: false, .. } => CollectorLiveness::Stopped,
+        HeartbeatObservation::Record { running: true, age_s }
+            if age_s > HEARTBEAT_STALE_AFTER_SECS =>
+        {
+            CollectorLiveness::StaleHeartbeat
+        }
+        HeartbeatObservation::Record { running: true, .. } => CollectorLiveness::Unreachable,
+        HeartbeatObservation::Absent => match probe {
+            ListenerProbe::Down => CollectorLiveness::Stopped,
+            ListenerProbe::Unreachable => CollectorLiveness::Unreachable,
+            ListenerProbe::Up => CollectorLiveness::Running,
+        },
+        HeartbeatObservation::Unreadable => CollectorLiveness::Unreachable,
     }
 }
 
@@ -2057,5 +2208,167 @@ mod tests {
         assert_eq!(receipt2.duplicates_skipped, 2);
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_classify_collector_liveness_states() {
+        assert_eq!(
+            classify_liveness(ListenerProbe::Up, HeartbeatObservation::Absent),
+            CollectorLiveness::Running
+        );
+        assert_eq!(
+            classify_liveness(ListenerProbe::Down, HeartbeatObservation::Absent),
+            CollectorLiveness::Stopped
+        );
+        assert_eq!(
+            classify_liveness(ListenerProbe::Unreachable, HeartbeatObservation::Absent),
+            CollectorLiveness::Unreachable
+        );
+        assert_eq!(
+            classify_liveness(
+                ListenerProbe::Down,
+                HeartbeatObservation::Record {
+                    running: true,
+                    age_s: 1
+                }
+            ),
+            CollectorLiveness::Unreachable
+        );
+        assert_eq!(
+            classify_liveness(
+                ListenerProbe::Down,
+                HeartbeatObservation::Record {
+                    running: true,
+                    age_s: HEARTBEAT_STALE_AFTER_SECS + 1
+                }
+            ),
+            CollectorLiveness::StaleHeartbeat
+        );
+        assert_eq!(
+            classify_liveness(
+                ListenerProbe::Unreachable,
+                HeartbeatObservation::Record {
+                    running: true,
+                    age_s: HEARTBEAT_STALE_AFTER_SECS + 1
+                }
+            ),
+            CollectorLiveness::StaleHeartbeat
+        );
+        assert_eq!(
+            classify_liveness(
+                ListenerProbe::Down,
+                HeartbeatObservation::Record {
+                    running: false,
+                    age_s: HEARTBEAT_STALE_AFTER_SECS + 5
+                }
+            ),
+            CollectorLiveness::Stopped
+        );
+        assert_eq!(
+            classify_liveness(
+                ListenerProbe::Up,
+                HeartbeatObservation::Record {
+                    running: true,
+                    age_s: 10_000
+                }
+            ),
+            CollectorLiveness::Running
+        );
+        assert_eq!(
+            classify_liveness(ListenerProbe::Down, HeartbeatObservation::Unreadable),
+            CollectorLiveness::Unreachable
+        );
+    }
+
+    #[test]
+    fn test_collector_liveness_loopback_and_heartbeat() {
+        let dir = std::env::temp_dir().join(format!(
+            "ojon-liveness-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let live = Arc::new(LearnCollector::new(dir.clone()).unwrap());
+        let binder = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = binder.local_addr().unwrap().port();
+        drop(binder);
+        let handle = LearnCollector::start_server(live.clone(), port).unwrap();
+
+        let fresh = LearnCollector::new(dir.clone()).unwrap();
+        assert!(
+            !fresh.get_stats(port).is_active,
+            "a fresh collector must not be treated as proof the port is down"
+        );
+
+        let mut seen = CollectorLiveness::Stopped;
+        for _ in 0..20 {
+            seen = assess_collector_liveness(&dir, port);
+            if seen == CollectorLiveness::Running {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        live.stop();
+        let _ = handle.join();
+        assert_eq!(seen, CollectorLiveness::Running);
+        assert_eq!(seen.as_str(), "RUNNING");
+
+        let closed = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let closed_port = closed.local_addr().unwrap().port();
+        drop(closed);
+        assert_eq!(
+            assess_collector_liveness(&dir, closed_port),
+            CollectorLiveness::Stopped
+        );
+
+        let now = unix_now_s();
+        let heartbeat = dir.join(DAEMON_HEARTBEAT_FILE);
+        fs::write(
+            &heartbeat,
+            format!(
+                r#"{{"schema":"ojon.daemon_status.v1","running":true,"uptime_seconds":3,"port":{closed_port},"storage_dir":"collector","current_disk_bytes":0,"max_disk_bytes":1,"episodes_recorded":0,"last_heartbeat_epoch_s":{}}}"#,
+                now.saturating_sub(HEARTBEAT_STALE_AFTER_SECS + 5)
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            assess_collector_liveness(&dir, closed_port),
+            CollectorLiveness::StaleHeartbeat
+        );
+
+        fs::write(
+            &heartbeat,
+            format!(
+                r#"{{"schema":"ojon.daemon_status.v1","running":true,"uptime_seconds":4,"port":{closed_port},"storage_dir":"collector","current_disk_bytes":0,"max_disk_bytes":1,"episodes_recorded":0,"last_heartbeat_epoch_s":{now}}}"#
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            assess_collector_liveness(&dir, closed_port),
+            CollectorLiveness::Unreachable
+        );
+
+        fs::write(&heartbeat, "{not-json").unwrap();
+        assert_eq!(
+            assess_collector_liveness(&dir, closed_port),
+            CollectorLiveness::Unreachable
+        );
+
+        fs::write(
+            &heartbeat,
+            format!(
+                r#"{{"schema":"ojon.daemon_status.v1","running":false,"uptime_seconds":5,"port":{closed_port},"storage_dir":"collector","current_disk_bytes":0,"max_disk_bytes":1,"episodes_recorded":0,"last_heartbeat_epoch_s":{now}}}"#
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            assess_collector_liveness(&dir, closed_port),
+            CollectorLiveness::Stopped
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

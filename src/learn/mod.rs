@@ -30,9 +30,10 @@ pub mod temporal;
 pub mod train;
 
 pub use collector::{
-    default_utility_models, extract_episode_metadata, harvest_agent_sessions, redact_json_secrets,
-    redact_secrets, CollectedEpisode, CollectorStats, EpisodeOutcome, ExtractedEpisodeMetadata,
-    HarvestReceipt, LearnCollector, ToolCallRecord, UtilityModelSpec,
+    assess_collector_liveness, default_utility_models, extract_episode_metadata,
+    harvest_agent_sessions, redact_json_secrets, redact_secrets, CollectedEpisode,
+    CollectorLiveness, CollectorStats, EpisodeOutcome, ExtractedEpisodeMetadata, HarvestReceipt,
+    LearnCollector, ToolCallRecord, UtilityModelSpec,
 };
 pub use curate::{
     export_to_llamafactory, has_deterministic_verification, load_episodes_from_jsonl,

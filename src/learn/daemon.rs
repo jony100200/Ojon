@@ -152,7 +152,7 @@ impl LearnDaemon {
         Ok(pruned_count)
     }
 
-    /// Write heartbeat status file.
+    /// Write heartbeat status file. `running` is false for the shutdown record.
     pub fn write_heartbeat(
         status_path: &Path,
         port: u16,
@@ -161,6 +161,7 @@ impl LearnDaemon {
         disk_bytes: u64,
         max_bytes: u64,
         episodes: u64,
+        running: bool,
     ) -> io::Result<()> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -169,7 +170,7 @@ impl LearnDaemon {
 
         let status = DaemonStatus {
             schema: "ojon.daemon_status.v1".to_string(),
-            running: true,
+            running,
             uptime_seconds: uptime_s,
             port,
             storage_dir: storage_dir.to_string(),
@@ -217,6 +218,7 @@ impl LearnDaemon {
                     disk_bytes,
                     max_bytes,
                     stats.total_episodes,
+                    true,
                 );
 
                 // Enforce bounded disk storage: if size exceeds limit, purge transient tmp files
@@ -244,6 +246,19 @@ impl LearnDaemon {
                 }
             }
 
+            let uptime_s = start_time.elapsed().as_secs();
+            let disk_bytes = Self::calculate_disk_usage(&config.storage_dir);
+            let episodes = collector.get_stats(port).total_episodes;
+            let _ = Self::write_heartbeat(
+                &status_file,
+                port,
+                &config.storage_dir.to_string_lossy(),
+                uptime_s,
+                disk_bytes,
+                max_bytes,
+                episodes,
+                false,
+            );
             collector.stop();
             let _ = collector_handle.join();
         });
@@ -296,6 +311,7 @@ mod tests {
             bytes,
             1024 * 1024,
             5,
+            true,
         )
         .unwrap();
 
@@ -305,6 +321,21 @@ mod tests {
         assert!(status.running);
         assert_eq!(status.port, 8089);
         assert_eq!(status.episodes_recorded, 5);
+
+        LearnDaemon::write_heartbeat(
+            &status_file,
+            8089,
+            &temp_dir.to_string_lossy(),
+            11,
+            bytes,
+            1024 * 1024,
+            5,
+            false,
+        )
+        .unwrap();
+        let stopped: DaemonStatus =
+            serde_json::from_str(&fs::read_to_string(&status_file).unwrap()).unwrap();
+        assert!(!stopped.running);
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
