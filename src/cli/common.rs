@@ -89,6 +89,7 @@ Commands:
   ojon diffusion-gguf-smoke-run <denoiser.gguf> <output.png|webm> [same options] --confirm
   ojon diffusion-gguf-comfy-plan <denoiser.gguf> <api-workflow.json> <receipt.json> [--kind image|video] [--python python] [--node-id ID] [--server http://127.0.0.1:8188]
   ojon diffusion-gguf-comfy-run  <denoiser.gguf> <api-workflow.json> <receipt.json> [same options] --confirm
+  ojon diffusion-sweep-plan|run <denoiser.safetensors> <ComfyUI models/unet dir> --workflow api.json --reference-name ref.gguf [--converter sd-cli|comfy-gguf --convert-script tools/convert.py] [--formats ...] [--kind image|video] [--min-psnr 30] [--confirm]   Convert every format, measure each by fixed-seed parity, keep the smallest passing
   ojon diffusion-parity --workflow <api-workflow.json> --reference-name <reference.gguf|safetensors> --candidate-name <candidate.gguf> [--node-id ID] [--server http://127.0.0.1:8188] [--receipt receipt.json] [--python python] [--min-psnr 30] [--pixel-tolerance N] [--timeout S] --confirm   Measured image parity: same fixed-seed ComfyUI workflow with reference and candidate weights, PSNR-gated
   ojon minimax-video-test-plan <safetensors-file|OrbitQuant-release-dir> <ComfyUI-api-workflow.json> <new-video.mp4> <new-receipt.json> [--runtime safetensors|orbitquant] [--server http://127.0.0.1:8188] [--ffprobe path]
   ojon minimax-video-test-run  <safetensors-file|OrbitQuant-release-dir> <ComfyUI-api-workflow.json> <new-video.mp4> <new-receipt.json> [same options] --confirm
@@ -100,6 +101,8 @@ Commands:
   ojon kld-eval <candidate.gguf> [more.gguf ...] --reference <ref.logits> --corpus <same heldout.txt> [--original original.gguf] [--ctx 512] [--chunks N] [--ngl 99|auto] [--device Vulkan0] [--out receipt.json] [--json]   Mean/p99/max KLD of any GGUF (an online quant, an Ojon recipe) against the same original on the same text
   ojon lora-merge-plan <original-F16-GGUF> <adapter.gguf|peft-dir> <merged.gguf> [--scale 1.0] [--hf-base <hf-folder>] [--task-suite tasks.json] [--export-tool path] [--convert-script path] [--python python] [--json]   Plan LoRA-then-quant step one: merge through llama-export-lora; writes nothing
   ojon lora-merge-run  <original-F16-GGUF> <adapter.gguf|peft-dir> <merged.gguf> [same options] --confirm   Writes merged GGUF (+ converted adapter for a PEFT folder) and a receipt naming the task-suite gate and the auto-quant step
+  ojon ocr-parity-plan <original.gguf> <candidate.gguf> [...] --mmproj proj.gguf --pages pages.jsonl [--mmproj-candidate proj.gguf] [--prompt text] [--tokens 512] [--ngl 99] [--device Vulkan0] [--max-cer-delta 0.02] [--tool llama-mtmd-cli] [--out-dir dir] [--json]   Plan the OCR gate: every model reads every page through llama-mtmd-cli
+  ojon ocr-parity-run  <original.gguf> <candidate.gguf> [...] --mmproj proj.gguf --pages pages.jsonl [same options] --confirm   Character error rate per model vs the manifest texts; candidate-minus-original delta gated (scripts/make_ocr_pages.py renders test pages)
   ojon whisper-quant-plan <whisper-ggml.bin> <output-dir> [--formats q8_0,q5_0,q4_0] [--tool whisper-quantize] [--json]   Plan whisper.cpp quantization (q8_0 q5_0 q4_0 q5_1 q4_1); writes nothing
   ojon whisper-quant-run  <whisper-ggml.bin> <output-dir> [same options] --confirm   One .bin per format plus whisper-quant-receipt.json with sizes; never overwrites
   ojon whisper-parity-plan <original.bin> <candidate.bin> [...] --clips clips.jsonl [--max-wer-delta 0.02] [--language en] [--threads N] [--whisper-cli path] [--out-dir dir] [--json]   Plan the WER gate: every model transcribes every clip through whisper-cli
@@ -131,7 +134,7 @@ Commands:
   ojon smoke     <model.gguf> [--tool <llama-cli>] [--tokens 16] [--gpu-layers 0] [--prompt text]
   ojon plan      <input.gguf> <output.gguf> [options]
   ojon quantize  <input.gguf> <output.gguf> [options]
-  ojon learn-collector-status [--data-dir <path>] [--json]
+  ojon learn-collector-status [--port <port>] [--data-dir <path>] [--json]
   ojon learn-collector-start  [--port <port>] [--data-dir <path>] [--non-blocking]
   ojon learn-harvest          <agent-runs-dir> [--data-dir <path>] [--json]   Harvest agent session logs into collector episodes (verified, failed, unverified; secrets redacted)
   ojon learn-dataset-list     [--category <name>] [--json]

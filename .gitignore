@@ -82,3 +82,13 @@ Desktop.ini
 # Cargo.lock for a reproducible binary application is intentionally tracked.
 # Do not broadly ignore *.json or *.toml; real recipe/adapter manifests use them.
 /.agents/
+
+# Internal working notes (handoffs, proof plans, measurement ledgers, roadmaps) live outside this repo
+HANDOFF*.md
+*PROOF_PLAN*.md
+MEASURED_RESULTS*.md
+ROADMAP*.md
+
+# Local-only trainer (owner: stays offline, not for the public repo)
+scripts/ojon_local_trainer.py
+scripts/ojon-local-trainer.cmd

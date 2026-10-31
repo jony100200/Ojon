@@ -32,13 +32,22 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     }
                 }
             }
-            let collector = ojon_backend::LearnCollector::new(data_dir)?;
-            let stats = collector.get_stats(port);
+            let collector = ojon_backend::LearnCollector::new(data_dir.clone())?;
+            let mut stats = collector.get_stats(port);
+            let liveness = ojon_backend::assess_collector_liveness(&data_dir, port);
+            stats.is_active = liveness == ojon_backend::CollectorLiveness::Running;
             if json {
-                println!("{}", serde_json::to_string_pretty(&stats).unwrap());
+                let mut report = serde_json::to_value(&stats).unwrap();
+                if let Some(map) = report.as_object_mut() {
+                    map.insert(
+                        "liveness".to_string(),
+                        serde_json::Value::String(liveness.as_str().to_string()),
+                    );
+                }
+                println!("{}", serde_json::to_string_pretty(&report).unwrap());
             } else {
                 println!("Ojon Learn Collector Status:");
-                println!("  Status: active={}", stats.is_active);
+                println!("  Status: {}", liveness.as_str());
                 println!("  Port: {}", stats.listen_port);
                 println!("  Total Episodes: {}", stats.total_episodes);
                 println!("  Verified Successes: {}", stats.verified_success_count);

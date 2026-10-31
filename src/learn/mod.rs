@@ -9,6 +9,7 @@
 //! - `temporal`: Time-aware knowledge engine, temporal retrieval & augmented prompt synthesis.
 //! - `packages`: Versioned update packages (KnowledgePack, SkillPack, ModelRelease) & atomic rollback.
 //! - `train`: Hardware-aware preflight probe, LoRA/QLoRA plan generator & execution runner.
+//! - `job`: One-click Ojon Learn job controller (Preflight/Train/Stop/Verify/Promote/Rollback).
 //! - `eval`: Candidate evaluation matrix, silent tool-decline audit & promotion/rollback gates.
 
 pub mod collector;
@@ -17,6 +18,11 @@ pub mod daemon;
 pub mod eval;
 pub mod harvest_claude;
 pub mod harvest_dolil;
+pub mod job;
+pub mod job_preflight;
+#[cfg(test)]
+mod job_tests;
+pub mod job_verify;
 pub mod knowledge;
 pub mod packages;
 pub mod registry;
@@ -24,9 +30,10 @@ pub mod temporal;
 pub mod train;
 
 pub use collector::{
-    default_utility_models, extract_episode_metadata, harvest_agent_sessions, redact_json_secrets,
-    redact_secrets, CollectedEpisode, CollectorStats, EpisodeOutcome, ExtractedEpisodeMetadata,
-    HarvestReceipt, LearnCollector, ToolCallRecord, UtilityModelSpec,
+    assess_collector_liveness, default_utility_models, extract_episode_metadata,
+    harvest_agent_sessions, redact_json_secrets, redact_secrets, CollectedEpisode,
+    CollectorLiveness, CollectorStats, EpisodeOutcome, ExtractedEpisodeMetadata, HarvestReceipt,
+    LearnCollector, ToolCallRecord, UtilityModelSpec,
 };
 pub use curate::{
     export_to_llamafactory, has_deterministic_verification, load_episodes_from_jsonl,
@@ -37,6 +44,12 @@ pub use eval::{
     evaluate_and_promote, CandidateModelEvaluation, CandidateType, GateCheckResult,
     PromotedModelPointer, PromotionDecision, PromotionPolicy, CANONICAL_TOOL_DECLINE_SUITE,
 };
+pub use job::{
+    current_release, rollback_release, LearnJob, LearnSpec, LearnState, MockBehavior, TrainerKind,
+    MOCK_TRAINER_ENV,
+};
+pub use job_preflight::{CheckStatus, PreflightEnv, PreflightReport};
+pub use job_verify::{Evaluator, TaskEvalEvaluator, VerifyInputs, VerifyReport};
 pub use knowledge::{
     apply_supersession, compute_content_hash, create_knowledge_item, extract_clean_text,
     fetch_online_knowledge_url, load_knowledge_store, sanitize_untrusted_knowledge,

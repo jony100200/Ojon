@@ -28,6 +28,7 @@ Instead of juggling a dozen separate utilities, **Ojon aims to bring model optim
 | **Optimise Model** | Find a smaller version that still performs well on the tasks you care about. | Available workflows; expanding |
 | **One-Command Quant** | `auto-quant`: pick smallest / balanced / safest, press, get the smallest measured recipe plus a receipt. | Available |
 | **Measured Mixed Precision** | Find how low each tensor class can go within a KL-divergence budget, per model, and build the smallest recipe that stays inside it ([method](docs/RECIPE_SEARCH.md)). | Available (`recipe-plan` / `recipe-run` / `recipe-apply`) |
+| **OCR Parity Gate** | Character error rate of an original VLM and its quants on pages with known text through llama-mtmd-cli; candidate-minus-original delta gated. | Available (`ocr-parity`) |
 | **KLD Scale for Any Quant** | Save the original's logits once, then score any GGUF (an online quant, your own recipe) against them on the same held-out text: bytes, mean/p99/max KLD. | Available (`kld-reference`, `kld-eval`) |
 | **LoRA-then-Quant** | Merge a GGUF or PEFT LoRA adapter into the F16 original (`llama-export-lora`), gate it on the held-out task suite, then quantize the improved original. | Available (`lora-merge`) |
 | **Diffusion Precision Sweep** | Convert an image or video denoiser to every GGUF format, measure each against the reference on a fixed seed, keep the smallest that passes. | Available (`diffusion-sweep`) |
@@ -87,7 +88,7 @@ cargo run --locked --features gui --bin ojon-gui
 cargo run --locked --bin ojon -- backends
 ```
 
-Read the [User Guide](USER_GUIDE.md) for setup and supported workflows. For video quantisation, follow the [MiniMax H3 W4A4/NVFP4 guide](docs/MINIMAX_H3.md), which distinguishes packed W4A4 components from ComfyUI-compatible NVFP4 safetensors. The measured mixed-precision method is in [Recipe Search](docs/RECIPE_SEARCH.md); per-family coverage and the ranked next tasks are in the [Model-Family Roadmap](docs/ROADMAP_MODEL_FAMILIES.md).
+Read the [User Guide](USER_GUIDE.md) for setup and supported workflows. For video quantisation, follow the [MiniMax H3 W4A4/NVFP4 guide](docs/MINIMAX_H3.md), which distinguishes packed W4A4 components from ComfyUI-compatible NVFP4 safetensors. The measured mixed-precision method is in [Recipe Search](docs/RECIPE_SEARCH.md).
 
 ## Where we're heading
 

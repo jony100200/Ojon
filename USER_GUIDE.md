@@ -253,7 +253,7 @@ Local agents may call the JSON commands. They cannot control your computer throu
 ## Diffusion precision sweep: the image counterpart of the recipe search
 
 ```sh
-ojon diffusion-sweep-run flux-dev.safetensors "M:\ComfyUI\models\unet" --workflow flux_api.json \
+ojon diffusion-sweep-run flux-dev.safetensors ./ComfyUI/models/unet --workflow flux_api.json \
      --reference-name flux-dev-F16.gguf --formats q8_0,q5_0,q4_K,q4_0,q3_K --min-psnr 30 --confirm
 ```
 
@@ -264,6 +264,22 @@ receipt (`ojon.diffusion_sweep.v1`) lists every format with its size and
 worst-frame PSNR (and temporal delta for `--kind video`) and names the smallest
 format that passed the gate, or none. `diffusion-sweep-plan` prints the plan and
 converts nothing.
+
+### FIBO 2 and other models sd-cli does not know: `--converter comfy-gguf`
+
+```sh
+ojon diffusion-sweep-run fibo2_dev_bf16.safetensors ./ComfyUI/models/unet --workflow fibo2_api.json \
+     --reference-name fibo2_dev_bf16.safetensors --converter comfy-gguf \
+     --convert-script "<ComfyUI>\custom_nodes\ComfyUI-GGUF\tools\convert.py" --python <python with torch+gguf> \
+     --formats Q8_0,Q6_K,Q5_K_M,Q4_K_M,Q4_0 --min-psnr 30 --confirm
+```
+
+The ComfyUI-GGUF converter (molbal fork) converts and quantizes in one streamed
+Python pass (`--src --dst --streamed --quant-type`), so FIBO 2, Krea 2 and the
+other architectures stable-diffusion.cpp lacks go through the same sweep and
+the same fixed-seed parity gate. Its format names are its own (`Q5_K_M`, not
+`q5_0`); the plan refuses a format the chosen converter does not have. Loading a
+`fibo2` GGUF in ComfyUI needs that fork's loader node as well.
 
 ## Measured image parity for diffusion GGUF quants
 
@@ -389,7 +405,7 @@ run and 0.024535 through `kld-eval` on one GPU (uncertainty ± 0.0007, p99
 ## LoRA that makes the original better, then quant
 
 ```sh
-ojon lora-merge-run qwen3-8b-f16.gguf runs/adapter_out merged/qwen3-8b-tuned-f16.gguf      --hf-base D:\models\Qwen3-8B --task-suite tasks.json --confirm
+ojon lora-merge-run qwen3-8b-f16.gguf runs/adapter_out merged/qwen3-8b-tuned-f16.gguf      --hf-base ./models/Qwen3-8B --task-suite tasks.json --confirm
 ojon quant-compare-run qwen3-8b-f16.gguf tasks.json merged/qwen3-8b-tuned-f16.vs-base-report.json      --candidate merged=merged/qwen3-8b-tuned-f16.gguf
 ojon auto-quant merged/qwen3-8b-tuned-f16.gguf merged/quants --preset balanced
 ```
@@ -417,6 +433,23 @@ the base (the only byte-level difference was a negative zero becoming positive
 zero in the F32 round trip). A real adapter from `learn-train-run` is the next
 test; the pure parts (adapter detection, base precision check, command
 rendering, never-overwrite) are unit-tested.
+
+## OCR models: the character-error-rate gate
+
+```sh
+python scripts/make_ocr_pages.py pages --count 6          # or your own pages.jsonl with real scans
+ojon ocr-parity-run model-F16.gguf model-Q5_K_M.gguf --mmproj mmproj-F16.gguf --pages pages/pages.jsonl \
+     --device Vulkan0 --max-cer-delta 0.02 --confirm
+```
+
+Every model reads every page through `llama-mtmd-cli` (temperature 0, fixed
+seed) and the transcript is scored against the manifest text as a character
+error rate (lower-cased, whitespace collapsed). The gate is the candidate's
+corpus CER minus the original's; a candidate that reads better than the
+original passes. The receipt (`ojon.ocr_parity.v1`) keeps every transcript and
+states the claim: a parity measurement on these pages, not a general OCR
+accuracy. Synthetic pages prove plumbing; real scans in your language prove
+the quant.
 
 ## Speech: whisper.cpp quantize and WER gate
 

@@ -63,11 +63,15 @@ impl KldSettings {
     }
 
     fn common_args(&self, cmd: &mut Command, model: &Path) {
+        // Batch = context keeps the host logits buffer (n_batch x vocab x 4 B)
+        // small enough for a machine near its commit limit.
         cmd.arg("-m")
             .arg(model)
             .arg("-f")
             .arg(&self.corpus)
             .arg("-c")
+            .arg(self.context.to_string())
+            .arg("-b")
             .arg(self.context.to_string());
         if self.fit {
             cmd.arg("--fit").arg("on");

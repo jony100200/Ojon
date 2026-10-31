@@ -60,6 +60,70 @@ impl InputLayout {
         }
     }
 }
+/// Which external converter writes the GGUF. `sd-cli` covers the architectures
+/// stable-diffusion.cpp knows. The ComfyUI-GGUF converter (molbal fork,
+/// `tools/convert.py`) covers what ComfyUI loads, FIBO 2 included, and
+/// quantizes in the same Python pass: `--src <safetensors> --dst <gguf>
+/// --streamed --quant-type <TYPE>` (streamed = one tensor at a time, low RAM).
+#[derive(Clone, Debug, PartialEq)]
+pub enum GgufConverter {
+    SdCli,
+    ComfyGguf { python: PathBuf },
+}
+
+/// sd-cli formats with nominal bits per weight (ordering only).
+pub const SD_CLI_FORMATS: [(&str, f64); 5] = [("q8_0", 8.5), ("q5_0", 5.5), ("q4_K", 4.5), ("q4_0", 4.5), ("q3_K", 3.4)];
+/// ComfyUI-GGUF converter quant types (its `QUANT_TYPE_MAP`, minus the CR
+/// layouts that need the fork's own loader), with nominal bits per weight.
+pub const COMFY_GGUF_FORMATS: [(&str, f64); 14] = [
+    ("BF16", 16.0), ("F16", 16.0), ("Q8_0", 8.5), ("Q6_K", 6.6), ("Q5_1", 6.0), ("Q5_K_M", 5.7), ("Q5_K_S", 5.5),
+    ("Q5_K", 5.5), ("Q5_0", 5.5), ("Q4_1", 5.0), ("Q4_K_M", 4.8), ("Q4_K_S", 4.6), ("Q4_K", 4.5), ("Q4_0", 4.5),
+];
+
+impl GgufConverter {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::SdCli => "stable-diffusion.cpp",
+            Self::ComfyGguf { .. } => "comfyui-gguf convert.py",
+        }
+    }
+    pub fn parse(text: &str, python: &Path) -> io::Result<Self> {
+        match text {
+            "sd-cli" | "sdcpp" | "stable-diffusion.cpp" => Ok(Self::SdCli),
+            "comfy-gguf" | "comfyui-gguf" => Ok(Self::ComfyGguf { python: python.to_path_buf() }),
+            _ => Err(bad("converter must be sd-cli or comfy-gguf")),
+        }
+    }
+    pub fn formats(&self) -> &'static [(&'static str, f64)] {
+        match self {
+            Self::SdCli => &SD_CLI_FORMATS,
+            Self::ComfyGguf { .. } => &COMFY_GGUF_FORMATS,
+        }
+    }
+    pub fn nominal_bits(&self, format: &str) -> Option<f64> {
+        self.formats().iter().find(|(f, _)| *f == format).map(|(_, b)| *b)
+    }
+    /// The GGML storage type id the converter must have produced for `format`
+    /// (mixed presets are judged by their dominant type).
+    pub fn storage_type(&self, format: &str) -> io::Result<u32> {
+        let id = match (self, format) {
+            (Self::SdCli, "q8_0") | (Self::ComfyGguf { .. }, "Q8_0") => 8,
+            (Self::SdCli, "q5_0") | (Self::ComfyGguf { .. }, "Q5_0") => 6,
+            (Self::SdCli, "q4_0") | (Self::ComfyGguf { .. }, "Q4_0") => 2,
+            (Self::SdCli, "q4_K") | (Self::ComfyGguf { .. }, "Q4_K" | "Q4_K_S" | "Q4_K_M") => 12,
+            (Self::SdCli, "q3_K") => 11,
+            (Self::ComfyGguf { .. }, "Q5_K" | "Q5_K_S" | "Q5_K_M") => 13,
+            (Self::ComfyGguf { .. }, "Q6_K") => 14,
+            (Self::ComfyGguf { .. }, "Q5_1") => 7,
+            (Self::ComfyGguf { .. }, "Q4_1") => 3,
+            (Self::ComfyGguf { .. }, "F16") => 1,
+            (Self::ComfyGguf { .. }, "BF16") => 30,
+            _ => return Err(bad(format!("{format} is not a format of {}", self.name()))),
+        };
+        Ok(id)
+    }
+}
+
 fn precision(text: &str) -> io::Result<&str> {
     match text {
         "q8_0" | "q5_0" | "q4_0" | "q4_K" | "q3_K" => Ok(text),
@@ -112,24 +176,17 @@ fn verify_dense_media_source(path: &Path) -> io::Result<()> {
 // GGML tensor types, not activation quantization or Nunchaku W4A4.
 // The target backend may keep sensitive tensors at a higher precision.
 fn requested_storage_type(name: &str) -> io::Result<u32> {
-    match precision(name)? {
-        "q8_0" => Ok(8),
-        "q5_0" => Ok(6),
-        "q4_0" => Ok(2),
-        "q4_K" => Ok(12),
-        "q3_K" => Ok(11),
-        _ => Err(bad("unsupported diffusion tensor storage type")),
-    }
+    GgufConverter::SdCli.storage_type(precision(name)?)
 }
-fn count_requested_tensors(tensors: &[GgufTensor], name: &str) -> io::Result<usize> {
-    let requested = requested_storage_type(name)?;
+fn count_requested_tensors(tensors: &[GgufTensor], name: &str, converter: &GgufConverter) -> io::Result<usize> {
+    let requested = converter.storage_type(name)?;
     let count = tensors
         .iter()
         .filter(|t| t.storage_type == requested)
         .count();
     if count == 0 {
         return Err(bad(format!(
-            "sd-cli returned GGUF without any {name} tensors; refusing an unquantized or incompatible artifact"
+            "the converter returned a GGUF without any {name} tensors; refusing an unquantized or incompatible artifact"
         )));
     }
     Ok(count)
@@ -226,6 +283,9 @@ pub struct GgufConvertPlan {
     pub kind: MediaKind,
     pub format: String,
     pub source_bytes: u64,
+    /// Which program writes the file; `tool` is sd-cli for SdCli and the
+    /// `convert.py` script for ComfyGguf.
+    pub converter: GgufConverter,
 }
 pub fn prepare_gguf_convert(
     source: &Path,
@@ -235,7 +295,25 @@ pub fn prepare_gguf_convert(
     layout: InputLayout,
     format: &str,
 ) -> io::Result<GgufConvertPlan> {
-    precision(format)?;
+    prepare_gguf_convert_with(source, output, tool, kind, layout, format, GgufConverter::SdCli)
+}
+
+pub fn prepare_gguf_convert_with(
+    source: &Path,
+    output: &Path,
+    tool: &Path,
+    kind: MediaKind,
+    layout: InputLayout,
+    format: &str,
+    converter: GgufConverter,
+) -> io::Result<GgufConvertPlan> {
+    if converter.nominal_bits(format).is_none() {
+        return Err(bad(format!(
+            "{format} is not a format of {}; accepted: {}",
+            converter.name(),
+            converter.formats().iter().map(|(f, _)| *f).collect::<Vec<_>>().join(", ")
+        )));
+    }
     let source = source.canonicalize()?;
     if !source.is_file() || source.extension().and_then(|s| s.to_str()) != Some("safetensors") {
         return Err(bad(
@@ -254,20 +332,33 @@ pub fn prepare_gguf_convert(
     if source == output {
         return Err(bad("output cannot replace source"));
     }
+    let tool = match &converter {
+        GgufConverter::SdCli => checked_tool(tool)?,
+        GgufConverter::ComfyGguf { python } => {
+            if !tool.is_file() || tool.extension().and_then(|e| e.to_str()) != Some("py") {
+                return Err(bad("comfy-gguf converter needs the path to ComfyUI-GGUF tools/convert.py (--convert-script)"));
+            }
+            if python.as_os_str().is_empty() {
+                return Err(bad("comfy-gguf converter needs a Python interpreter with torch and gguf"));
+            }
+            tool.to_path_buf()
+        }
+    };
     Ok(GgufConvertPlan {
         source,
         output,
-        tool: checked_tool(tool)?,
+        tool,
         kind,
         layout,
         format: format.into(),
         source_bytes: info.bytes,
+        converter,
     })
 }
 impl GgufConvertPlan {
     pub fn json(&self) -> Value {
         json!({"schema":"ojon.diffusion_gguf_plan.v1","status":"PLAN_ONLY",
-        "backend":"stable-diffusion.cpp","mode":"convert","kind":self.kind.name(),
+        "backend":self.converter.name(),"mode":"convert","kind":self.kind.name(),
         "input_layout":self.layout.name(),"source":self.source.to_string_lossy(),
         "source_bytes":self.source_bytes,"output":self.output.to_string_lossy(),
         "tool":self.tool.to_string_lossy(),"precision":self.format,
@@ -283,16 +374,26 @@ impl GgufConvertPlan {
             "Checkpoint size and GGUF validity do not establish visual quality or actual VRAM usage."
         ]})
     }
+    /// The exact argv, for receipts and tests.
+    pub fn command_args(&self, dest: &Path) -> Vec<String> {
+        let p = |x: &Path| x.to_string_lossy().into_owned();
+        match &self.converter {
+            GgufConverter::SdCli => vec![
+                "-M".into(), "convert".into(), self.layout.flag().into(), p(&self.source),
+                "-o".into(), p(dest), "--type".into(), self.format.clone(),
+            ],
+            GgufConverter::ComfyGguf { .. } => vec![
+                p(&self.tool), "--src".into(), p(&self.source), "--dst".into(), p(dest),
+                "--streamed".into(), "--quant-type".into(), self.format.clone(),
+            ],
+        }
+    }
     fn command(&self, dest: &Path) -> Command {
-        let mut cmd = Command::new(&self.tool);
-        cmd.arg("-M")
-            .arg("convert")
-            .arg(self.layout.flag())
-            .arg(&self.source)
-            .arg("-o")
-            .arg(dest)
-            .arg("--type")
-            .arg(&self.format);
+        let mut cmd = match &self.converter {
+            GgufConverter::SdCli => Command::new(&self.tool),
+            GgufConverter::ComfyGguf { python } => crate::jobs::tool_command(python),
+        };
+        cmd.args(self.command_args(dest));
         cmd
     }
 }
@@ -313,7 +414,7 @@ pub fn run_gguf_convert(plan: &GgufConvertPlan, mut log: impl FnMut(&str)) -> io
     let stage = stage(parent)?;
     let candidate = stage.0.join("candidate.gguf");
     let start = Instant::now();
-    log("[ojon] starting real sd-cli GGUF conversion; no visual-quality claim");
+    log(&format!("[ojon] starting real GGUF conversion with {}; no visual-quality claim", plan.converter.name()));
     run_with_log(&mut plan.command(&candidate), |line| log(line))?;
     let info = inspect_gguf(&candidate)?;
     if info.tensor_count == 0 || info.split_count.unwrap_or(1) > 1 {
@@ -324,11 +425,11 @@ pub fn run_gguf_convert(plan: &GgufConvertPlan, mut log: impl FnMut(&str)) -> io
     // Read the bounded tensor catalog to ensure the requested GGML type exists
     // before publishing, while still permitting mixed high-precision tensors.
     let tensors = inspect_gguf_tensors(&candidate)?;
-    let requested_tensor_count = count_requested_tensors(&tensors, &plan.format)?;
+    let requested_tensor_count = count_requested_tensors(&tensors, &plan.format, &plan.converter)?;
     let output_bytes = info.file_bytes;
     fs::hard_link(&candidate, &plan.output)?;
     let report = json!({"schema":"ojon.diffusion_gguf_conversion.v1",
-        "backend":"stable-diffusion.cpp","status":"FORMAT_VALID_NOT_RUNTIME_TESTED",
+        "backend":plan.converter.name(),"status":"FORMAT_VALID_NOT_RUNTIME_TESTED",
         "source":plan.source.to_string_lossy(),"output":plan.output.to_string_lossy(),
         "kind":plan.kind.name(),"input_layout":plan.layout.name(),"precision":plan.format,
         "source_bytes":plan.source_bytes,"output_bytes":output_bytes,
@@ -676,8 +777,8 @@ mod tests {
             relative_offset: 0,
         };
         let mixed = vec![make("w1", 2), make("norm", 1), make("w2", 2)];
-        assert_eq!(count_requested_tensors(&mixed, "q4_0").unwrap(), 2);
-        assert!(count_requested_tensors(&mixed, "q8_0").is_err());
+        assert_eq!(count_requested_tensors(&mixed, "q4_0", &GgufConverter::SdCli).unwrap(), 2);
+        assert!(count_requested_tensors(&mixed, "q8_0", &GgufConverter::SdCli).is_err());
         assert_eq!(requested_storage_type("q4_K").unwrap(), 12);
         assert_eq!(requested_storage_type("q3_K").unwrap(), 11);
         assert!(requested_storage_type("w4a4").is_err());
@@ -697,5 +798,48 @@ mod tests {
         fs::write(&file, &pixels).unwrap();
         assert!(verify_media(&file, MediaKind::Video).is_ok());
         fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod converter_tests {
+    use super::*;
+
+    #[test]
+    fn comfy_converter_renders_streamed_quant_type_command() {
+        let plan = GgufConvertPlan {
+            source: PathBuf::from("fibo2_dev_bf16.safetensors"),
+            output: PathBuf::from("out/fibo2_dev-Q5_K_M.gguf"),
+            tool: PathBuf::from("tools/convert.py"),
+            layout: InputLayout::Diffusion,
+            kind: MediaKind::Image,
+            format: "Q5_K_M".into(),
+            source_bytes: 1,
+            converter: GgufConverter::ComfyGguf { python: PathBuf::from("python") },
+        };
+        let args = plan.command_args(Path::new("stage/candidate.gguf"));
+        assert_eq!(args[0], "tools/convert.py");
+        assert!(args.windows(2).any(|w| w[0] == "--src" && w[1] == "fibo2_dev_bf16.safetensors"));
+        assert!(args.windows(2).any(|w| w[0] == "--dst" && w[1] == "stage/candidate.gguf"));
+        assert!(args.contains(&"--streamed".to_string()));
+        assert!(args.windows(2).any(|w| w[0] == "--quant-type" && w[1] == "Q5_K_M"));
+        assert_eq!(plan.json()["backend"], "comfyui-gguf convert.py");
+        let sd = GgufConvertPlan { converter: GgufConverter::SdCli, tool: PathBuf::from("sd-cli"), format: "q5_0".into(), ..plan };
+        let args = sd.command_args(Path::new("c.gguf"));
+        assert_eq!(args[..2], ["-M".to_string(), "convert".to_string()]);
+        assert!(args.windows(2).any(|w| w[0] == "--type" && w[1] == "q5_0"));
+    }
+
+    #[test]
+    fn converter_formats_and_storage_types_are_per_converter() {
+        let comfy = GgufConverter::parse("comfy-gguf", Path::new("python")).unwrap();
+        assert_eq!(comfy.storage_type("Q4_K_M").unwrap(), 12);
+        assert_eq!(comfy.storage_type("Q5_K_S").unwrap(), 13);
+        assert_eq!(comfy.storage_type("Q6_K").unwrap(), 14);
+        assert!(comfy.storage_type("q4_K").is_err(), "sd-cli spelling is not a comfy format");
+        assert!(GgufConverter::SdCli.storage_type("Q4_K_M").is_err());
+        assert_eq!(GgufConverter::SdCli.storage_type("q3_K").unwrap(), 11);
+        assert!(comfy.nominal_bits("Q8_0").unwrap() > comfy.nominal_bits("Q4_0").unwrap());
+        assert!(GgufConverter::parse("gguf-magic", Path::new("python")).is_err());
     }
 }

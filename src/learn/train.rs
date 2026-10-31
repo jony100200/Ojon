@@ -148,6 +148,13 @@ pub struct LearnTrainPlan {
     pub hardware: HardwareDiagnosis,
 }
 
+/// A path rendered as a single-quoted YAML scalar. Single-quoted YAML has no escape
+/// sequences, so Windows backslashes survive verbatim (a double-quoted `C:\Users` is a
+/// YAML parse error); a literal single quote inside is doubled per the YAML spec.
+fn yaml_quote(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "''"))
+}
+
 impl LearnTrainPlan {
     /// Create a standard hardware-adapted training plan.
     pub fn new(
@@ -228,7 +235,7 @@ impl LearnTrainPlan {
 ### Generated automatically by Ojon Learn Engine
 
 # Model Arguments
-model_name_or_path: "{model_path}"
+model_name_or_path: {model_path}
 trust_remote_code: false
 
 # Method Arguments
@@ -242,14 +249,14 @@ lora_target:
 {targets}{quant_str}
 # Dataset Arguments
 dataset: {dataset_name}
-dataset_dir: "{data_dir}"
+dataset_dir: {data_dir}
 template: default
 cutoff_len: {cutoff_len}
 overwrite_cache: true
 preprocessing_num_workers: 4
 
 # Output Arguments
-output_dir: "{output_dir}"
+output_dir: {output_dir}
 logging_steps: {logging_steps}
 save_steps: {save_steps}
 plot_loss: true
@@ -265,7 +272,7 @@ warmup_ratio: 0.05
 gradient_checkpointing: {grad_checkpoint}
 {precision_str}
 "#,
-            model_path = self.base_model_path.display(),
+            model_path = yaml_quote(&self.base_model_path),
             stage = self.stage,
             rank = self.lora_rank,
             alpha = self.lora_alpha,
@@ -273,9 +280,9 @@ gradient_checkpointing: {grad_checkpoint}
             targets = targets_yaml,
             quant_str = quant_str,
             dataset_name = self.dataset_name,
-            data_dir = self.dataset_dir.display(),
+            data_dir = yaml_quote(&self.dataset_dir),
             cutoff_len = self.cutoff_len,
-            output_dir = self.output_dir.display(),
+            output_dir = yaml_quote(&self.output_dir),
             logging_steps = self.logging_steps,
             save_steps = self.save_steps,
             batch_size = self.per_device_train_batch_size,
@@ -404,6 +411,20 @@ pub fn execute_training_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_paths_are_valid_yaml() {
+        let plan = LearnTrainPlan::new(
+            PathBuf::from(r"D:\Models\it's\base"),
+            PathBuf::from(r"C:\Users\x\data"),
+            PathBuf::from(r"C:\out"),
+            Some(None),
+        );
+        let yaml = plan.to_yaml_string();
+        assert!(yaml.contains(r"model_name_or_path: 'D:\Models\it''s\base'"));
+        assert!(yaml.contains(r"dataset_dir: 'C:\Users\x\data'"));
+        assert!(!yaml.contains("\"C:\\"));
+    }
 
     #[test]
     fn test_hardware_probe() {

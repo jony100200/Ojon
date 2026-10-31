@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub fn ggml_type_name(storage_type: u32) -> &'static str {
     match storage_type {
@@ -300,6 +300,8 @@ pub struct GgufSummary {
     pub data_offset: u64,
     pub alignment: u32,
     pub split_count: Option<u16>,
+    /// Zero-based shard index from `split.no`; None for a single-file GGUF.
+    pub split_no: Option<u16>,
     pub big_endian: bool,
 }
 
@@ -474,6 +476,7 @@ fn inspect_gguf_inner(path: &Path, collect: bool) -> io::Result<(GgufSummary, Ve
     let mut model_name = None;
     let mut file_type = None;
     let mut split_count = None;
+    let mut split_no = None;
     let mut alignment = 32u32;
     for _ in 0..metadata_count {
         let key = reader
@@ -486,6 +489,7 @@ fn inspect_gguf_inner(path: &Path, collect: bool) -> io::Result<(GgufSummary, Ve
             ("general.file_type", 4) => file_type = Some(reader.u32()?),
             ("general.alignment", 4) => alignment = reader.u32()?,
             ("split.count", 2) => split_count = Some(reader.u16()?),
+            ("split.no", 2) => split_no = Some(reader.u16()?),
             _ => reader.skip_value(ty)?,
         }
     }
@@ -555,6 +559,7 @@ fn inspect_gguf_inner(path: &Path, collect: bool) -> io::Result<(GgufSummary, Ve
             data_offset,
             alignment,
             split_count,
+            split_no,
             big_endian,
         },
         tensors,
@@ -642,4 +647,126 @@ pub fn read_imatrix_energy(path: &Path) -> io::Result<Vec<(String, f64)>> {
     }
     result.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(result)
+}
+
+/// The shard files of a split GGUF, first shard first. A single-file GGUF
+/// returns itself. The path must be the first shard (`split.no` 0, named
+/// `<stem>-00001-of-NNNNN.gguf`), which is the file llama.cpp tools take;
+/// every sibling must exist. Nothing is merged: `llama-quantize`,
+/// `llama-imatrix` and `llama-perplexity` read all shards from the first.
+pub fn shard_paths(path: &Path) -> io::Result<Vec<PathBuf>> {
+    let summary = inspect_gguf(path)?;
+    let count = summary.split_count.unwrap_or(1);
+    if count <= 1 {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    if summary.split_no.unwrap_or(0) != 0 {
+        return Err(invalid(format!(
+            "{} is shard {} of {}; pass the first shard (-00001-of-{:05}.gguf)",
+            path.display(),
+            summary.split_no.unwrap_or(0) + 1,
+            count,
+            count
+        )));
+    }
+    let name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| invalid("shard name is not UTF-8"))?;
+    let stem = name.strip_suffix(".gguf").ok_or_else(|| invalid("shard name must end in .gguf"))?;
+    let (head, total) = stem.rsplit_once("-of-").ok_or_else(|| invalid("split GGUF shard must be named <stem>-00001-of-NNNNN.gguf"))?;
+    let (base, first) = head.rsplit_once('-').ok_or_else(|| invalid("split GGUF shard must be named <stem>-00001-of-NNNNN.gguf"))?;
+    if first != "00001" || total.parse::<u16>().ok() != Some(count) {
+        return Err(invalid(format!(
+            "shard name {name} does not match split.count {count} (expected <stem>-00001-of-{count:05}.gguf)"
+        )));
+    }
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut shards = Vec::with_capacity(count as usize);
+    for i in 1..=count {
+        let p = dir.join(format!("{base}-{i:05}-of-{count:05}.gguf"));
+        if !p.is_file() {
+            return Err(invalid(format!("missing shard {}", p.display())));
+        }
+        shards.push(p);
+    }
+    Ok(shards)
+}
+
+/// Inspect a possibly split GGUF as one model: the first shard's metadata with
+/// `file_bytes` and `tensor_count` summed over all shards, and the full
+/// tensor catalog in shard order. Single files pass straight through.
+pub fn inspect_sharded_gguf(path: &Path) -> io::Result<(GgufSummary, Vec<GgufTensor>)> {
+    let shards = shard_paths(path)?;
+    let mut summary = inspect_gguf(&shards[0])?;
+    let mut tensors = inspect_gguf_tensors(&shards[0])?;
+    for shard in &shards[1..] {
+        let s = inspect_gguf(shard)?;
+        summary.file_bytes = summary.file_bytes.checked_add(s.file_bytes).ok_or_else(|| invalid("shard size overflow"))?;
+        summary.tensor_count = summary.tensor_count.checked_add(s.tensor_count).ok_or_else(|| invalid("shard tensor count overflow"))?;
+        tensors.extend(inspect_gguf_tensors(shard)?);
+    }
+    Ok((summary, tensors))
+}
+
+#[cfg(test)]
+mod shard_tests {
+    use super::*;
+    use std::fs;
+    use std::io::{Seek, Write};
+
+    fn shard(path: &Path, no: u16, count: u16, tensor: &str) {
+        fn val_string(f: &mut fs::File, s: &str) {
+            f.write_all(&(s.len() as u64).to_le_bytes()).unwrap();
+            f.write_all(s.as_bytes()).unwrap();
+        }
+        let mut f = fs::File::create(path).unwrap();
+        f.write_all(b"GGUF").unwrap();
+        f.write_all(&3u32.to_le_bytes()).unwrap();
+        f.write_all(&1u64.to_le_bytes()).unwrap();
+        f.write_all(&4u64.to_le_bytes()).unwrap();
+        val_string(&mut f, "general.architecture");
+        f.write_all(&8u32.to_le_bytes()).unwrap();
+        val_string(&mut f, "qwen3");
+        val_string(&mut f, "general.file_type");
+        f.write_all(&4u32.to_le_bytes()).unwrap();
+        f.write_all(&1u32.to_le_bytes()).unwrap();
+        val_string(&mut f, "split.count");
+        f.write_all(&2u32.to_le_bytes()).unwrap();
+        f.write_all(&count.to_le_bytes()).unwrap();
+        val_string(&mut f, "split.no");
+        f.write_all(&2u32.to_le_bytes()).unwrap();
+        f.write_all(&no.to_le_bytes()).unwrap();
+        val_string(&mut f, tensor);
+        f.write_all(&2u32.to_le_bytes()).unwrap();
+        f.write_all(&2u64.to_le_bytes()).unwrap();
+        f.write_all(&2u64.to_le_bytes()).unwrap();
+        f.write_all(&1u32.to_le_bytes()).unwrap();
+        f.write_all(&0u64.to_le_bytes()).unwrap();
+        let pos = f.stream_position().unwrap();
+        f.write_all(&vec![0u8; ((32 - pos % 32) % 32) as usize]).unwrap();
+        f.write_all(&[0u8; 32]).unwrap();
+    }
+
+    #[test]
+    fn sharded_inspection_sums_shards_and_requires_the_first_one() {
+        let tick = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("ojon-shards-{}-{tick}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("m-00001-of-00002.gguf");
+        let b = dir.join("m-00002-of-00002.gguf");
+        shard(&a, 0, 2, "blk.0.attn_q.weight");
+        let err = shard_paths(&a).unwrap_err().to_string();
+        assert!(err.contains("missing shard"), "{err}");
+        shard(&b, 1, 2, "blk.1.attn_q.weight");
+        assert_eq!(shard_paths(&a).unwrap(), vec![a.clone(), b.clone()]);
+        let err = shard_paths(&b).unwrap_err().to_string();
+        assert!(err.contains("pass the first shard"), "{err}");
+        let (summary, tensors) = inspect_sharded_gguf(&a).unwrap();
+        assert_eq!(summary.tensor_count, 2);
+        assert_eq!(summary.split_count, Some(2));
+        assert_eq!(summary.file_bytes, fs::metadata(&a).unwrap().len() + fs::metadata(&b).unwrap().len());
+        assert_eq!(tensors.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["blk.0.attn_q.weight", "blk.1.attn_q.weight"]);
+        let single = dir.join("single.gguf");
+        shard(&single, 0, 1, "token_embd.weight");
+        assert_eq!(shard_paths(&single).unwrap(), vec![single.clone()]);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

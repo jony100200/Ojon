@@ -2,7 +2,6 @@
 //! Calibration is independent of held-out task evaluation and does not make
 //! a "quality preserved" claim. The original GGUF and corpus are read-only.
 
-use crate::gguf::inspect_gguf;
 use crate::jobs::run_with_log;
 use serde_json::{json, Value};
 use std::fs::{self, File};
@@ -27,6 +26,8 @@ pub struct ImatrixPlan {
     pub context: u32,
     pub model_bytes: u64,
     pub corpus_bytes: u64,
+    /// Backend device list (`-dev`), so the pass stays off a GPU that is serving.
+    pub device: Option<String>,
 }
 impl ImatrixPlan {
     pub fn json(&self) -> Value {
@@ -73,12 +74,9 @@ pub fn prepare_imatrix(
     if !model.is_file() {
         return Err(invalid("original GGUF path must be a file"));
     }
-    let m = inspect_gguf(&model)?;
+    let (m, _) = crate::gguf::inspect_sharded_gguf(&model)?;
     if m.tensor_count == 0 {
         return Err(invalid("empty GGUF tensor catalog"));
-    }
-    if m.split_count.unwrap_or(1) > 1 {
-        return Err(invalid("split GGUF source unsupported"));
     }
     if !matches!(m.file_type, Some(0 | 1 | 32)) {
         return Err(invalid("importance calibration expects original F32, F16 or BF16 GGUF, not an already quantized model"));
@@ -126,6 +124,7 @@ pub fn prepare_imatrix(
         context,
         model_bytes: m.file_bytes,
         corpus_bytes,
+            device: None,
     })
 }
 struct Stage(PathBuf);
@@ -177,9 +176,19 @@ pub fn run_imatrix<F: FnMut(&str)>(plan: &ImatrixPlan, mut log: F) -> io::Result
     } else {
         cmd.arg("-ngl").arg(plan.gpu_layers.to_string());
     }
+    // Batch = context: the host logits buffer scales with n_batch x vocab
+    // (2 GiB at the default 2048 on a 248k vocab) and that allocation is what
+    // fails first on a machine near its commit limit.
     cmd.arg("-c")
         .arg(plan.context.to_string())
-        .current_dir(&stage.0);
+        .arg("-b")
+        .arg(plan.context.to_string())
+        .arg("-ub")
+        .arg(plan.context.to_string());
+    if let Some(d) = &plan.device {
+        cmd.arg("-dev").arg(d);
+    }
+    cmd.current_dir(&stage.0);
     log("[ojon] generating calibrated importance matrix with installed public llama-imatrix");
     run_with_log(&mut cmd, |line| log(line))?;
     let bytes = fs::metadata(&tmp)?.len();

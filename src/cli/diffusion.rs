@@ -286,6 +286,9 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let mut kind = MediaKind::Image;
             let mut layout = InputLayout::Diffusion;
             let mut formats = String::from("q8_0,q5_0,q4_K,q4_0,q3_K");
+            let mut formats_given = false;
+            let mut converter_name = String::from("sd-cli");
+            let mut convert_script: Option<PathBuf> = None;
             let mut workflow: Option<PathBuf> = None;
             let mut reference: Option<String> = None;
             let mut server = String::from("http://127.0.0.1:8188");
@@ -304,7 +307,9 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     Some("--tool") => tool = PathBuf::from(next_argument(&mut args, "sd-cli")?),
                     Some("--kind") => kind = MediaKind::parse(&utf8(next_argument(&mut args, "image|video")?, "kind")?)?,
                     Some("--layout") => layout = InputLayout::parse(&utf8(next_argument(&mut args, "diffusion|checkpoint")?, "layout")?)?,
-                    Some("--formats") => formats = utf8(next_argument(&mut args, "comma-separated formats")?, "formats")?,
+                    Some("--formats") => { formats = utf8(next_argument(&mut args, "comma-separated formats")?, "formats")?; formats_given = true; }
+                    Some("--converter") => converter_name = utf8(next_argument(&mut args, "sd-cli|comfy-gguf")?, "converter")?,
+                    Some("--convert-script") => convert_script = Some(PathBuf::from(next_argument(&mut args, "ComfyUI-GGUF tools/convert.py")?)),
                     Some("--workflow") => workflow = Some(PathBuf::from(next_argument(&mut args, "API-format workflow JSON")?)),
                     Some("--reference-name") => reference = Some(utf8(next_argument(&mut args, "reference weights name")?, "reference name")?),
                     Some("--server") => server = utf8(next_argument(&mut args, "ComfyUI server URL")?, "server")?,
@@ -321,13 +326,24 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             }
             let workflow = workflow.ok_or_else(|| invalid("--workflow is required"))?;
             let reference = reference.ok_or_else(|| invalid("--reference-name is required"))?;
+            // The ComfyUI-GGUF converter (molbal fork) is what loads FIBO 2 and
+            // friends; it is a Python script, so it becomes the "tool" and the
+            // format vocabulary switches to its quant types.
+            let converter = ojon_backend::diffusion_gguf::GgufConverter::parse(&converter_name, &python)?;
+            if let ojon_backend::diffusion_gguf::GgufConverter::ComfyGguf { .. } = converter {
+                tool = convert_script.clone().ok_or_else(|| invalid("--converter comfy-gguf needs --convert-script <ComfyUI-GGUF tools/convert.py>"))?;
+                if !formats_given {
+                    formats = String::from("Q8_0,Q6_K,Q5_K_M,Q4_K_M,Q4_0");
+                }
+            }
             let plan = ojon_backend::diffusion_sweep::prepare_diffusion_sweep(ojon_backend::diffusion_sweep::DiffusionSweepRequest {
                 source,
                 comfy_unet_dir: unet_dir,
                 tool,
                 kind,
                 layout,
-                formats: ojon_backend::diffusion_sweep::parse_formats(&formats)?,
+                formats: ojon_backend::diffusion_sweep::parse_formats_for(&formats, &converter)?,
+                converter: converter.clone(),
                 workflow,
                 reference_name: reference,
                 server,

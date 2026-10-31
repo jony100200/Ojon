@@ -16,6 +16,7 @@ pub mod recipe_run;
 pub mod sweep;
 pub mod wer;
 pub mod whisper_parity;
+pub mod ocr_parity;
 
 pub use adaptive::*;
 pub use advanced::*;

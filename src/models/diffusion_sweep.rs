@@ -15,7 +15,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use super::diffusion_gguf::{prepare_gguf_convert, run_gguf_convert, GgufConvertPlan, InputLayout, MediaKind};
+use super::diffusion_gguf::{prepare_gguf_convert_with, run_gguf_convert, GgufConvertPlan, GgufConverter, InputLayout, MediaKind};
 
 fn bad(s: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, s.into())
@@ -31,14 +31,23 @@ pub fn nominal_bits(format: &str) -> Option<f64> {
 
 /// Parse and order a comma-separated format list, largest first, no duplicates.
 pub fn parse_formats(spec: &str) -> io::Result<Vec<String>> {
+    parse_formats_for(spec, &GgufConverter::SdCli)
+}
+
+/// Same, against the format vocabulary of the chosen converter.
+pub fn parse_formats_for(spec: &str, converter: &GgufConverter) -> io::Result<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     for raw in spec.split(',') {
         let f = raw.trim();
         if f.is_empty() {
             continue;
         }
-        if nominal_bits(f).is_none() {
-            return Err(bad(format!("unknown sweep format '{f}'; use any of q8_0,q5_0,q4_K,q4_0,q3_K")));
+        if converter.nominal_bits(f).is_none() {
+            return Err(bad(format!(
+                "unknown sweep format '{f}' for {}; use any of {}",
+                converter.name(),
+                converter.formats().iter().map(|(x, _)| *x).collect::<Vec<_>>().join(",")
+            )));
         }
         if !out.iter().any(|x| x == f) {
             out.push(f.to_string());
@@ -47,7 +56,7 @@ pub fn parse_formats(spec: &str) -> io::Result<Vec<String>> {
     if out.is_empty() {
         return Err(bad("sweep needs at least one format"));
     }
-    out.sort_by(|a, b| nominal_bits(b).partial_cmp(&nominal_bits(a)).unwrap());
+    out.sort_by(|a, b| converter.nominal_bits(b).partial_cmp(&converter.nominal_bits(a)).unwrap());
     Ok(out)
 }
 
@@ -68,6 +77,8 @@ pub struct DiffusionSweepRequest {
     pub max_temporal_delta: Option<f64>,
     pub node_id: Option<String>,
     pub timeout_s: u32,
+    /// sd-cli or the ComfyUI-GGUF converter; decides the format vocabulary too.
+    pub converter: GgufConverter,
 }
 
 #[derive(Debug)]
@@ -111,7 +122,7 @@ pub fn prepare_diffusion_sweep(request: DiffusionSweepRequest) -> io::Result<Dif
     let mut conversions = Vec::new();
     for f in &request.formats {
         let out = request.comfy_unet_dir.join(format!("{stem}-{f}.gguf"));
-        conversions.push(prepare_gguf_convert(&request.source, &out, &request.tool, request.kind, request.layout, f)?);
+        conversions.push(prepare_gguf_convert_with(&request.source, &out, &request.tool, request.kind, request.layout, f, request.converter.clone())?);
     }
     Ok(DiffusionSweepPlan { request, conversions, receipt_path })
 }
@@ -123,6 +134,7 @@ impl DiffusionSweepPlan {
             "source": self.request.source.to_string_lossy(),
             "comfy_unet_dir": self.request.comfy_unet_dir.to_string_lossy(),
             "kind": self.request.kind.name(),
+            "converter": self.request.converter.name(),
             "formats_largest_first": self.request.formats,
             "candidates": self.conversions.iter().map(|c| json!({"format": c.format, "output": c.output.to_string_lossy()})).collect::<Vec<_>>(),
             "workflow": self.request.workflow.to_string_lossy(),
