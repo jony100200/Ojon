@@ -150,7 +150,7 @@ Commands:
   ojon learn-package-install  <pkg-dir> <install-root> [--json]
   ojon learn-package-list     <install-root> [--json]   List installed knowledge/skill/release packages under an install root
   ojon learn-package-rollback <knowledge|skill|release> <install-root> [--json]
-  ojon learn-daemon-run       [--port <port>] [--data-dir <path>] [--max-disk-mb <N>] [--timeout-s <N>]
+  ojon learn-daemon-run       [--port <port>] [--data-dir <path>] [--sources <file>] [--max-disk-mb <N>] [--timeout-s <N>]
 
 Quantization options:
   --tool <path>          Installed llama-quantize executable (default: llama-quantize in PATH)

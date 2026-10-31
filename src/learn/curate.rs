@@ -141,14 +141,13 @@ pub fn generate_tool_decline_anchors() -> Vec<CollectedEpisode> {
     ]
 }
 
-/// Verify that an episode claiming VerifiedSuccess has deterministic verification evidence
-/// (passing unit tests, non-empty verified git diff, or canonical static anchor).
+/// An episode is verified only by a recorded passing test, or by the static anchor ids.
+/// A stored diff is evidence of an edit, not evidence that the edit worked.
 pub fn has_deterministic_verification(ep: &CollectedEpisode) -> bool {
     if ep.unit_tests_passed == Some(false) {
         return false;
     }
     ep.unit_tests_passed == Some(true)
-        || ep.git_diff.as_ref().is_some_and(|d| !d.trim().is_empty())
         || ep.app_id == "anchor"
         || ep.session_id == "static-anchor-session"
 }

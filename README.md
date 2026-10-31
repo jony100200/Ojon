@@ -88,6 +88,25 @@ cargo run --locked --features gui --bin ojon-gui
 cargo run --locked --bin ojon -- backends
 ```
 
+Collect local agent sessions with the headless daemon. It does not train a model and it does not upload episodes. Without a sources file it only accepts posts to `http://127.0.0.1:8089/v1/events`. To watch session directories, pass `--sources` or create `sources.json` in the data directory:
+
+```bash
+cargo run --locked --bin ojon -- learn-daemon-run --data-dir collector --sources sources.json
+```
+
+```json
+{
+  "sources": [
+    {"id": "claude", "agent": "claude", "path": "~/.claude/projects"},
+    {"id": "dolil", "agent": "dolil", "path": "agent_runs"},
+    {"id": "pothik", "agent": "pothik", "path": "runs"},
+    {"id": "agy", "agent": "agy", "path": "transcripts"}
+  ]
+}
+```
+
+`agent` is `agy`, `claude`, `dolil`, `pothik`, or `auto`. The daemon stats those directories and opens a `.json` or `.jsonl` file only after its size or modification time changes. Episodes are deduplicated, secrets in the captured text are redacted, and a diff is stored without being treated as a passing test. `daemon_status.json` reports per-agent counts, the last collection time, errors, and `healthy`, `degraded`, or `stopped`.
+
 Read the [User Guide](USER_GUIDE.md) for setup and supported workflows. For video quantisation, follow the [MiniMax H3 W4A4/NVFP4 guide](docs/MINIMAX_H3.md), which distinguishes packed W4A4 components from ComfyUI-compatible NVFP4 safetensors. The measured mixed-precision method is in [Recipe Search](docs/RECIPE_SEARCH.md).
 
 ## Where we're heading

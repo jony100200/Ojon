@@ -28,6 +28,7 @@ pub mod packages;
 pub mod registry;
 pub mod temporal;
 pub mod train;
+pub mod watch;
 
 pub use collector::{
     assess_collector_liveness, default_utility_models, extract_episode_metadata,

@@ -1012,6 +1012,10 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                             .parse()
                             .unwrap_or(1024);
                     }
+                    Some("--sources") => {
+                        config.sources_path =
+                            Some(PathBuf::from(next_argument(&mut args, "sources file")?));
+                    }
                     Some("--timeout-s") => {
                         timeout_s = Some(
                             next_argument(&mut args, "daemon run timeout seconds")?
@@ -1035,6 +1039,13 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             );
             println!("  Storage directory: {}", config.storage_dir.display());
             println!("  Max storage limit: {} MB", config.max_disk_mb);
+            match &config.sources_path {
+                Some(path) => println!("  Sources file: {}", path.display()),
+                None => println!(
+                    "  Sources file: {} (if present)",
+                    config.storage_dir.join("sources.json").display()
+                ),
+            }
 
             let daemon = ojon_backend::LearnDaemon::new(config)?;
             let handle = daemon.start()?;

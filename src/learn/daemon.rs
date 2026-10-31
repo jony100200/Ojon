@@ -10,7 +10,9 @@
 //!    - Writes atomic heartbeat to `daemon_status.json`.
 
 use crate::learn::collector::LearnCollector;
+use crate::learn::watch::{SessionWatcher, WatchReport};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -29,6 +31,9 @@ pub struct DaemonConfig {
     pub redaction_enabled: bool,
     pub poll_interval_s: u64,
     pub auto_supersede: bool,
+    /// Explicit sources file. When empty, `{storage_dir}/sources.json` is used if it exists.
+    #[serde(default)]
+    pub sources_path: Option<PathBuf>,
 }
 
 impl Default for DaemonConfig {
@@ -41,6 +46,7 @@ impl Default for DaemonConfig {
             redaction_enabled: true,
             poll_interval_s: 30,
             auto_supersede: true,
+            sources_path: None,
         }
     }
 }
@@ -57,6 +63,20 @@ pub struct DaemonStatus {
     pub max_disk_bytes: u64,
     pub episodes_recorded: u64,
     pub last_heartbeat_epoch_s: u64,
+    #[serde(default)]
+    pub last_collection_epoch_s: Option<u64>,
+    #[serde(default)]
+    pub last_watch_error: Option<String>,
+    #[serde(default)]
+    pub watch_sources: usize,
+    #[serde(default)]
+    pub watch_files_checked: u64,
+    #[serde(default)]
+    pub episodes_by_agent: BTreeMap<String, u64>,
+    /// `healthy` while the loop is running and every configured source is readable.
+    /// `degraded` while running with a source error. `stopped` after shutdown.
+    #[serde(default)]
+    pub state: String,
 }
 
 /// Headless Daemon Controller.
@@ -64,6 +84,23 @@ pub struct LearnDaemon {
     config: DaemonConfig,
     is_running: Arc<AtomicBool>,
     collector: Arc<LearnCollector>,
+}
+
+fn unix_now_s() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn service_state(running: bool, last_error: &Option<String>) -> String {
+    if !running {
+        "stopped".to_string()
+    } else if last_error.as_ref().is_some_and(|err| !err.is_empty()) {
+        "degraded".to_string()
+    } else {
+        "healthy".to_string()
+    }
 }
 
 impl LearnDaemon {
@@ -153,6 +190,7 @@ impl LearnDaemon {
     }
 
     /// Write heartbeat status file. `running` is false for the shutdown record.
+    #[allow(clippy::too_many_arguments)]
     pub fn write_heartbeat(
         status_path: &Path,
         port: u16,
@@ -178,12 +216,21 @@ impl LearnDaemon {
             max_disk_bytes: max_bytes,
             episodes_recorded: episodes,
             last_heartbeat_epoch_s: now,
+            last_collection_epoch_s: None,
+            last_watch_error: None,
+            watch_sources: 0,
+            watch_files_checked: 0,
+            episodes_by_agent: BTreeMap::new(),
+            state: service_state(running, &None),
         };
+        Self::persist_status(status_path, &status)
+    }
 
+    fn persist_status(status_path: &Path, status: &DaemonStatus) -> io::Result<()> {
         let temp_path = status_path.with_extension("tmp");
         {
             let mut file = File::create(&temp_path)?;
-            serde_json::to_writer_pretty(&mut file, &status)?;
+            serde_json::to_writer_pretty(&mut file, status)?;
             file.flush()?;
         }
         fs::rename(temp_path, status_path)?;
@@ -204,22 +251,35 @@ impl LearnDaemon {
             let start_time = Instant::now();
             let status_file = config.storage_dir.join("daemon_status.json");
             let max_bytes = config.max_disk_mb * 1024 * 1024;
+            let mut watcher =
+                SessionWatcher::open(&config.storage_dir, config.sources_path.as_deref());
+            let mut latest_watch = WatchReport::default();
+            let publish = |running: bool, uptime_s: u64, disk_bytes: u64, watch: &WatchReport| {
+                let status = DaemonStatus {
+                    schema: "ojon.daemon_status.v1".to_string(),
+                    running,
+                    uptime_seconds: uptime_s,
+                    port,
+                    storage_dir: config.storage_dir.to_string_lossy().to_string(),
+                    current_disk_bytes: disk_bytes,
+                    max_disk_bytes: max_bytes,
+                    episodes_recorded: collector.get_stats(port).total_episodes,
+                    last_heartbeat_epoch_s: unix_now_s(),
+                    last_collection_epoch_s: collector.last_collection_epoch_s(),
+                    last_watch_error: watch.last_error.clone(),
+                    watch_sources: watch.sources_configured,
+                    watch_files_checked: watch.files_checked as u64,
+                    episodes_by_agent: collector.agent_counts(),
+                    state: service_state(running, &watch.last_error),
+                };
+                let _ = Self::persist_status(&status_file, &status);
+            };
 
             while is_running.load(Ordering::SeqCst) {
+                latest_watch = watcher.poll(&collector);
                 let uptime_s = start_time.elapsed().as_secs();
                 let disk_bytes = Self::calculate_disk_usage(&config.storage_dir);
-                let stats = collector.get_stats(port);
-
-                let _ = Self::write_heartbeat(
-                    &status_file,
-                    port,
-                    &config.storage_dir.to_string_lossy(),
-                    uptime_s,
-                    disk_bytes,
-                    max_bytes,
-                    stats.total_episodes,
-                    true,
-                );
+                publish(true, uptime_s, disk_bytes, &latest_watch);
 
                 // Enforce bounded disk storage: if size exceeds limit, purge transient tmp files
                 // and prune oldest Unverified episodes while preserving VerifiedSuccess episodes.
@@ -248,17 +308,7 @@ impl LearnDaemon {
 
             let uptime_s = start_time.elapsed().as_secs();
             let disk_bytes = Self::calculate_disk_usage(&config.storage_dir);
-            let episodes = collector.get_stats(port).total_episodes;
-            let _ = Self::write_heartbeat(
-                &status_file,
-                port,
-                &config.storage_dir.to_string_lossy(),
-                uptime_s,
-                disk_bytes,
-                max_bytes,
-                episodes,
-                false,
-            );
+            publish(false, uptime_s, disk_bytes, &latest_watch);
             collector.stop();
             let _ = collector_handle.join();
         });
@@ -388,5 +438,71 @@ mod tests {
         assert!(st.unverified_count < 5);
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn daemon_polls_configured_sources_without_training() {
+        let dir = std::env::temp_dir().join(format!(
+            "ojon-daemon-watch-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let runs = dir.join("runs");
+        fs::create_dir_all(&runs).unwrap();
+        fs::write(
+            runs.join("run.json"),
+            r#"{"run_id":"live","agent":"pothik","prompt":"collect this","response":"collected","unit_tests_passed":true}"#,
+        )
+        .unwrap();
+        let storage = dir.join("collector");
+        fs::create_dir_all(&storage).unwrap();
+        let sources = storage.join("sources.json");
+        let runs_json = runs.display().to_string().replace('\\', "\\\\");
+        fs::write(
+            &sources,
+            format!(r#"{{"sources":[{{"id":"pothik","agent":"pothik","path":"{runs_json}"}}]}}"#),
+        )
+        .unwrap();
+        let binder = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = binder.local_addr().unwrap().port();
+        drop(binder);
+        let mut config = DaemonConfig::default();
+        config.listen_port = port;
+        config.storage_dir = storage.clone();
+        config.sources_path = Some(sources);
+        config.poll_interval_s = 30;
+        let daemon = LearnDaemon::new(config).unwrap();
+        let handle = daemon.start().unwrap();
+        let status_path = storage.join("daemon_status.json");
+        let mut status = None;
+        for _ in 0..40 {
+            if let Ok(text) = fs::read_to_string(&status_path) {
+                if let Ok(parsed) = serde_json::from_str::<DaemonStatus>(&text) {
+                    if parsed.episodes_recorded >= 1 {
+                        status = Some(parsed);
+                        break;
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let status = status.expect("daemon should collect the configured source");
+        assert!(status.running);
+        assert_eq!(status.state, "healthy");
+        assert_eq!(status.watch_sources, 1);
+        assert_eq!(status.episodes_by_agent.get("pothik"), Some(&1));
+        assert!(status.last_collection_epoch_s.is_some());
+        assert!(status.last_watch_error.is_none());
+        daemon.stop();
+        let _ = handle.join();
+        let stopped: DaemonStatus =
+            serde_json::from_str(&fs::read_to_string(&status_path).unwrap()).unwrap();
+        assert!(!stopped.running);
+        assert_eq!(stopped.state, "stopped");
+        assert_eq!(stopped.episodes_recorded, 1);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

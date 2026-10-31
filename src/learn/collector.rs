@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -291,7 +291,7 @@ pub fn redact_json_secrets(val: &mut Value) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EpisodeOutcome {
-    /// Explicitly verified through tests, compiler exit-code 0, or schema check.
+    /// Verified by a recorded passing test or command exit. A diff alone is not verification.
     VerifiedSuccess,
     /// Explicitly marked failed, user retry triggered, or syntax/type error.
     FailedRetry,
@@ -452,8 +452,29 @@ pub struct LearnCollector {
     unverified: Arc<AtomicU64>,
     redacted_count: Arc<AtomicU64>,
     recent_episodes: Arc<Mutex<Vec<CollectedEpisode>>>,
+    known_ids: Arc<Mutex<HashSet<String>>>,
+    agent_counts: Arc<Mutex<BTreeMap<String, u64>>>,
+    last_collection_epoch_s: AtomicU64,
     upstream_endpoint: Arc<Mutex<Option<String>>>,
     auth_token: Arc<Mutex<Option<String>>>,
+}
+
+/// Group stored `app_id` values into the agents the collector watches.
+pub(crate) fn agent_bucket(app_id: &str) -> String {
+    let id = app_id.trim().to_ascii_lowercase();
+    if id.starts_with("claude") {
+        "claude".to_string()
+    } else if id.starts_with("dolil") {
+        "dolil".to_string()
+    } else if id.starts_with("agy") {
+        "agy".to_string()
+    } else if id.starts_with("pothik") {
+        "pothik".to_string()
+    } else if id.is_empty() {
+        "unknown".to_string()
+    } else {
+        id
+    }
 }
 
 impl LearnCollector {
@@ -468,6 +489,9 @@ impl LearnCollector {
             unverified: Arc::new(AtomicU64::new(0)),
             redacted_count: Arc::new(AtomicU64::new(0)),
             recent_episodes: Arc::new(Mutex::new(Vec::new())),
+            known_ids: Arc::new(Mutex::new(HashSet::new())),
+            agent_counts: Arc::new(Mutex::new(BTreeMap::new())),
+            last_collection_epoch_s: AtomicU64::new(0),
             upstream_endpoint: Arc::new(Mutex::new(None)),
             auth_token: Arc::new(Mutex::new(None)),
         };
@@ -506,6 +530,28 @@ impl LearnCollector {
 
     pub fn auth_token(&self) -> Option<String> {
         self.auth_token.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn storage_dir(&self) -> &Path {
+        &self.storage_dir
+    }
+
+    /// Episode counts grouped by agent. Rebuilt from disk on startup and updated on each new record.
+    pub fn agent_counts(&self) -> BTreeMap<String, u64> {
+        self.agent_counts
+            .lock()
+            .map(|counts| counts.clone())
+            .unwrap_or_default()
+    }
+
+    /// Unix time of the newest recorded episode. `None` until the first episode is stored.
+    pub fn last_collection_epoch_s(&self) -> Option<u64> {
+        let stamp = self.last_collection_epoch_s.load(Ordering::SeqCst);
+        if stamp == 0 {
+            None
+        } else {
+            Some(stamp)
+        }
     }
 
     /// Ingest OpenTelemetry `gen_ai.*` span payloads (`resourceSpans` or flat `spans` array).
@@ -610,8 +656,9 @@ impl LearnCollector {
                     ep.git_diff = Some(diff.clone());
                 }
             }
-            self.record_episode(ep)?;
-            recorded += 1;
+            if self.record_episode(ep)? {
+                recorded += 1;
+            }
         }
         Ok(recorded)
     }
@@ -634,6 +681,8 @@ impl LearnCollector {
         let mut unver = 0u64;
         let mut red = 0u64;
         let mut recent = Vec::new();
+        let mut agents: BTreeMap<String, u64> = BTreeMap::new();
+        let mut newest = 0u64;
 
         for line in reader.lines() {
             let line = line?;
@@ -641,6 +690,13 @@ impl LearnCollector {
                 continue;
             }
             if let Ok(ep) = serde_json::from_str::<CollectedEpisode>(&line) {
+                if let Ok(mut ids) = self.known_ids.lock() {
+                    ids.insert(ep.episode_id.clone());
+                }
+                *agents.entry(agent_bucket(&ep.app_id)).or_default() += 1;
+                if ep.timestamp_epoch_s > newest {
+                    newest = ep.timestamp_epoch_s;
+                }
                 total += 1;
                 match ep.outcome {
                     EpisodeOutcome::VerifiedSuccess => succ += 1,
@@ -665,20 +721,55 @@ impl LearnCollector {
         if let Ok(mut lock) = self.recent_episodes.lock() {
             *lock = recent;
         }
+        if let Ok(mut counts) = self.agent_counts.lock() {
+            *counts = agents;
+        }
+        self.last_collection_epoch_s.store(newest, Ordering::SeqCst);
         Ok(())
     }
 
-    /// Record a single verified or completed interaction episode.
-    pub fn record_episode(&self, mut ep: CollectedEpisode) -> io::Result<()> {
+    /// Record one episode. A repeated `episode_id` is a no-op so restarts and
+    /// file replays cannot duplicate a session that is already on disk.
+    pub fn record_episode(&self, mut ep: CollectedEpisode) -> io::Result<bool> {
         ep.sanitize();
+        let episode_id = ep.episode_id.clone();
+        let app_bucket = agent_bucket(&ep.app_id);
+        let stamp = if ep.timestamp_epoch_s > 0 {
+            ep.timestamp_epoch_s
+        } else {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        };
+        if let Ok(mut ids) = self.known_ids.lock() {
+            if !ids.insert(episode_id.clone()) {
+                return Ok(false);
+            }
+        }
         let was_redacted = ep.is_redacted;
         let outcome = ep.outcome;
-
-        let line = ep.to_jsonl_line()?;
+        let line = match ep.to_jsonl_line() {
+            Ok(line) => line,
+            Err(err) => {
+                if let Ok(mut ids) = self.known_ids.lock() {
+                    ids.remove(&episode_id);
+                }
+                return Err(err);
+            }
+        };
         let path = self.active_log_path();
-        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-        writeln!(file, "{line}")?;
-        file.sync_all()?;
+        if let Err(err) = (|| -> io::Result<()> {
+            let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+            writeln!(file, "{line}")?;
+            file.sync_all()?;
+            Ok(())
+        })() {
+            if let Ok(mut ids) = self.known_ids.lock() {
+                ids.remove(&episode_id);
+            }
+            return Err(err);
+        }
 
         self.total_episodes.fetch_add(1, Ordering::SeqCst);
         match outcome {
@@ -695,14 +786,18 @@ impl LearnCollector {
         if was_redacted {
             self.redacted_count.fetch_add(1, Ordering::SeqCst);
         }
-
+        self.last_collection_epoch_s
+            .fetch_max(stamp, Ordering::SeqCst);
+        if let Ok(mut counts) = self.agent_counts.lock() {
+            *counts.entry(app_bucket).or_default() += 1;
+        }
         if let Ok(mut lock) = self.recent_episodes.lock() {
             lock.push(ep);
             if lock.len() > 50 {
                 lock.remove(0);
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Get current collector metrics and telemetry.
@@ -759,6 +854,13 @@ impl LearnCollector {
         if let Ok(mut lock) = self.recent_episodes.lock() {
             lock.clear();
         }
+        if let Ok(mut ids) = self.known_ids.lock() {
+            ids.clear();
+        }
+        if let Ok(mut counts) = self.agent_counts.lock() {
+            counts.clear();
+        }
+        self.last_collection_epoch_s.store(0, Ordering::SeqCst);
         Ok(())
     }
 
@@ -856,10 +958,7 @@ struct DaemonHeartbeatFile {
 /// in `storage_dir/daemon_status.json`. Does not read this process's `is_running`.
 pub fn assess_collector_liveness(storage_dir: &Path, port: u16) -> CollectorLiveness {
     let probe = probe_loopback_http(port, LISTENER_PROBE_TIMEOUT);
-    let heartbeat = read_heartbeat_file(
-        &storage_dir.join(DAEMON_HEARTBEAT_FILE),
-        unix_now_s(),
-    );
+    let heartbeat = read_heartbeat_file(&storage_dir.join(DAEMON_HEARTBEAT_FILE), unix_now_s());
     classify_liveness(probe, heartbeat)
 }
 
@@ -932,11 +1031,10 @@ fn classify_liveness(probe: ListenerProbe, heartbeat: HeartbeatObservation) -> C
     }
     match heartbeat {
         HeartbeatObservation::Record { running: false, .. } => CollectorLiveness::Stopped,
-        HeartbeatObservation::Record { running: true, age_s }
-            if age_s > HEARTBEAT_STALE_AFTER_SECS =>
-        {
-            CollectorLiveness::StaleHeartbeat
-        }
+        HeartbeatObservation::Record {
+            running: true,
+            age_s,
+        } if age_s > HEARTBEAT_STALE_AFTER_SECS => CollectorLiveness::StaleHeartbeat,
         HeartbeatObservation::Record { running: true, .. } => CollectorLiveness::Unreachable,
         HeartbeatObservation::Absent => match probe {
             ListenerProbe::Down => CollectorLiveness::Stopped,
@@ -1066,120 +1164,91 @@ fn handle_http_connection(
                     Instant::now().elapsed().as_nanos()
                 );
 
+                let session_id = headers
+                    .get("x-session-id")
+                    .cloned()
+                    .unwrap_or_else(|| "sess-default".into());
+                let app_id = headers
+                    .get("user-agent")
+                    .cloned()
+                    .unwrap_or_else(|| "agent-proxy".into());
                 let upstream_target = headers
                     .get("x-ojon-upstream")
                     .cloned()
                     .or_else(|| collector.upstream_endpoint());
 
-                let (resp_json, assistant_text, tool_calls) = if let Some(ref up_url) =
-                    upstream_target
-                {
-                    match forward_chat_completion_to_upstream(up_url, &body) {
-                        Ok(up_resp) => {
-                            let choice_msg = &up_resp["choices"][0]["message"];
-                            let content = choice_msg["content"].as_str().unwrap_or("").to_string();
-                            let mut parsed_tools = Vec::new();
-                            if let Some(tc_arr) = choice_msg["tool_calls"].as_array() {
-                                for tc in tc_arr {
-                                    let id = tc["id"].as_str().unwrap_or("call_0").to_string();
-                                    let name = tc["function"]["name"]
-                                        .as_str()
-                                        .or_else(|| tc["name"].as_str())
-                                        .unwrap_or("unknown_tool")
-                                        .to_string();
-                                    let args_val = if let Some(arg_str) =
-                                        tc["function"]["arguments"].as_str()
-                                    {
+                let forwarded = if let Some(ref up_url) = upstream_target {
+                    forward_chat_completion_to_upstream(up_url, &body)
+                        .map_err(|err| (502u16, format!("upstream request failed: {err}")))
+                } else {
+                    Err((
+                        503,
+                        "no upstream model configured; request was not sent to a model".to_string(),
+                    ))
+                };
+
+                match forwarded {
+                    Ok(up_resp) => {
+                        let choice_msg = &up_resp["choices"][0]["message"];
+                        let content = choice_msg["content"].as_str().unwrap_or("").to_string();
+                        let mut parsed_tools = Vec::new();
+                        if let Some(tc_arr) = choice_msg["tool_calls"].as_array() {
+                            for tc in tc_arr {
+                                let id = tc["id"].as_str().unwrap_or("call_0").to_string();
+                                let name = tc["function"]["name"]
+                                    .as_str()
+                                    .or_else(|| tc["name"].as_str())
+                                    .unwrap_or("unknown_tool")
+                                    .to_string();
+                                let args_val =
+                                    if let Some(arg_str) = tc["function"]["arguments"].as_str() {
                                         serde_json::from_str::<Value>(arg_str)
                                             .unwrap_or_else(|_| Value::String(arg_str.to_string()))
                                     } else {
                                         tc["function"]["arguments"].clone()
                                     };
-                                    parsed_tools.push(ToolCallRecord {
-                                        id,
-                                        name,
-                                        arguments: args_val,
-                                    });
-                                }
+                                parsed_tools.push(ToolCallRecord {
+                                    id,
+                                    name,
+                                    arguments: args_val,
+                                });
                             }
-                            (up_resp, content, parsed_tools)
                         }
-                        Err(_) => {
-                            let fallback = json!({
-                                "id": format!("chatcmpl-{}", ep_id),
-                                "object": "chat.completion",
-                                "created": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-                                "model": model,
-                                "choices": [{
-                                    "index": 0,
-                                    "message": {
-                                        "role": "assistant",
-                                        "content": "Ojon Gateway recorded request payload for training flywheel (upstream unreachable)."
-                                    },
-                                    "finish_reason": "stop"
-                                }],
-                                "usage": {
-                                    "prompt_tokens": 12,
-                                    "completion_tokens": 8,
-                                    "total_tokens": 20
-                                }
-                            });
-                            (
-                                fallback,
-                                "Generated via Ojon Local Loopback Gateway".to_string(),
-                                Vec::new(),
-                            )
-                        }
+                        let mut ep = CollectedEpisode::new(
+                            &ep_id, session_id, app_id, model, user_msg, content,
+                        );
+                        ep.system_prompt = sys_msg;
+                        ep.model_id = model.to_string();
+                        ep.tool_calls = parsed_tools;
+                        let _ = collector.record_episode(ep);
+                        let resp_bytes = serde_json::to_vec(&up_resp).unwrap_or_default();
+                        write_http_response(&mut stream, 200, "application/json", &resp_bytes)?;
                     }
-                } else {
-                    let mock = json!({
-                        "id": format!("chatcmpl-{}", ep_id),
-                        "object": "chat.completion",
-                        "created": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-                        "model": model,
-                        "choices": [{
-                            "index": 0,
-                            "message": {
-                                "role": "assistant",
-                                "content": "Ojon Gateway recorded request payload for training flywheel."
-                            },
-                            "finish_reason": "stop"
-                        }],
-                        "usage": {
-                            "prompt_tokens": 12,
-                            "completion_tokens": 8,
-                            "total_tokens": 20
-                        }
-                    });
-                    (
-                        mock,
-                        "Generated via Ojon Local Loopback Gateway".to_string(),
-                        Vec::new(),
-                    )
-                };
-
-                let mut ep = CollectedEpisode::new(
-                    &ep_id,
-                    headers
-                        .get("x-session-id")
-                        .cloned()
-                        .unwrap_or_else(|| "sess-default".into()),
-                    headers
-                        .get("user-agent")
-                        .cloned()
-                        .unwrap_or_else(|| "agent-proxy".into()),
-                    model,
-                    user_msg,
-                    assistant_text,
-                );
-                ep.system_prompt = sys_msg;
-                ep.model_id = model.to_string();
-                ep.tool_calls = tool_calls;
-
-                let _ = collector.record_episode(ep);
-
-                let resp_bytes = serde_json::to_vec(&resp_json).unwrap_or_default();
-                write_http_response(&mut stream, 200, "application/json", &resp_bytes)?;
+                    Err((status, message)) => {
+                        let mut ep = CollectedEpisode::new(
+                            &ep_id,
+                            session_id,
+                            app_id,
+                            model,
+                            user_msg,
+                            message.clone(),
+                        );
+                        ep.system_prompt = sys_msg;
+                        ep.model_id = model.to_string();
+                        ep.outcome = EpisodeOutcome::FailedRetry;
+                        ep.scalar_reward = -1.0;
+                        let _ = collector.record_episode(ep);
+                        let err_body = json!({
+                            "error": {
+                                "message": message,
+                                "type": "upstream_error"
+                            }
+                        })
+                        .to_string()
+                        .into_bytes();
+                        write_http_response(&mut stream, status, "application/json", &err_body)?;
+                    }
+                }
             } else {
                 let err_body = json!({"error": "invalid chat json"})
                     .to_string()
@@ -1281,6 +1350,18 @@ fn forward_chat_completion_to_upstream(upstream_base: &str, body: &[u8]) -> io::
         .ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "invalid upstream HTTP response")
         })?;
+    let status_code = resp_str
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .unwrap_or(0);
+    if !(200..300).contains(&status_code) {
+        let snippet: String = json_part.chars().take(240).collect();
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("upstream HTTP {status_code}: {snippet}"),
+        ));
+    }
 
     serde_json::from_str::<Value>(json_part.trim()).map_err(|e| {
         io::Error::new(
@@ -1301,6 +1382,8 @@ fn write_http_response(
         400 => "HTTP/1.1 400 Bad Request",
         403 => "HTTP/1.1 403 Forbidden",
         404 => "HTTP/1.1 404 Not Found",
+        502 => "HTTP/1.1 502 Bad Gateway",
+        503 => "HTTP/1.1 503 Service Unavailable",
         _ => "HTTP/1.1 500 Internal Server Error",
     };
     write!(
@@ -1531,6 +1614,39 @@ pub struct HarvestReceipt {
     pub redacted_count: usize,
 }
 
+/// Parse one session file. `agent` selects the harvester (`agy`, `claude`, `dolil`,
+/// `pothik`, or `auto`). Callers deduplicate by `episode_id`.
+pub(crate) fn parse_session_file(path: &Path, agent: &str) -> io::Result<Vec<CollectedEpisode>> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let kind = agent.trim().to_ascii_lowercase();
+    match kind.as_str() {
+        "claude" if ext == "jsonl" => crate::learn::harvest_claude::parse_claude_transcript(path),
+        "dolil" if ext == "jsonl" => crate::learn::harvest_dolil::parse_dolil_run(path),
+        "agy" | "pothik" if ext == "json" => parse_json_agent_run(path),
+        "agy" | "pothik" if ext == "jsonl" => parse_jsonl_agent_run(path),
+        "claude" | "dolil" => Ok(Vec::new()),
+        _ => {
+            if ext == "json" {
+                parse_json_agent_run(path)
+            } else if ext == "jsonl" {
+                if crate::learn::harvest_claude::is_claude_transcript(path) {
+                    crate::learn::harvest_claude::parse_claude_transcript(path)
+                } else if crate::learn::harvest_dolil::is_dolil_run(path) {
+                    crate::learn::harvest_dolil::parse_dolil_run(path)
+                } else {
+                    parse_jsonl_agent_run(path)
+                }
+            } else {
+                Ok(Vec::new())
+            }
+        }
+    }
+}
+
 /// Harvest real agent run artifacts from a workspace or log directory (supports Pothik `.pothik/runs/*.json`,
 /// Dolil `agent_runs/*.jsonl`, and OpenAI/ShareGPT JSONL traces) into the `LearnCollector` with strict
 /// deterministic verification gates and automatic PII/secret scrubbing.
@@ -1572,26 +1688,7 @@ pub fn harvest_agent_sessions(
             continue;
         }
         receipt.files_scanned += 1;
-        let ext = file_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-
-        let parsed_episodes = if ext == "json" {
-            parse_json_agent_run(&file_path).unwrap_or_default()
-        } else if ext == "jsonl" {
-            // Claude Code session transcripts share the extension but not the schema.
-            if crate::learn::harvest_claude::is_claude_transcript(&file_path) {
-                crate::learn::harvest_claude::parse_claude_transcript(&file_path).unwrap_or_default()
-            } else if crate::learn::harvest_dolil::is_dolil_run(&file_path) {
-                crate::learn::harvest_dolil::parse_dolil_run(&file_path).unwrap_or_default()
-            } else {
-                parse_jsonl_agent_run(&file_path).unwrap_or_default()
-            }
-        } else {
-            Vec::new()
-        };
+        let parsed_episodes = parse_session_file(&file_path, "auto").unwrap_or_default();
 
         for mut ep in parsed_episodes {
             if existing_ids.contains(&ep.episode_id) {
@@ -1608,8 +1705,9 @@ pub fn harvest_agent_sessions(
             if ep.is_redacted {
                 receipt.redacted_count += 1;
             }
-            collector.record_episode(ep)?;
-            receipt.episodes_harvested += 1;
+            if collector.record_episode(ep)? {
+                receipt.episodes_harvested += 1;
+            }
         }
     }
 
@@ -1653,6 +1751,26 @@ fn collect_harvest_files(
         }
     }
     Ok(())
+}
+
+/// Passing tests are the only successful label. A failed status or a failed test
+/// stays a failure. Everything else, including a diff, stays unverified.
+fn label_from_execution(ep: &mut CollectedEpisode, status_str: &str) {
+    let status = status_str.trim();
+    if ep.unit_tests_passed == Some(false)
+        || status == "failed"
+        || status == "fail"
+        || status == "error"
+    {
+        ep.outcome = EpisodeOutcome::FailedRetry;
+        ep.scalar_reward = -1.0;
+    } else if ep.unit_tests_passed == Some(true) {
+        ep.outcome = EpisodeOutcome::VerifiedSuccess;
+        ep.scalar_reward = 1.0;
+    } else {
+        ep.outcome = EpisodeOutcome::Unverified;
+        ep.scalar_reward = 0.0;
+    }
 }
 
 fn parse_json_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpisode>> {
@@ -1731,34 +1849,7 @@ fn parse_json_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpiso
         .unwrap_or("")
         .to_ascii_lowercase();
 
-    let has_deterministic_proof = ep.unit_tests_passed == Some(true)
-        || ep
-            .git_diff
-            .as_ref()
-            .map(|d| !d.trim().is_empty())
-            .unwrap_or(false);
-
-    if ep.unit_tests_passed == Some(false)
-        || status_str == "failed"
-        || status_str == "fail"
-        || status_str == "error"
-    {
-        ep.outcome = EpisodeOutcome::FailedRetry;
-        ep.scalar_reward = -1.0;
-    } else if has_deterministic_proof
-        && (ep.unit_tests_passed == Some(true)
-            || status_str == "pass"
-            || status_str == "passed"
-            || status_str == "completed"
-            || status_str == "success"
-            || status_str.is_empty())
-    {
-        ep.outcome = EpisodeOutcome::VerifiedSuccess;
-        ep.scalar_reward = 1.0;
-    } else {
-        ep.outcome = EpisodeOutcome::Unverified;
-        ep.scalar_reward = 0.0;
-    }
+    label_from_execution(&mut ep, &status_str);
 
     Ok(vec![ep])
 }
@@ -1800,7 +1891,6 @@ fn parse_jsonl_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpis
                     if s.contains("test result: ok")
                         || s.contains("Command exited with code 0")
                         || s.contains("OVERALL VERDICT: PASS")
-                        || s.contains("Made 1 replacement in ")
                     {
                         last_agy_test_passed = Some(true);
                     } else if s.contains("test result: FAILED")
@@ -1903,7 +1993,7 @@ fn parse_jsonl_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpis
                                 ep.git_diff = Some(synthesized_diffs.join("\n\n"));
                             }
                             ep.unit_tests_passed = last_agy_test_passed;
-                            if last_agy_test_passed == Some(true) || ep.git_diff.is_some() {
+                            if last_agy_test_passed == Some(true) {
                                 ep.outcome = EpisodeOutcome::VerifiedSuccess;
                                 ep.scalar_reward = 1.0;
                             } else if last_agy_test_passed == Some(false) {
@@ -1920,14 +2010,15 @@ fn parse_jsonl_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpis
         }
         if let Ok(mut ep) = serde_json::from_value::<CollectedEpisode>(val.clone()) {
             // Enforce deterministic verification gate on harvested episodes
-            if ep.outcome == EpisodeOutcome::VerifiedSuccess {
-                let has_proof = ep.unit_tests_passed == Some(true)
-                    || ep
-                        .git_diff
-                        .as_ref()
-                        .map(|d| !d.trim().is_empty())
-                        .unwrap_or(false);
-                if !has_proof {
+            if ep.outcome == EpisodeOutcome::VerifiedSuccess
+                && ep.unit_tests_passed != Some(true)
+                && ep.app_id != "anchor"
+                && ep.session_id != "static-anchor-session"
+            {
+                if ep.unit_tests_passed == Some(false) {
+                    ep.outcome = EpisodeOutcome::FailedRetry;
+                    ep.scalar_reward = -1.0;
+                } else {
                     ep.outcome = EpisodeOutcome::Unverified;
                     ep.scalar_reward = 0.0;
                 }
@@ -1999,19 +2090,8 @@ fn parse_jsonl_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpis
         ep.unit_tests_passed = val["unit_tests_passed"].as_bool();
         ep.git_diff = val["git_diff"].as_str().map(str::to_string);
 
-        let has_proof = ep.unit_tests_passed == Some(true)
-            || ep
-                .git_diff
-                .as_ref()
-                .map(|d| !d.trim().is_empty())
-                .unwrap_or(false);
-        if ep.unit_tests_passed == Some(false) {
-            ep.outcome = EpisodeOutcome::FailedRetry;
-            ep.scalar_reward = -1.0;
-        } else if has_proof {
-            ep.outcome = EpisodeOutcome::VerifiedSuccess;
-            ep.scalar_reward = 1.0;
-        }
+        let status_str = val["status"].as_str().unwrap_or("").to_ascii_lowercase();
+        label_from_execution(&mut ep, &status_str);
         episodes.push(ep);
     }
 
@@ -2369,6 +2449,178 @@ mod tests {
             CollectorLiveness::Stopped
         );
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn duplicate_episode_ids_are_not_appended() {
+        let dir = std::env::temp_dir().join(format!(
+            "ojon-dedup-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let coll = LearnCollector::new(dir.clone()).unwrap();
+        let ep = CollectedEpisode::new("ep-same", "s", "pothik", "m", "prompt", "answer");
+        assert!(coll.record_episode(ep.clone()).unwrap());
+        assert!(!coll.record_episode(ep).unwrap());
+        assert_eq!(coll.get_stats(0).total_episodes, 1);
+        let lines = fs::read_to_string(dir.join("collected_episodes.jsonl")).unwrap();
+        assert_eq!(lines.lines().count(), 1);
+        let restarted = LearnCollector::new(dir.clone()).unwrap();
+        assert!(!restarted
+            .record_episode(CollectedEpisode::new(
+                "ep-same", "s", "pothik", "m", "prompt", "answer"
+            ))
+            .unwrap());
+        assert_eq!(restarted.get_stats(0).total_episodes, 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn post_chat(port: u16, body: &str, extra_header: &str) -> (u16, String) {
+        let mut last_error = String::from("no attempt");
+        for _ in 0..6 {
+            match post_chat_once(port, body, extra_header) {
+                Ok(response) => return response,
+                Err(err) => {
+                    last_error = err.to_string();
+                    thread::sleep(Duration::from_millis(40));
+                }
+            }
+        }
+        panic!("chat post failed: {last_error}");
+    }
+
+    fn post_chat_once(port: u16, body: &str, extra_header: &str) -> io::Result<(u16, String)> {
+        let mut stream = TcpStream::connect(("127.0.0.1", port))?;
+        let header = if extra_header.is_empty() {
+            String::new()
+        } else {
+            format!("\r\n{extra_header}")
+        };
+        let req = format!(
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}{header}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(req.as_bytes())?;
+        let mut resp = String::new();
+        stream.read_to_string(&mut resp)?;
+        let status = resp
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse().ok())
+            .ok_or_else(|| io::Error::other(format!("no HTTP status in {resp}")))?;
+        Ok((status, resp))
+    }
+
+    #[test]
+    fn upstream_failure_is_recorded_as_the_real_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "ojon-upstream-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let live = Arc::new(LearnCollector::new(dir.clone()).unwrap());
+        let binder = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = binder.local_addr().unwrap().port();
+        drop(binder);
+        let handle = LearnCollector::start_server(live.clone(), port).unwrap();
+        let body = r#"{"model":"local","messages":[{"role":"user","content":"hello"}]}"#;
+
+        let (status, resp) = post_chat(port, body, "");
+        assert_eq!(status, 503, "{resp}");
+        assert!(resp.contains("no upstream model configured"));
+        assert!(!resp.contains("training flywheel"));
+        assert!(!resp.contains("Generated via Ojon"));
+        assert!(!resp.contains("prompt_tokens"));
+
+        let closed = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let closed_port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let (failed_status, failed_resp) = post_chat(
+            port,
+            body,
+            &format!("x-ojon-upstream: http://127.0.0.1:{closed_port}/v1"),
+        );
+        assert_eq!(failed_status, 502, "{failed_resp}");
+        assert!(failed_resp.contains("upstream request failed"));
+        assert!(!failed_resp.contains("training flywheel"));
+
+        let mock = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mock_port = mock.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let (mut sock, _) = mock.accept().unwrap();
+            let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 1024];
+            loop {
+                let header_end = buf.windows(4).position(|mark| mark == b"\r\n\r\n");
+                if let Some(end) = header_end {
+                    let header = String::from_utf8_lossy(&buf[..end]);
+                    let length = header
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or(0);
+                    if buf.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+                match sock.read(&mut tmp) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                }
+            }
+            let payload = br#"{"id":"ok","choices":[{"message":{"role":"assistant","content":"real answer"}}]}"#;
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            );
+            let _ = sock.write_all(header.as_bytes());
+            let _ = sock.write_all(payload);
+            let _ = sock.flush();
+        });
+        let (ok_status, ok_resp) = post_chat(
+            port,
+            body,
+            &format!("x-ojon-upstream: http://127.0.0.1:{mock_port}/v1"),
+        );
+        assert_eq!(ok_status, 200, "{ok_resp}");
+        assert!(ok_resp.contains("real answer"));
+        assert!(!ok_resp.contains("training flywheel"));
+
+        live.stop();
+        let _ = handle.join();
+        let episodes = live.get_recent_episodes();
+        assert!(episodes.iter().any(|episode| {
+            episode.outcome == EpisodeOutcome::FailedRetry
+                && episode.user_prompt == "hello"
+                && episode
+                    .assistant_response
+                    .contains("no upstream model configured")
+        }));
+        assert!(episodes.iter().any(|episode| {
+            episode.outcome == EpisodeOutcome::FailedRetry
+                && episode
+                    .assistant_response
+                    .contains("upstream request failed")
+        }));
+        assert!(episodes.iter().any(|episode| {
+            episode.outcome == EpisodeOutcome::Unverified
+                && episode.assistant_response == "real answer"
+        }));
+        assert!(episodes
+            .iter()
+            .all(|episode| !episode.assistant_response.contains("training flywheel")));
         let _ = fs::remove_dir_all(&dir);
     }
 }
