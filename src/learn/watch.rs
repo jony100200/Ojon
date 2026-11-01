@@ -16,6 +16,8 @@ use super::collector::{parse_session_file, LearnCollector};
 
 const MAX_DEPTH: usize = 6;
 const MAX_FILES: usize = 4000;
+/// Codex rollouts can be many gigabytes. Leave those unread.
+const MAX_SESSION_BYTES: u64 = 64 * 1024 * 1024;
 const STATE_SCHEMA: &str = "ojon.watch_state.v1";
 
 /// One configured session directory.
@@ -122,7 +124,8 @@ impl SessionWatcher {
                 continue;
             }
             let mut files = Vec::new();
-            if let Err(err) = collect_session_files(&root, &storage_root, &mut files) {
+            if let Err(err) = collect_session_files(&root, &storage_root, &source.agent, &mut files)
+            {
                 errors.push(format!("{}: {err}", source.id));
                 continue;
             }
@@ -343,14 +346,67 @@ fn is_session_file(path: &Path) -> bool {
         .is_some_and(|ext| ext.eq_ignore_ascii_case("json") || ext.eq_ignore_ascii_case("jsonl"))
 }
 
+fn path_has_dir(path: &Path, dir_name: &str) -> bool {
+    path.components().any(|part| part.as_os_str() == dir_name)
+}
+
+fn file_name(path: &Path) -> &str {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+}
+
+fn within_size_cap(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|meta| meta.len() <= MAX_SESSION_BYTES)
+        .unwrap_or(false)
+}
+
+/// Agent watches open only the transcript that agent actually writes.
+fn accepts_watched_file(path: &Path, agent: &str) -> bool {
+    if !is_session_file(path) || !within_size_cap(path) || path_has_dir(path, "chunks") {
+        return false;
+    }
+    let name = file_name(path);
+    match agent.trim().to_ascii_lowercase().as_str() {
+        "grok" => name.eq_ignore_ascii_case("chat_history.jsonl"),
+        "kimi" => name.eq_ignore_ascii_case("wire.jsonl"),
+        "agy" => name.eq_ignore_ascii_case("transcript.jsonl"),
+        "codex" => name.starts_with("rollout-") && name.to_ascii_lowercase().ends_with(".jsonl"),
+        "claude" => !name.eq_ignore_ascii_case("history.jsonl"),
+        _ => {
+            if matches!(
+                name,
+                "updates.jsonl"
+                    | "events.jsonl"
+                    | "rewind_points.jsonl"
+                    | "prompt_history.jsonl"
+                    | "history.jsonl"
+                    | "transcript_full.jsonl"
+            ) {
+                return false;
+            }
+            if name.eq_ignore_ascii_case("transcript.jsonl") {
+                let full = path.with_file_name("transcript_full.jsonl");
+                if full.is_file() {
+                    return false;
+                }
+            }
+            true
+        }
+    }
+}
+
 fn collect_session_files(
     root: &Path,
     storage_root: &Path,
+    agent: &str,
     out: &mut Vec<PathBuf>,
 ) -> io::Result<()> {
     fn walk(
         dir: &Path,
         storage_root: &Path,
+        agent: &str,
         depth: usize,
         out: &mut Vec<PathBuf>,
     ) -> io::Result<()> {
@@ -358,7 +414,7 @@ fn collect_session_files(
             return Ok(());
         }
         if dir.is_file() {
-            if is_session_file(dir) && !dir.starts_with(storage_root) {
+            if accepts_watched_file(dir, agent) && !dir.starts_with(storage_root) {
                 out.push(dir.to_path_buf());
             }
             return Ok(());
@@ -372,27 +428,21 @@ fn collect_session_files(
                 continue;
             }
             if path.is_dir() {
-                let name = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("");
-                if matches!(name, ".git" | "target" | "node_modules" | ".venv") {
+                let name = file_name(&path);
+                if matches!(
+                    name,
+                    ".git" | "target" | "node_modules" | ".venv" | "chunks"
+                ) {
                     continue;
                 }
-                walk(&path, storage_root, depth + 1, out)?;
-            } else if is_session_file(&path) {
-                if path.file_name().and_then(|name| name.to_str()) == Some("transcript.jsonl") {
-                    let full = path.with_file_name("transcript_full.jsonl");
-                    if full.is_file() {
-                        continue;
-                    }
-                }
+                walk(&path, storage_root, agent, depth + 1, out)?;
+            } else if accepts_watched_file(&path, agent) {
                 out.push(path);
             }
         }
         Ok(())
     }
-    walk(root, storage_root, 0, out)
+    walk(root, storage_root, agent, 0, out)
 }
 
 fn join_errors(errors: &[String]) -> Option<String> {
@@ -702,5 +752,73 @@ mod tests {
         let expanded = super::expand_path("~/agent-sessions");
         assert_eq!(expanded, home.join("agent-sessions"));
         assert_ne!(expanded, PathBuf::from("~/agent-sessions"));
+    }
+
+    #[test]
+    fn named_agents_ignore_sidecar_and_duplicate_logs() {
+        let dir = temp_dir("watch-filter");
+        let storage = dir.join("collector");
+        let grok = dir.join("grok-session");
+        let agy = dir.join("brain").join("conv").join("logs");
+        fs::create_dir_all(&grok).unwrap();
+        fs::create_dir_all(&agy).unwrap();
+        fs::create_dir_all(agy.join("chunks").join("part")).unwrap();
+        fs::write(
+            grok.join("chat_history.jsonl"),
+            "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"record this session\"}]}\n{\"type\":\"reasoning\",\"encrypted_content\":\"CIPHERTEXT-NOT-STORED\",\"summary\":\"hidden-chain-of-thought\"}\n{\"type\":\"assistant\",\"model_id\":\"grok-test\",\"content\":\"Recorded.\"}\n",
+        )
+        .unwrap();
+        fs::write(
+            grok.join("updates.jsonl"),
+            "{\"type\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"do not record updates\"}]}\n{\"type\":\"assistant\",\"content\":\"nope\"}\n",
+        )
+        .unwrap();
+        fs::write(
+            agy.join("transcript.jsonl"),
+            "{\"type\":\"USER_INPUT\",\"content\":\"keep the short transcript\",\"step_index\":1}\n{\"type\":\"PLANNER_RESPONSE\",\"content\":\"kept the short one\",\"step_index\":2}\n",
+        )
+        .unwrap();
+        fs::write(
+            agy.join("transcript_full.jsonl"),
+            "{\"type\":\"USER_INPUT\",\"content\":\"do not keep the full transcript\",\"step_index\":1}\n{\"type\":\"PLANNER_RESPONSE\",\"content\":\"full copy\",\"step_index\":2}\n",
+        )
+        .unwrap();
+        fs::write(
+            agy.join("chunks").join("part").join("transcript.jsonl"),
+            "{\"type\":\"USER_INPUT\",\"content\":\"do not keep the chunk\",\"step_index\":1}\n{\"type\":\"PLANNER_RESPONSE\",\"content\":\"chunk copy\",\"step_index\":2}\n",
+        )
+        .unwrap();
+        let sources = write_sources(
+            &storage,
+            &format!(
+                r#"{{"sources":[{{"id":"grok","agent":"grok","path":"{}"}},{{"id":"agy","agent":"agy","path":"{}"}}]}}"#,
+                grok.display().to_string().replace('\\', "\\\\"),
+                dir.join("brain")
+                    .display()
+                    .to_string()
+                    .replace('\\', "\\\\")
+            ),
+        );
+        let collector = LearnCollector::new(storage.clone()).unwrap();
+        let mut watcher = SessionWatcher::open(&storage, Some(&sources));
+        let report = watcher.poll(&collector);
+        assert_eq!(report.files_read, 2, "{:?}", report.last_error);
+        assert_eq!(report.new_episodes, 2, "{:?}", report.last_error);
+        assert_eq!(report.episodes_by_agent.get("grok"), Some(&1));
+        assert_eq!(report.episodes_by_agent.get("agy"), Some(&1));
+        let episodes = stored(&storage);
+        let grok_ep = episodes
+            .iter()
+            .find(|ep| ep.app_id.starts_with("grok:"))
+            .unwrap();
+        assert_eq!(grok_ep.user_prompt, "record this session");
+        let rendered = serde_json::to_string(&episodes).unwrap();
+        assert!(!rendered.contains("CIPHERTEXT"));
+        assert!(!rendered.contains("hidden-chain-of-thought"));
+        assert!(!rendered.contains("do not record updates"));
+        assert!(!rendered.contains("do not keep the full"));
+        assert!(!rendered.contains("do not keep the chunk"));
+        assert!(rendered.contains("keep the short transcript"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

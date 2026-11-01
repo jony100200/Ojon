@@ -174,7 +174,7 @@ impl Draft {
     }
 }
 
-fn epoch_seconds(ts: Option<&str>) -> u64 {
+pub(crate) fn epoch_seconds(ts: Option<&str>) -> u64 {
     // RFC 3339 like 2026-10-30T01:23:45.678Z; a plain date arithmetic avoids a dependency.
     let Some(ts) = ts else { return 0 };
     let b = ts.as_bytes();

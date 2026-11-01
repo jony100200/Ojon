@@ -489,6 +489,12 @@ pub(crate) fn agent_bucket(app_id: &str) -> String {
         "agy".to_string()
     } else if id.starts_with("pothik") {
         "pothik".to_string()
+    } else if id.starts_with("grok") {
+        "grok".to_string()
+    } else if id.starts_with("kimi") {
+        "kimi".to_string()
+    } else if id.starts_with("codex") {
+        "codex".to_string()
     } else if id.is_empty() {
         "unknown".to_string()
     } else {
@@ -1633,8 +1639,8 @@ pub struct HarvestReceipt {
     pub redacted_count: usize,
 }
 
-/// Parse one session file. `agent` selects the harvester (`agy`, `claude`, `dolil`,
-/// `kimi`, `pothik`, or `auto`). Callers deduplicate by `episode_id`.
+/// Parse one session file. `agent` selects the harvester (`agy`, `claude`, `codex`,
+/// `dolil`, `grok`, `kimi`, `pothik`, or `auto`). Callers deduplicate by `episode_id`.
 pub(crate) fn parse_session_file(path: &Path, agent: &str) -> io::Result<Vec<CollectedEpisode>> {
     let ext = path
         .extension()
@@ -1644,11 +1650,13 @@ pub(crate) fn parse_session_file(path: &Path, agent: &str) -> io::Result<Vec<Col
     let kind = agent.trim().to_ascii_lowercase();
     match kind.as_str() {
         "claude" if ext == "jsonl" => crate::learn::harvest_claude::parse_claude_transcript(path),
+        "codex" if ext == "jsonl" => crate::learn::harvest_codex::parse_codex_rollout(path),
         "dolil" if ext == "jsonl" => crate::learn::harvest_dolil::parse_dolil_run(path),
+        "grok" if ext == "jsonl" => crate::learn::harvest_grok::parse_grok_chat(path),
         "kimi" if ext == "jsonl" => crate::learn::harvest_kimi::parse_kimi_wire(path),
         "agy" | "pothik" if ext == "json" => parse_json_agent_run(path),
         "agy" | "pothik" if ext == "jsonl" => parse_jsonl_agent_run(path),
-        "claude" | "dolil" | "kimi" => Ok(Vec::new()),
+        "claude" | "codex" | "dolil" | "grok" | "kimi" => Ok(Vec::new()),
         _ => {
             if ext == "json" {
                 parse_json_agent_run(path)
@@ -1659,6 +1667,10 @@ pub(crate) fn parse_session_file(path: &Path, agent: &str) -> io::Result<Vec<Col
                     crate::learn::harvest_claude::parse_claude_transcript(path)
                 } else if crate::learn::harvest_dolil::is_dolil_run(path) {
                     crate::learn::harvest_dolil::parse_dolil_run(path)
+                } else if crate::learn::harvest_grok::is_grok_chat(path) {
+                    crate::learn::harvest_grok::parse_grok_chat(path)
+                } else if crate::learn::harvest_codex::is_codex_rollout(path) {
+                    crate::learn::harvest_codex::parse_codex_rollout(path)
                 } else {
                     parse_jsonl_agent_run(path)
                 }
@@ -1884,6 +1896,7 @@ fn parse_jsonl_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpis
 
     let mut pending_agy_user: Option<String> = None;
     let mut pending_agy_step_idx: usize = 0;
+    let mut pending_agy_stamp: u64 = 0;
     let mut last_agy_test_passed: Option<bool> = None;
 
     for (idx, line) in reader.lines().enumerate() {
@@ -1904,6 +1917,9 @@ fn parse_jsonl_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpis
                             pending_agy_user = Some(c.to_string());
                             pending_agy_step_idx =
                                 val["step_index"].as_u64().unwrap_or(idx as u64) as usize;
+                            pending_agy_stamp = crate::learn::harvest_claude::epoch_seconds(
+                                val["created_at"].as_str(),
+                            );
                         }
                     }
                     continue;
@@ -2011,6 +2027,16 @@ fn parse_jsonl_agent_run(path: &std::path::Path) -> io::Result<Vec<CollectedEpis
                                 resp_text,
                             );
                             ep.tool_calls = parsed_tools;
+                            let stamp = if pending_agy_stamp > 0 {
+                                pending_agy_stamp
+                            } else {
+                                crate::learn::harvest_claude::epoch_seconds(
+                                    val["created_at"].as_str(),
+                                )
+                            };
+                            if stamp > 0 {
+                                ep.timestamp_epoch_s = stamp;
+                            }
                             if !synthesized_diffs.is_empty() {
                                 ep.git_diff = Some(synthesized_diffs.join("\n\n"));
                             }
