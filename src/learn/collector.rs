@@ -46,7 +46,7 @@ pub fn redact_secrets(input: &str) -> (String, bool) {
         }
     }
 
-    // 2. OpenAI format: sk- followed by 20+ alphanumeric/dashes
+    // 2. OpenAI format: sk- followed by 16+ alphanumeric/dashes
     cursor = 0;
     while let Some(pos) = out[cursor..].find("sk-") {
         let abs_pos = cursor + pos;
@@ -55,7 +55,7 @@ pub fn redact_secrets(input: &str) -> (String, bool) {
             .bytes()
             .take_while(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
             .count();
-        if token_len >= 20 {
+        if token_len >= 16 {
             out.replace_range(abs_pos..abs_pos + token_len, "[REDACTED_API_KEY]");
             redacted = true;
             cursor = abs_pos + "[REDACTED_API_KEY]".len();
@@ -2134,6 +2134,9 @@ mod tests {
         assert!(cleaned.contains("[REDACTED_API_KEY]"));
         assert!(cleaned.contains("[REDACTED_ANTHROPIC_KEY]"));
         assert!(cleaned.contains("[REDACTED_BEARER_TOKEN]"));
+        let (short, short_redacted) = redact_secrets("sk-abcdefghijklmno");
+        assert!(short_redacted);
+        assert!(!short.contains("sk-abcdefghijklmno"));
     }
 
     #[test]
