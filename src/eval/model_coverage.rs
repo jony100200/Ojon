@@ -4,6 +4,7 @@
 use crate::gguf::{inspect_gguf, inspect_gguf_tensors};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::fs;
 use std::io;
 use std::path::Path;
 
@@ -39,15 +40,51 @@ fn is_supported_projection(name: &str) -> bool {
         )
 }
 
+fn text_layer_count(path: &Path) -> io::Result<usize> {
+    let bytes = fs::read(path)?;
+    if bytes.is_empty() || bytes.len() > 2 * 1024 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "HF config must be 1 byte..2 MiB",
+        ));
+    }
+    let config: Value =
+        serde_json::from_slice(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes))
+            .map_err(io::Error::other)?;
+    let count = config
+        .pointer("/text_config/num_hidden_layers")
+        .or_else(|| config.get("num_hidden_layers"))
+        .and_then(Value::as_u64)
+        .filter(|n| (1..=4096).contains(n))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "HF config must declare num_hidden_layers",
+            )
+        })?;
+    Ok(count as usize)
+}
+
 /// Report measured tensor-layout eligibility only; does not edit any weights.
 pub fn inspect_edit_coverage(path: &Path) -> io::Result<Value> {
+    inspect_edit_coverage_with_config(path, None)
+}
+
+/// An optional HF config separates declared language blocks from auxiliary
+/// prediction blocks. It does not prove the function of the extra blocks.
+pub fn inspect_edit_coverage_with_config(
+    path: &Path,
+    hf_config: Option<&Path>,
+) -> io::Result<Value> {
     let summary = inspect_gguf(path)?;
     let tensors = inspect_gguf_tensors(path)?;
+    let language_layers = hf_config.map(text_layer_count).transpose()?;
     let high_precision = matches!(summary.file_type, Some(0 | 1 | 32));
     let source_supported =
         !summary.big_endian && summary.split_count.unwrap_or(1) == 1 && high_precision;
     let mut layers = BTreeMap::<usize, Layer>::new();
     let mut eligible_targets = Vec::new();
+    let mut auxiliary_targets = Vec::new();
     let mut uneditable_projections = Vec::new();
     let mut linear_indicators = 0usize;
     let mut experts = 0usize;
@@ -81,8 +118,12 @@ pub fn inspect_edit_coverage(path: &Path) -> io::Result<Value> {
             let exact_float = matches!(tensor.storage_type, 0 | 1 | 30);
             let eligible = source_supported && tensor.shape.len() == 2 && exact_float;
             if eligible {
-                layer.eligible_float_matrices += 1;
-                eligible_targets.push(tensor.name.as_str());
+                if language_layers.is_some_and(|n| layer_num >= n) {
+                    auxiliary_targets.push(tensor.name.as_str());
+                } else {
+                    layer.eligible_float_matrices += 1;
+                    eligible_targets.push(tensor.name.as_str());
+                }
             } else {
                 uneditable_projections.push(tensor.name.as_str());
             }
@@ -101,13 +142,22 @@ pub fn inspect_edit_coverage(path: &Path) -> io::Result<Value> {
         .collect::<Vec<_>>();
     let attention_layers = layers
         .iter()
-        .filter(|(_, layer)| layer.has_attention_output)
+        .filter(|(n, layer)| {
+            layer.has_attention_output && language_layers.is_none_or(|count| **n < count)
+        })
         .map(|(n, _)| *n)
         .collect::<Vec<_>>();
     let uncovered_layers = layers
         .iter()
-        .filter(|(_, layer)| layer.eligible_float_matrices == 0)
+        .filter(|(n, layer)| {
+            layer.eligible_float_matrices == 0 && language_layers.is_none_or(|count| **n < count)
+        })
         .map(|(n, _)| *n)
+        .collect::<Vec<_>>();
+    let auxiliary_block_indices = layers
+        .keys()
+        .copied()
+        .filter(|n| language_layers.is_some_and(|limit| *n >= limit))
         .collect::<Vec<_>>();
     Ok(json!({
         "schema":"ojon.model_edit_coverage.v1",
@@ -117,6 +167,10 @@ pub fn inspect_edit_coverage(path: &Path) -> io::Result<Value> {
         "file_bytes":summary.file_bytes,
         "source_eligible":source_supported,
         "layer_count_detected":layers.len(),
+        "declared_language_layers":language_layers,
+        "auxiliary_or_out_of_range_block_indices":auxiliary_block_indices,
+        "auxiliary_eligible_projection_count":auxiliary_targets.len(),
+        "auxiliary_projection_names_excluded":auxiliary_targets,
         "conventional_attention_layers":attention_layers,
         "layers_without_eligible_target":uncovered_layers,
         "linear_path_indicators":linear_indicators,
@@ -128,7 +182,7 @@ pub fn inspect_edit_coverage(path: &Path) -> io::Result<Value> {
         "model_loaded":false,
         "behaviour_effect_measured":false,
         "capability_retention_measured":false,
-        "warning":"Eligible tensors are only exact shape and storage matches for the existing GGUF float-matrix editor. Do not infer support for linear-attention, experts, vision, MTP or behavioural effectiveness."
+        "warning":"Eligible tensors are only exact shape and storage matches for the existing GGUF float-matrix editor. A supplied HF config excludes out-of-range layers from eligible counts; this is descriptive, not an editing enforcement gate. Do not infer support for linear-attention, experts, vision, MTP or behavioural effectiveness."
     }))
 }
 
@@ -152,5 +206,16 @@ mod tests {
         assert_eq!(layer_number("blk.3.ssm_a"), Some(3));
         assert_eq!(layer_number("blk.foo.ssm_a"), None);
         assert_eq!(layer_number("vision.blk.3.ssm_a"), None);
+    }
+    #[test]
+    fn hf_config_identifies_language_layer_bounds() {
+        let file = std::env::temp_dir().join(format!("ojon-hf-config-{}.json", std::process::id()));
+        fs::write(&file, br#"{"text_config":{"num_hidden_layers":32}}"#).unwrap();
+        assert_eq!(text_layer_count(&file).unwrap(), 32);
+        fs::write(&file, br#"{"num_hidden_layers":8}"#).unwrap();
+        assert_eq!(text_layer_count(&file).unwrap(), 8);
+        fs::write(&file, br#"{"text_config":{"num_hidden_layers":0}}"#).unwrap();
+        assert!(text_layer_count(&file).is_err());
+        fs::remove_file(file).unwrap();
     }
 }

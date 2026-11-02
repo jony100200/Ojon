@@ -6,6 +6,7 @@ pub mod method_select;
 pub mod model_coverage;
 pub mod quality;
 pub mod task_eval;
+pub mod task_receipt_audit;
 
 pub use benchmark::*;
 pub use behaviour_audit::*;
@@ -15,3 +16,4 @@ pub use method_select::*;
 pub use model_coverage::*;
 pub use quality::*;
 pub use task_eval::*;
+pub use task_receipt_audit::*;

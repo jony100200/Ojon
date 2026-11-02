@@ -119,17 +119,37 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             }
             Ok(true)
         }
-        "model-edit-coverage" => {
-            let model = PathBuf::from(next_argument(&mut args, "model GGUF path")?);
+        "task-receipt-audit" => {
+            let receipt = PathBuf::from(next_argument(&mut args, "Ojon task evaluation receipt JSON")?);
             match args.next() {
                 None => {}
                 Some(flag) if flag == "--json" => {}
-                _ => return Err(invalid("model-edit-coverage accepts only --json")),
+                _ => return Err(invalid("task-receipt-audit accepts only --json")),
             }
             if args.next().is_some() {
-                return Err(invalid("too many model-edit-coverage arguments"));
+                return Err(invalid("too many task-receipt-audit arguments"));
             }
-            let report = ojon_backend::eval::model_coverage::inspect_edit_coverage(&model)?;
+            let report = ojon_backend::eval::task_receipt_audit::audit_task_receipt_file(&receipt)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report["status"] == "REGRESSION_DETECTED" {
+                return Err(invalid("task receipt audit detected capability regression"));
+            }
+            Ok(true)
+        }
+        "model-edit-coverage" => {
+            let model = PathBuf::from(next_argument(&mut args, "model GGUF path")?);
+            let mut config = None;
+            while let Some(flag) = args.next() {
+                match flag.to_str() {
+                    Some("--json") => {}
+                    Some("--hf-config") if config.is_none() => {
+                        config = Some(PathBuf::from(next_argument(&mut args, "HF config.json")?));
+                    }
+                    _ => return Err(invalid("unknown model-edit-coverage option")),
+                }
+            }
+            let report = ojon_backend::eval::model_coverage::inspect_edit_coverage_with_config(
+                &model, config.as_deref())?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(true)
         }

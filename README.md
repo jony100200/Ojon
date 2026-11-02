@@ -38,6 +38,7 @@ Instead of juggling a dozen separate utilities, **Ojon aims to bring model optim
 | **Calibration Corpus** | Turn your own chats, docs and code into a clean, deduplicated calibration file with a size report. | Available (`corpus-build`) |
 | **Compare Before & After** | Check size, model behaviour and performance rather than guessing. | Available workflows; expanding |
 | **Behaviour Quality Audit** | Check held-out legitimate-request handling, capability retention, confidence bounds and behavioural controls from independently scored pairs; refuse unsupported quality claims. | Available (read-only CLI; external scoring required) |
+| **Task Receipt Audit** | Recheck every model result against the stored original and candidate scores; reject missing tasks, mismatched categories, fabricated aggregates and measured capability regressions. | Available (`task-receipt-audit`; read-only, source receipt required) |
 | **Model Editing Coverage** | Inspect real GGUF matrices to show supported structural targets and unsupported model paths before attempting an edit. | Available (read-only CLI preflight) |
 | **Uncensor Model** | Explore reduced refusal behaviour while testing whether useful abilities are preserved. | Experimental; automation in development |
 | **Fine-tune & Distil** | Optionally specialise a model, teach a smaller one from a larger one or recover performance. | Planned/experimental |

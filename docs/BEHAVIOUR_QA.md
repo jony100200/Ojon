@@ -79,6 +79,33 @@ The report separately includes `unnecessary_refusals_reduced` and `refusal_count
 
 In FrogNano's actual BF16 GGUF, the coverage inspector detects **33** block indices, including an index 32 outside the 32 main language blocks declared in the HF configuration. This likely reflects the additional MTP prediction layer; the tensor catalogue alone cannot prove that role. Inspect source configuration before classifying the extra block as an ordinary language layer.
 
+## Task receipt consistency checker (native Ojon output)
+
+```powershell
+cargo run --bin ojon -- task-receipt-audit "path\to\task-eval-report.json" --json
+```
+
+This reads Ojon's existing `ojon.quality_evidence.v1` task-evaluation
+receipt. It cross-checks every candidate against the baseline by task ID,
+category, pass/fail, and reported aggregate metrics. It rejects missing,
+duplicate or mismatched task rows and detects regressions among tasks the
+original solved. An undersized suite is reported as
+`SMOKE_ONLY_INSUFFICIENT_COVERAGE`, never a strong quality pass. Scores are
+**not cryptographically attested** and this command does not rerun the model
+or classify refusals. Behaviour-audit remains the separate held-out judgement
+gate. Use both measurements, not one in place of the other.
+
+For hybrid GGUFs, optionally pass the original Hugging Face configuration:
+
+```powershell
+cargo run --bin ojon -- model-edit-coverage "E:\LMStudio\models\KS-FrogNano\FrogNano-4B-BF16.gguf" --hf-config "E:\LMStudio\models\microsoft\FrogNano-4B-2609\config.json" --json
+```
+
+This separates declared language layers from extra tensor block indices,
+and excludes the extra projections from the compatibility count. It is
+**descriptive only**; a separate edit-plan validation stage must enforce
+these bounds.
+
 ## Next implementation chunks
 
 1. Porikkha-generated scorecards directly from captured runtime output (no manually typed labels).
