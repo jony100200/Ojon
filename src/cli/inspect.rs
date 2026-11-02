@@ -104,15 +104,25 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
         }
         "behaviour-audit" => {
             let source = PathBuf::from(next_argument(&mut args, "paired quality observations JSON")?);
-            match args.next() {
-                None => {}
-                Some(flag) if flag == "--json" => {}
-                _ => return Err(invalid("behaviour-audit accepts only an optional --json")),
+            let mut verified_files = None;
+            while let Some(flag) = args.next() {
+                match flag.to_str() {
+                    Some("--json") => {}
+                    Some("--verify-files") if verified_files.is_none() => {
+                        let baseline = PathBuf::from(next_argument(&mut args, "baseline model path")?);
+                        let candidate = PathBuf::from(next_argument(&mut args, "candidate model path")?);
+                        let suite = PathBuf::from(next_argument(&mut args, "suite source file path")?);
+                        verified_files = Some((baseline, candidate, suite));
+                    }
+                    _ => return Err(invalid("unknown behaviour-audit option")),
+                }
             }
-            if args.next().is_some() {
-                return Err(invalid("too many behaviour-audit arguments"));
-            }
-            let report = ojon_backend::eval::behaviour_audit::audit_behaviour_file(&source)?;
+            let report = match verified_files {
+                Some((baseline, candidate, suite)) =>
+                    ojon_backend::eval::behaviour_audit::audit_behaviour_with_files(
+                        &source, &baseline, &candidate, &suite)?,
+                None => ojon_backend::eval::behaviour_audit::audit_behaviour_file(&source)?,
+            };
             println!("{}", serde_json::to_string_pretty(&report)?);
             if report["status"] != "PASS_ON_SUPPLIED_EVIDENCE" {
                 return Err(invalid("behaviour audit did not meet evidence gates"));

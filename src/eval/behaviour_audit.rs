@@ -3,9 +3,10 @@
 //! The audit consumes separately scored observations and never runs or edits weights.
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
-use std::fs;
-use std::io::{self, ErrorKind};
+use std::fs::{self, File};
+use std::io::{self, BufReader, ErrorKind, Read};
 use std::path::Path;
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -206,9 +207,91 @@ pub fn audit_behaviour_file(path: &Path) -> io::Result<Value> {
     audit_behaviour(&input)
 }
 
+/// Stream a real file through SHA-256 without materialising checkpoint bytes
+/// in memory. A changed size/mtime during hashing invalidates the result.
+fn sha256_file(path: &Path) -> io::Result<String> {
+    let source = path.canonicalize()?;
+    let before = fs::metadata(&source)?;
+    if !before.is_file() || before.len() == 0 {
+        return Err(invalid("hash target must be a nonempty regular file"));
+    }
+    let mut reader = BufReader::with_capacity(1024 * 1024, File::open(&source)?);
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        digest.update(&buffer[..n]);
+    }
+    let after = fs::metadata(&source)?;
+    if before.len() != after.len() || before.modified()? != after.modified()? {
+        return Err(invalid("hash target changed during verification"));
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+/// Verify the receipt's declared digests against actual checkpoint and suite
+/// bytes. This does not independently attest model loading or judge accuracy.
+pub fn audit_behaviour_with_files(
+    report_path: &Path,
+    baseline_file: &Path,
+    candidate_file: &Path,
+    suite_file: &Path,
+) -> io::Result<Value> {
+    let mut report = audit_behaviour_file(report_path)?;
+    for (file, key) in [
+        (baseline_file, "baseline_sha256"),
+        (candidate_file, "candidate_sha256"),
+        (suite_file, "suite_sha256"),
+    ] {
+        let actual = sha256_file(file)?;
+        if report.get(key).and_then(Value::as_str) != Some(actual.as_str()) {
+            return Err(invalid(format!(
+                "{key} does not match actual file contents"
+            )));
+        }
+    }
+    report["evidence"] = json!("ACTUAL_FILE_SHA256_VERIFIED_RUNTIME_AND_JUDGE_UNATTESTED");
+    report["file_hash_verification"] = json!({
+        "baseline":true,"candidate":true,"suite":true,
+        "hash_algorithm":"SHA-256","mode":"read_only_streaming"
+    });
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sha256_matches_known_bytes_and_rejects_wrong_declared_hash() {
+        let directory =
+            std::env::temp_dir().join(format!("ojon-behaviour-hash-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let report_file = directory.join("report.json");
+        let original = directory.join("original.gguf");
+        let candidate = directory.join("candidate.gguf");
+        let suite = directory.join("suite.json");
+        fs::write(&original, b"original").unwrap();
+        fs::write(&candidate, b"candidate").unwrap();
+        fs::write(&suite, b"test suite").unwrap();
+        let mut evidence = fixture();
+        evidence["baseline"]["sha256"] = json!(sha256_file(&original).unwrap());
+        evidence["candidate"]["sha256"] = json!(sha256_file(&candidate).unwrap());
+        evidence["suite"]["sha256"] = json!(sha256_file(&suite).unwrap());
+        fs::write(&report_file, serde_json::to_vec(&evidence).unwrap()).unwrap();
+        let accepted =
+            audit_behaviour_with_files(&report_file, &original, &candidate, &suite).unwrap();
+        assert_eq!(accepted["file_hash_verification"]["baseline"], true);
+        assert_eq!(
+            accepted["evidence"],
+            "ACTUAL_FILE_SHA256_VERIFIED_RUNTIME_AND_JUDGE_UNATTESTED"
+        );
+        fs::write(&candidate, b"replaced model").unwrap();
+        assert!(audit_behaviour_with_files(&report_file, &original, &candidate, &suite).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
     fn fixture() -> Value {
         let mut cases = Vec::new();
         for i in 0..400 {

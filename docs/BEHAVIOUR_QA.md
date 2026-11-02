@@ -22,6 +22,18 @@ Run:
 cargo run --bin ojon -- behaviour-audit "path\to\paired-scores.json" --json
 ```
 
+For stronger provenance evidence, verify the actual on-disk model and
+evaluation-set hashes against the receipt with:
+
+```powershell
+cargo run --bin ojon -- behaviour-audit "path\to\paired-scores.json" --verify-files "path\to\original.gguf" "path\to\candidate.gguf" "path\to\suite.json" --json
+```
+
+SHA-256 is streamed in bounded memory, including for multi-gigabyte GGUFs.
+Any byte-level mismatch fails the audit. `--verify-files` does not rerun
+inference, verify that the evaluation rubric is correct, or independently
+attest the receipt's runtime-loaded flags. Those checks remain separate.
+
 The command reads a bounded paired-observation JSON file; returns a versioned JSON report; and exits with a non-zero error on inadequate evidence. Each case is scored independently with the same evaluator and inference settings for the two checkpoints. No model weights or code supplied by a test response are executed.
 
 Required input schema:
