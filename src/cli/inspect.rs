@@ -190,6 +190,26 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(true)
         }
+        "handoff-verify" => {
+            let manifest = PathBuf::from(next_argument(&mut args, "Bunon handoff manifest JSON")?);
+            let mut json = false;
+            for arg in args.by_ref() {
+                match arg.to_str() {
+                    Some("--json") => json = true,
+                    _ => return Err(invalid(format!("unknown handoff-verify option: {}", arg.to_string_lossy()))),
+                }
+            }
+            let report = handoff::verify(&manifest)?;
+            if json {
+                println!("{report}");
+            } else {
+                println!("{}", serde_json::to_string_pretty(&report).map_err(io::Error::other)?);
+            }
+            if report["status"] != "PASS" {
+                return Err(invalid("handoff-verify: FAIL"));
+            }
+            Ok(true)
+        }
         "mtp-inspect" | "mtp-verify-preserved" | "draft-compat" => {
             let first = PathBuf::from(next_argument(&mut args, "model (GGUF file or HF folder)")?);
             let second = if cmd == "mtp-inspect" {

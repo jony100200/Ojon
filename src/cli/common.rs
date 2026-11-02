@@ -36,6 +36,7 @@ Commands:
   ojon mtp-inspect <model.gguf|hf-folder> [--json]   Detect MTP/NextN heads (never invents them)
   ojon mtp-verify-preserved <source> <optimised> [--json]   FAIL if quantisation dropped MTP heads
   ojon draft-compat <target.gguf> <draft.gguf> [--json]   Speculative draft tokenizer identity
+  ojon handoff-verify <bunon-handoff.json> [--json]   Re-verify a Bunon model handoff (hashes, GGUF, MTP, draft)
   ojon recommend <quality-evidence.json> [--json]  Smallest verified model within tolerance
   ojon ara-fit <module-io-calibration.json> <new-lowrank-edit-recipe.json> --confirm [--json]
   ojon method-select <measured-quality-scores.json> [--json]
