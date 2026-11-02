@@ -2,7 +2,10 @@
 //! The source remains read-only. Float matrices are patched in a staged copy;
 //! a loader and refusal/capability evaluation must still validate the result.
 
-use crate::abliteration::{apply_directional_matrix, normalized_direction, MatrixRegion};
+use crate::abliteration::{
+    apply_directional_matrix, apply_projected_matrix, input_projection, normalized_direction,
+    MatrixRegion,
+};
 use crate::gguf::{inspect_gguf, inspect_gguf_tensors};
 use crate::resource::free_disk;
 use serde_json::{json, Value};
@@ -23,6 +26,8 @@ struct MatrixEdit {
     cols: usize,
     dtype: &'static str,
     direction: Vec<f64>,
+    input_direction: Option<Vec<f64>>,
+    protected_good_direction: bool,
     strength: f64,
 }
 
@@ -44,7 +49,10 @@ impl GgufAblationPlan {
             "output":self.output.to_string_lossy(),
             "source_bytes":self.bytes,
             "edited_tensors":self.edits.iter().map(|e|json!({"name":e.name,"rows":e.rows,
-                "columns":e.cols,"dtype":e.dtype,"strength":e.strength})).collect::<Vec<_>>(),
+                "columns":e.cols,"dtype":e.dtype,"strength":e.strength,
+                "method":if e.input_direction.is_some() {"TWO_SIDED_RANK_ONE_PROJECTION"} else {"OUTPUT_DIRECTION_PROJECTION"},
+                "good_output_protected":e.protected_good_direction
+            })).collect::<Vec<_>>(),
             "preserve_row_norms":self.preserve_row_norms,
             "original_model_modified":false,
             "activation_capture":"NOT_RUN",
@@ -211,6 +219,15 @@ pub fn prepare_gguf_abliteration_value(
             return Err(invalid("edit strength must be >0 and <=1"));
         }
         let direction = normalized_direction(entry, rows)?;
+        let input_direction = input_projection(entry, cols)?;
+        if input_direction.is_some() && preserve_row_norms {
+            return Err(invalid("two-sided projection requires preserve_row_norms=false for exact uncorrelated-input preservation"));
+        }
+        if entry.get("protected_good_direction").is_some() && preserve_row_norms {
+            return Err(invalid(
+                "good-output protection requires preserve_row_norms=false for exact orthogonality",
+            ));
+        }
         edits.push(MatrixEdit {
             name: name.to_owned(),
             offset,
@@ -218,6 +235,8 @@ pub fn prepare_gguf_abliteration_value(
             cols,
             dtype,
             direction,
+            input_direction,
+            protected_good_direction: entry.get("protected_good_direction").is_some(),
             strength,
         });
     }
@@ -309,18 +328,30 @@ pub fn run_gguf_abliteration(
             plan.edits.len(),
             edit.name
         ));
-        apply_directional_matrix(
-            &mut output,
-            MatrixRegion {
-                offset: edit.offset,
-                rows: edit.rows,
-                cols: edit.cols,
-                dtype: edit.dtype,
-            },
-            &edit.direction,
-            edit.strength,
-            plan.preserve_row_norms,
-        )?;
+        let region = MatrixRegion {
+            offset: edit.offset,
+            rows: edit.rows,
+            cols: edit.cols,
+            dtype: edit.dtype,
+        };
+        if let Some(input) = edit.input_direction.as_deref() {
+            apply_projected_matrix(
+                &mut output,
+                region,
+                &edit.direction,
+                Some(input),
+                edit.strength,
+                plan.preserve_row_norms,
+            )?;
+        } else {
+            apply_directional_matrix(
+                &mut output,
+                region,
+                &edit.direction,
+                edit.strength,
+                plan.preserve_row_norms,
+            )?;
+        }
     }
     output.flush()?;
     output.sync_all()?;
@@ -504,6 +535,125 @@ mod tests {
             .map(|b| f32::from_bits((u16::from_le_bytes(b.try_into().unwrap()) as u32) << 16))
             .collect::<Vec<_>>();
         assert_eq!(numbers, [0.0, 0.0, 0.0, 2.0]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn two_sided_projection_preserves_orthogonal_input_outputs() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("ojon-biproject-{}-{stamp}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let source = dir.join("original.gguf");
+        let edited = dir.join("edited.gguf");
+        gguf(&source, 0, 0);
+        // The original 2x2 tensor is 2*identity. The first column
+        // should remain unchanged with input_direction=[0,1].
+        let original = fs::read(&source).unwrap();
+        let recipe = json!({"schema":"ojon.abliteration.v1","preserve_row_norms":false,
+            "edits":[{"tensor":"blk.0.attn_output.weight",
+                      "direction":[1.0,1.0],"protected_good_direction":[1.0,0.0],
+                      "input_direction":[0.0,1.0],"strength":1.0}]});
+        let plan = prepare_gguf_abliteration_value(&source, &recipe, &edited).unwrap();
+        assert_eq!(
+            plan.as_json()["edited_tensors"][0]["method"],
+            "TWO_SIDED_RANK_ONE_PROJECTION"
+        );
+        assert_eq!(
+            plan.as_json()["edited_tensors"][0]["good_output_protected"],
+            true
+        );
+        run_gguf_abliteration(&plan, |_| {}).unwrap();
+        let mut f = File::open(&edited).unwrap();
+        f.seek(SeekFrom::Start(plan.edits[0].offset)).unwrap();
+        let mut buf = [0u8; 16];
+        f.read_exact(&mut buf).unwrap();
+        let values = buf
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        // Protected output direction e1: first row exactly unchanged.
+        // Orthogonal input e1: first column exactly unchanged;
+        // the edited component W[1,1] is removed.
+        assert_eq!(values, [2.0, 0.0, 0.0, 0.0]);
+        assert_eq!(fs::read(&source).unwrap(), original);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn two_sided_projection_changes_only_matched_input_subspace() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("ojon-biproject2-{}-{stamp}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let source = dir.join("original.gguf");
+        let edited = dir.join("edited.gguf");
+        gguf(&source, 0, 0);
+        let recipe = json!({"schema":"ojon.abliteration.v1","preserve_row_norms":false,
+            "edits":[{"tensor":"blk.0.attn_output.weight",
+                      "direction":[1.0,0.0],
+                      "input_good_activations":[[0.0,0.0],[0.0,0.0]],
+                      "input_bad_activations":[[1.0,1.0],[1.0,1.0]],
+                      "strength":1.0}]});
+        let plan = prepare_gguf_abliteration_value(&source, &recipe, &edited).unwrap();
+        run_gguf_abliteration(&plan, |_| {}).unwrap();
+        let mut f = File::open(&edited).unwrap();
+        f.seek(SeekFrom::Start(plan.edits[0].offset)).unwrap();
+        let mut buf = [0u8; 16];
+        f.read_exact(&mut buf).unwrap();
+        let v = buf
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        // W = diag(2,2), d=e1, input v=(1,1)/sqrt(2).
+        // d^T W v = sqrt(2), hence delta = outer(e1,[1,1]).
+        assert_eq!(v, [1.0, -1.0, 0.0, 2.0]);
+        // x=[1,-1] is orthogonal to the edit input direction.
+        let unchanged_before = [2.0f32, -2.0];
+        let unchanged_after = [v[0] - v[1], v[2] - v[3]];
+        assert_eq!(unchanged_after, unchanged_before);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn two_sided_rejects_malformed_activation_and_incompatible_norms() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("ojon-biproject-err-{}-{stamp}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let source = dir.join("original.gguf");
+        let output = dir.join("edited.gguf");
+        gguf(&source, 0, 0);
+        for input in [json!([0.0, 0.0]), json!([1.0]), json!([1.0, "bad"])] {
+            let recipe = json!({"schema":"ojon.abliteration.v1","preserve_row_norms":false,
+                "edits":[{"tensor":"blk.0.attn_output.weight","direction":[1.0,0.0],
+                          "input_direction":input,"strength":0.5}]});
+            assert!(prepare_gguf_abliteration_value(&source, &recipe, &output).is_err());
+        }
+        let conflict = json!({"schema":"ojon.abliteration.v1","preserve_row_norms":false,
+            "edits":[{"tensor":"blk.0.attn_output.weight","direction":[1.0,0.0],
+                      "input_direction":[1.0,0.0],
+                      "input_good_activations":[[0.0,0.0]],
+                      "input_bad_activations":[[1.0,0.0]],"strength":0.5}]});
+        assert!(prepare_gguf_abliteration_value(&source, &conflict, &output).is_err());
+        let recipe = json!({"schema":"ojon.abliteration.v1","preserve_row_norms":true,
+            "edits":[{"tensor":"blk.0.attn_output.weight","direction":[1.0,0.0],
+                      "input_direction":[1.0,0.0],"strength":0.5}]});
+        assert!(prepare_gguf_abliteration_value(&source, &recipe, &output).is_err());
+        let parallel = json!({"schema":"ojon.abliteration.v1","preserve_row_norms":false,
+            "edits":[{"tensor":"blk.0.attn_output.weight","direction":[1.0,0.0],
+                      "protected_good_direction":[1.0,0.0],"strength":0.5}]});
+        assert!(prepare_gguf_abliteration_value(&source, &parallel, &output).is_err());
+        assert!(!output.exists());
         fs::remove_dir_all(dir).unwrap();
     }
 }

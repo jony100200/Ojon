@@ -35,6 +35,9 @@ struct Edit {
     cols: usize,
     width: usize,
     direction: Vec<f64>,
+    /// Optional unit vector in input space. A rank-one, two-sided edit
+    /// leaves every input orthogonal to this direction EXACTLY unchanged.
+    input_direction: Option<Vec<f64>>,
     strength: f64,
     lora: Option<LowRank>,
 }
@@ -64,7 +67,9 @@ impl AblationPlan {
             "edited_tensors": self.edits.iter().map(|e| json!({
                 "name": e.tensor, "rows": e.rows, "columns": e.cols,
                 "dtype": e.dtype, "strength": e.strength,
-                "method": if e.lora.is_some(){"LOW_RANK_DELTA"}else{"DIRECTIONAL_PROJECTION"}
+                "method": if e.lora.is_some(){"LOW_RANK_DELTA"}
+                    else if e.input_direction.is_some(){"TWO_SIDED_RANK_ONE_PROJECTION"}
+                    else {"DIRECTIONAL_PROJECTION"}
             })).collect::<Vec<_>>(),
             "preserve_row_norms": self.preserve_row_norms,
             "model_inference": "NOT_RUN",
@@ -148,7 +153,7 @@ fn parse_activation_samples(v: &Value, label: &str) -> io::Result<Vec<Vec<f64>>>
 }
 
 fn unit_direction(v: &Value, rows: usize) -> io::Result<Vec<f64>> {
-    let direction = if let Some(d) = v.get("direction") {
+    let mut direction = if let Some(d) = v.get("direction") {
         if v.get("good_activations").is_some() || v.get("bad_activations").is_some() {
             return Err(invalid(
                 "supply either direction OR activation samples, not both",
@@ -174,6 +179,22 @@ fn unit_direction(v: &Value, rows: usize) -> io::Result<Vec<f64>> {
             direction.len()
         )));
     }
+    if let Some(good) = v.get("protected_good_direction") {
+        let good = normalise_vector(parse_vector(good, "protected_good_direction")?, rows)?;
+        // Keep the edit orthogonal to separately captured ordinary-behaviour
+        // activations, rather than projecting those activations away too.
+        let dot: f64 = direction.iter().zip(&good).map(|(a, b)| a * b).sum();
+        for (x, g) in direction.iter_mut().zip(&good) {
+            *x -= dot * g;
+        }
+    }
+    normalise_vector(direction, rows)
+}
+
+fn normalise_vector(direction: Vec<f64>, rows: usize) -> io::Result<Vec<f64>> {
+    if direction.len() != rows {
+        return Err(invalid("direction dimension does not match tensor"));
+    }
     // f64::hypot avoids overflow during norm accumulation.
     let norm = direction.iter().fold(0.0_f64, |sum, &x| sum.hypot(x));
     if !norm.is_finite() || norm < 1e-30 {
@@ -184,6 +205,36 @@ fn unit_direction(v: &Value, rows: usize) -> io::Result<Vec<f64>> {
 
 pub(crate) fn normalized_direction(value: &Value, rows: usize) -> io::Result<Vec<f64>> {
     unit_direction(value, rows)
+}
+
+/// The input-side direction must come from measured module-input data;
+/// it cannot safely be inferred from an output residual control vector.
+pub(crate) fn input_projection(value: &Value, cols: usize) -> io::Result<Option<Vec<f64>>> {
+    let direct = value.get("input_direction");
+    let good = value.get("input_good_activations");
+    let bad = value.get("input_bad_activations");
+    if direct.is_none() && good.is_none() && bad.is_none() {
+        return Ok(None);
+    }
+    if direct.is_some() && (good.is_some() || bad.is_some()) {
+        return Err(invalid(
+            "choose input_direction OR input activation samples, not both",
+        ));
+    }
+    let vector = if let Some(d) = direct {
+        parse_vector(d, "input_direction")?
+    } else {
+        let g = parse_activation_samples(
+            good.ok_or_else(|| invalid("missing input_good_activations"))?,
+            "input_good_activations",
+        )?;
+        let b = parse_activation_samples(
+            bad.ok_or_else(|| invalid("missing input_bad_activations"))?,
+            "input_bad_activations",
+        )?;
+        direction_from_activations(&g, &b)?
+    };
+    Ok(Some(normalise_vector(vector, cols)?))
 }
 
 /// Byte location and shape of one float matrix inside a GGUF tensor payload.
@@ -202,6 +253,17 @@ pub(crate) fn apply_directional_matrix(
     strength: f64,
     preserve_row_norms: bool,
 ) -> io::Result<()> {
+    apply_projected_matrix(file, region, direction, None, strength, preserve_row_norms)
+}
+
+pub(crate) fn apply_projected_matrix(
+    file: &mut File,
+    region: MatrixRegion<'_>,
+    direction: &[f64],
+    input_direction: Option<&[f64]>,
+    strength: f64,
+    preserve_row_norms: bool,
+) -> io::Result<()> {
     let MatrixRegion {
         offset,
         rows,
@@ -214,6 +276,12 @@ pub(crate) fn apply_directional_matrix(
         || strength == 0.0
     {
         return Err(invalid("invalid directional matrix edit"));
+    }
+    if input_direction.is_some_and(|v| v.len() != cols || v.iter().any(|x| !x.is_finite())) {
+        return Err(invalid("invalid input projection dimension"));
+    }
+    if input_direction.is_some() && preserve_row_norms {
+        return Err(invalid("row-normalisation breaks the exact input-subspace preservation guarantee; disable preserve_row_norms for two-sided projection"));
     }
     let width = weight_width(dtype)?;
     let row_bytes = cols
@@ -230,6 +298,7 @@ pub(crate) fn apply_directional_matrix(
         cols,
         width,
         direction: direction.to_vec(),
+        input_direction: input_direction.map(ToOwned::to_owned),
         strength,
         lora: None,
     };
@@ -487,6 +556,10 @@ pub(crate) fn prepare_abliteration_with_recipe(
             if entry.get("direction").is_some()
                 || entry.get("good_activations").is_some()
                 || entry.get("bad_activations").is_some()
+                || entry.get("protected_good_direction").is_some()
+                || entry.get("input_direction").is_some()
+                || entry.get("input_good_activations").is_some()
+                || entry.get("input_bad_activations").is_some()
             {
                 return Err(invalid("cannot combine LoRA with a directional projection"));
             }
@@ -494,11 +567,24 @@ pub(crate) fn prepare_abliteration_with_recipe(
         } else {
             None
         };
+        if entry.get("protected_good_direction").is_some() && preserve_row_norms {
+            return Err(invalid(
+                "protected good-output direction needs preserve_row_norms=false",
+            ));
+        }
         let direction = if lora.is_some() {
             Vec::new()
         } else {
             unit_direction(entry, rows)?
         };
+        let input_direction = input_projection(entry, cols)?;
+        if input_direction.is_some() {
+            if lora.is_some() || preserve_row_norms {
+                return Err(invalid(
+                    "input projection requires a directional edit with preserve_row_norms=false",
+                ));
+            }
+        }
         edits.push(Edit {
             tensor: name.to_owned(),
             offset: start + 8 + header_len,
@@ -507,6 +593,7 @@ pub(crate) fn prepare_abliteration_with_recipe(
             cols,
             width,
             direction,
+            input_direction,
             strength,
             lora,
         });
@@ -592,6 +679,15 @@ fn apply_edit(file: &mut File, edit: &Edit, preserve: bool) -> io::Result<()> {
             return Err(invalid("projection overflow"));
         }
     }
+    let scalar = if let Some(input) = &edit.input_direction {
+        let s: f64 = projection.iter().zip(input).map(|(p, v)| p * v).sum();
+        if !s.is_finite() {
+            return Err(invalid("two-sided projection overflow"));
+        }
+        Some(s)
+    } else {
+        None
+    };
     for i in 0..edit.rows {
         read_row(file, edit, i, &mut bytes, &mut row)?;
         let original_norm = if preserve {
@@ -608,8 +704,12 @@ fn apply_edit(file: &mut File, edit: &Edit, preserve: bool) -> io::Result<()> {
                 *v += edit.strength * delta;
             }
         } else {
-            for (v, &p) in row.iter_mut().zip(&projection) {
-                *v -= edit.strength * edit.direction[i] * p;
+            for (j, v) in row.iter_mut().enumerate() {
+                let delta = match (&edit.input_direction, scalar) {
+                    (Some(input), Some(s)) => edit.direction[i] * s * input[j],
+                    _ => edit.direction[i] * projection[j],
+                };
+                *v -= edit.strength * delta;
             }
         }
         if preserve {
