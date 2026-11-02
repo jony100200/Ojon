@@ -146,6 +146,22 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             }
             Ok(true)
         }
+        "paired-screen-audit" => {
+            let original = PathBuf::from(next_argument(&mut args, "original screen receipt JSON")?);
+            let candidate = PathBuf::from(next_argument(&mut args, "candidate screen receipt JSON")?);
+            match args.next() {
+                None => {}
+                Some(flag) if flag == "--json" => {}
+                _ => return Err(invalid("paired-screen-audit accepts only optional --json")),
+            }
+            if args.next().is_some() {
+                return Err(invalid("too many paired-screen-audit arguments"));
+            }
+            let report = ojon_backend::eval::paired_screen::compare_screen_files(
+                &original, &candidate)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(true)
+        }
         "model-edit-coverage" => {
             let model = PathBuf::from(next_argument(&mut args, "model GGUF path")?);
             let mut config = None;

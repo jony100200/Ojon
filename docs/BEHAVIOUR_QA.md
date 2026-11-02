@@ -120,6 +120,22 @@ these bounds.
 
 ## Next implementation chunks
 
+### Paired screening receipts
+
+```powershell
+ojon paired-screen-audit original-screen.json edited-screen.json --json
+```
+
+This read-only command validates matching case IDs, categories, detector
+versions and recorded aggregate counts before comparing decisions. It
+distinguishes **different generated wording** from **changed refusal
+decisions**. It never sets `publish_ready` true: detector phrases are
+not semantic proof, and a matched run must be complemented by independent
+review and held-out capability tests. In the FrogNano 26-case experiment,
+the original model had no detected unnecessary refusals, and the edit
+did not change any decision. Its proper screening status is
+`NO_BASELINE_OVERREFUSAL_TO_IMPROVE`, not a success claim.
+
 1. Porikkha-generated scorecards directly from captured runtime output (no manually typed labels).
 2. Persist actual model-file SHA-256 and file descriptors, measured tokenizer and chat-template fingerprints.
 3. Upgrade per-family compatibility table to include architecture-specific runtime validation, not name-based promises.
