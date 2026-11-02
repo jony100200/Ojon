@@ -152,6 +152,26 @@ added unnecessary hedging to another case. The paired screen now
 reports separate neutral/blunt detector hits and the relevant IDs.
 See [direct and blunt stress test](FROGNANO_DIRECT_BLUNT_2026_11_02.md).
 
+### Quality-preserving edit pilot — 2026-11-02
+
+The candidate selector formerly prioritised reducing the refusal rate
+measured on harmful controls. It now requires reduced benign over-refusal,
+retained harmful controls, and capability retention. Post-quantisation
+verification applies the same direction of comparison. The legacy
+--max-refusal-rate argument now has an explicit
+--max-benign-overrefusal-rate alias.
+
+Calibration was upgraded from generic assistant openings to 16 matched
+same-intent legitimate requests with contrasting responses. The new bundled
+screen contains 16 legitimate prompts and eight clearly harmful controls.
+A rebuilt CUDA control-vector generator worked and produced a vector
+used to create a new BF16 candidate and Q4_K_M variant.
+
+**Result:** 11/12 coding/reasoning/tool tasks on both original and edited
+Q4, but **no improvement** on the direct/blunt or OR-Bench-Hard screens.
+This candidate is REJECTED, not released. See
+[experiment and hashes](FROGNANO_QUALITY_EDIT_V2_2026_11_02.md).
+
 1. Porikkha-generated scorecards directly from captured runtime output (no manually typed labels).
 2. Persist actual model-file SHA-256 and file descriptors, measured tokenizer and chat-template fingerprints.
 3. Upgrade per-family compatibility table to include architecture-specific runtime validation, not name-based promises.

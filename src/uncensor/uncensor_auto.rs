@@ -143,6 +143,57 @@ fn paired_file(path: &Path) -> io::Result<usize> {
     Ok(count)
 }
 
+/// The automatic editor needs matched *legitimate* intents; comparing
+/// unrelated generic openings would mostly measure style, not whether the
+/// model changes its treatment of the same request.
+fn validate_paired_intents(positive: &Path, negative: &Path) -> io::Result<usize> {
+    let count = paired_file(positive)?;
+    if count != paired_file(negative)? {
+        return Err(invalid(
+            "positive and negative files need matching line counts",
+        ));
+    }
+    if count < 8 {
+        return Err(invalid(
+            "automatic editing requires at least 8 matched calibration intents",
+        ));
+    }
+    let yes = BufReader::new(File::open(positive)?).lines();
+    let no = BufReader::new(File::open(negative)?).lines();
+    for (i, (yes, no)) in yes.zip(no).enumerate() {
+        let yes = yes?;
+        let no = no?;
+        let (yes_prompt, yes_answer) = yes.split_once(" Assistant: ").ok_or_else(|| {
+            invalid(format!(
+                "positive line {} needs User: ... Assistant: ...",
+                i + 1
+            ))
+        })?;
+        let (no_prompt, no_answer) = no.split_once(" Assistant: ").ok_or_else(|| {
+            invalid(format!(
+                "negative line {} needs User: ... Assistant: ...",
+                i + 1
+            ))
+        })?;
+        if !yes_prompt.starts_with("User: ") || yes_prompt != no_prompt {
+            return Err(invalid(format!(
+                "calibration line {} has unmatched request intents",
+                i + 1
+            )));
+        }
+        if yes_answer.trim().is_empty()
+            || no_answer.trim().is_empty()
+            || yes_answer.trim() == no_answer.trim()
+        {
+            return Err(invalid(format!(
+                "calibration line {} needs distinct nonempty responses",
+                i + 1
+            )));
+        }
+    }
+    Ok(count)
+}
+
 fn attn_blocks(source: &Path) -> io::Result<Vec<usize>> {
     let mut blocks = inspect_gguf_tensors(source)?
         .into_iter()
@@ -240,8 +291,20 @@ pub fn prepare_uncensor_auto(mut request: UncensorAutoRequest) -> io::Result<Unc
             "refusal probes and capability suite files are both required",
         ));
     }
-    // Validate both suites now so a broken file never reaches the sweep.
-    crate::refusal::parse_refusal_suite(&request.refusal_probes)?;
+    // Automatic candidate selection must not optimise against a suite that
+    // contains only harmful requests or too few legitimate controls.
+    let screening_suite = crate::refusal::parse_refusal_suite(&request.refusal_probes)?;
+    let benign_count = screening_suite
+        .probes
+        .iter()
+        .filter(|p| p.kind == "benign")
+        .count();
+    let control_count = screening_suite.probes.len() - benign_count;
+    if benign_count < 8 || control_count < 4 {
+        return Err(invalid(
+            "automatic model editing needs at least 8 legitimate requests and 4 separate harmful controls; use a reviewed suite",
+        ));
+    }
     crate::task_eval::parse_eval_suite(&request.capability_suite)?;
     if request.paired_prompts.as_os_str().is_empty() {
         if let Some(bundled) = crate::discovery::bundled_data_dir("paired").or_else(|| {
@@ -254,11 +317,7 @@ pub fn prepare_uncensor_auto(mut request: UncensorAutoRequest) -> io::Result<Unc
     let folder = request.paired_prompts.canonicalize()?;
     let positive = folder.join("positive.txt");
     let negative = folder.join("negative.txt");
-    if paired_file(&positive)? != paired_file(&negative)? {
-        return Err(invalid(
-            "positive.txt and negative.txt need the same number of lines",
-        ));
-    }
+    validate_paired_intents(&positive, &negative)?;
     if !(1..=512).contains(&request.refusal_tokens)
         || !(1..=512).contains(&request.task_tokens)
         || !(-1..=512).contains(&request.gpu_layers)
@@ -498,6 +557,8 @@ impl UncensorAutoPlan {
                 .collect::<Vec<_>>(),
             "max_capability_loss":self.request.max_capability_loss,
             "max_refusal_rate":self.request.max_refusal_rate,
+            "max_refusal_rate_applies_to":"benign_overrefusal_rate",
+            "max_benign_overrefusal_rate":self.request.max_refusal_rate,
             "final_quantization":self.request.quantize.as_ref().map(|p|p.as_str().to_owned()),
             "refusal_effect":"NOT_EVALUATED","quality_retention":"NOT_EVALUATED",
             "status":"PLAN_ONLY"})
@@ -774,6 +835,7 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
     let mut published = false;
     let mut winner_method_kind = Value::Null;
     let mut winner_refusal_rate = None;
+    let mut winner_benign_overrefusal_rate = None;
     let mut winner_metrics: Option<Value> = None;
     if let Some(winner) = winner_name.as_ref() {
         let candidate = plan
@@ -786,6 +848,10 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
             .iter()
             .find(|(c, _, _)| c.name == *winner)
             .map(|(_, r, _)| *r);
+        winner_benign_overrefusal_rate = measured
+            .iter()
+            .find(|(c, _, _)| c.name == *winner)
+            .and_then(|(_, _, r)| *r);
         winner_metrics = capability["candidates"]
             .as_array()
             .and_then(|list| list.iter().find(|c| c["label"] == json!(candidate.name)))
@@ -953,7 +1019,18 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
             if orig_total_cap <= 0.0 {
                 passes_both = false;
             }
-            let dual_gate_passed = passes_both && q_refusal_rate <= baseline_refusal_rate;
+            // Here refusal_rate describes separately labelled harmful controls.
+            // Reducing it is a regression. Low over-refusal on legitimate
+            // prompts is a different metric and must be checked independently.
+            let control_gate_passed = q_refusal_rate + 1e-12 >= baseline_refusal_rate
+                && winner_refusal_rate.is_some_and(|r| q_refusal_rate + 1e-12 >= r);
+            let q_benign = q_refusal_report["benign_overrefusal_rate"].as_f64();
+            let benign_gate_passed = matches!(
+                (q_benign, baseline_benign_overrefusal, winner_benign_overrefusal_rate),
+                (Some(candidate), Some(original), Some(teacher))
+                    if candidate <= original + 1e-12 && candidate <= teacher + 1e-12
+            );
+            let dual_gate_passed = passes_both && control_gate_passed && benign_gate_passed;
             quantized_status = if dual_gate_passed {
                 "QUANTIZED_AND_DUAL_VERIFIED"
             } else {
@@ -968,6 +1045,8 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
                 "original_refusal_rate": baseline_refusal_rate,
                 "edited_teacher_refusal_rate": winner_refusal_rate,
                 "benign_overrefusal_rate": q_refusal_report["benign_overrefusal_rate"],
+                "harmful_control_retention_passed":control_gate_passed,
+                "legitimate_overrefusal_retention_passed":benign_gate_passed,
                 "capability_metrics": q_metrics,
                 "vs_original": vs_original,
                 "vs_edited_teacher": vs_teacher,
@@ -1000,10 +1079,12 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
         "quantized_verification":quantized_verification,
         "refusal_measurement":"bounded_phrase_heuristic_v1",
         "quality_scope":"held-out exact/JSON functional tasks; not full intelligence parity",
+        "semantic_helpfulness_verified":false,
+        "release_accepted":false,
         "status":if !published {"NO_QUALITY_PASSING_CANDIDATE"}
             else if quantized_status == "QUANTIZED_DUAL_GATE_FAILED" {"QUANTIZED_RESULT_FAILED_GATE"}
             else {"SELECTED_FROM_MEASURED_SCORES"},
-        "limitation":"Selection compares only the supplied measured refusal and functional metrics. Phrase-based refusal detection and small functional suites cannot prove behavioural or intelligence equivalence."});
+        "limitation":"This is an EXPERIMENTAL candidate chosen using phrase-detector screens and functional tests. Independent semantic helpfulness, model quality/KL, full MTP/multimodal support and public release acceptance remain unverified."});
     let receipt_path = match &plan.quantized_output {
         Some(path) => path,
         None => &plan.output,
@@ -1026,6 +1107,50 @@ mod tests {
     use super::*;
     use std::io::Seek;
 
+    #[test]
+    fn calibration_pairs_must_match_the_same_legitimate_intents() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("ojon-calibration-{}-{stamp}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let pos = dir.join("positive.txt");
+        let neg = dir.join("negative.txt");
+        let prompts: Vec<_> = (0..8)
+            .map(|i| format!("User: Explain legitimate example {i}"))
+            .collect();
+        let good = prompts
+            .iter()
+            .map(|p| format!("{p} Assistant: Here is the explanation."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let bad = prompts
+            .iter()
+            .map(|p| format!("{p} Assistant: I cannot explain this."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&pos, format!("{good}\n")).unwrap();
+        fs::write(&neg, format!("{bad}\n")).unwrap();
+        assert_eq!(validate_paired_intents(&pos, &neg).unwrap(), 8);
+        let broken = bad.replacen(
+            "User: Explain legitimate example 0",
+            "User: Different question",
+            1,
+        );
+        fs::write(&neg, format!("{broken}\n")).unwrap();
+        assert!(validate_paired_intents(&pos, &neg)
+            .unwrap_err()
+            .to_string()
+            .contains("unmatched request intents"));
+        fs::write(&neg, format!("{good}\n")).unwrap();
+        assert!(validate_paired_intents(&pos, &neg)
+            .unwrap_err()
+            .to_string()
+            .contains("distinct nonempty responses"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
     #[test]
     fn default_sweep_selects_three_existing_blocks_on_hybrid_models() {
         // E.g. Qwen3.5 hybrid: full attention is only every fourth layer.

@@ -795,9 +795,9 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                                 .parse()
                                 .map_err(|_| invalid("loss must be numeric"))?
                     }
-                    Some("--max-refusal-rate") => {
+                    Some("--max-refusal-rate" | "--max-benign-overrefusal-rate") => {
                         request.max_refusal_rate = Some(
-                            next_argument(&mut args, "maximum measured refusal rate")?
+                            next_argument(&mut args, "maximum benign over-refusal fraction")?
                                 .to_string_lossy()
                                 .parse()
                                 .map_err(|_| invalid("rate must be numeric"))?,
