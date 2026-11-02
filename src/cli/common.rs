@@ -19,6 +19,7 @@ Commands:
   ojon probe <model-path> [--json]   Identify model format/family without loading weights
   ojon behaviour-audit <paired-scores.json> [--verify-files <baseline.gguf> <candidate.gguf> <suite.json>] [--json]   Read-only audit; optional streaming SHA-256 verifies real file contents
   ojon task-receipt-audit <task-eval-report.json> [--json]   Cross-check real Ojon task rows against summary metrics and detect capability regressions
+  ojon community-challenge-audit <screen-a.json> <screen-b.json> [more...] [--json]   Verify identical task/settings evidence; never claim uncensorship from phrase checks
   ojon paired-screen-audit <original-refusal-receipt.json> <edited-refusal-receipt.json> [--json]   Compare measured response decisions; never claim gain without a real improvement
   ojon model-edit-coverage <model.gguf> [--json]   Show per-layer tensor eligibility and unsupported paths without loading weights
   ojon flint-inspect <model.gguf|dir> [--json]   Inspect Flint MoE 256-expert topology

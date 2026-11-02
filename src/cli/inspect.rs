@@ -9,6 +9,25 @@ use std::str::FromStr;
 
 pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result<bool> {
     match cmd {
+        "community-challenge-audit" => {
+            let mut paths = Vec::new();
+            for arg in args.by_ref() {
+                if arg == "--json" { continue; }
+                if arg.to_string_lossy().starts_with("--") {
+                    return Err(invalid("unknown community-challenge-audit option"));
+                }
+                paths.push(PathBuf::from(arg));
+            }
+            let report = ojon_backend::eval::community_challenge::audit_community_screens(&paths)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report["status"] == "INCOMPARABLE_SETTINGS" {
+                return Err(invalid("community challenge receipts have incompatible inference settings"));
+            }
+            if report["status"] == "INCOMPLETE_EVIDENCE" {
+                return Err(invalid("community challenge includes incomplete/error responses"));
+            }
+            Ok(true)
+        }
         "bahon-pack-verify" => {
             let folder = PathBuf::from(next_argument(&mut args, "Bahon packed model folder")?);
             if let Some(option) = args.next() {

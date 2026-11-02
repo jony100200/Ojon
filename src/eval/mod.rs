@@ -1,4 +1,5 @@
 pub mod benchmark;
+pub mod community_challenge;
 pub mod behaviour_audit;
 pub mod eval_session;
 pub mod method_select;
@@ -9,6 +10,7 @@ pub mod task_eval;
 pub mod task_receipt_audit;
 
 pub use benchmark::*;
+pub use community_challenge::*;
 pub use behaviour_audit::*;
 pub use eval_session::*;
 pub use method_select::*;
