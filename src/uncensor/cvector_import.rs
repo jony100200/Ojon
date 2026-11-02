@@ -18,6 +18,83 @@ pub fn recipe_from_control_vector(path: &Path, block: usize, strength: f64) -> i
     recipe_from_control_vector_blocks(path, &[(block, strength)])
 }
 
+/// Combine a measured residual output direction with real module-input
+/// activations captured from the exact matrix multiplication in llama.cpp.
+/// Fail closed if weight identity or input sample counts are not credible.
+pub fn recipe_with_measured_module_input(
+    vector: &Path,
+    captured: &Path,
+    block: usize,
+    strength: f64,
+) -> io::Result<Value> {
+    let mut recipe = recipe_from_control_vector(vector, block, strength)?;
+    let meta = std::fs::metadata(captured)?;
+    if meta.len() == 0 || meta.len() > 2 * 1024 * 1024 {
+        return Err(invalid("module input capture must be bounded JSON"));
+    }
+    let raw: Value = serde_json::from_slice(&std::fs::read(captured)?)?;
+    let weight = format!("blk.{block}.attn_output.weight");
+    if raw["schema"] != "ojon.module_input_capture.v1" || raw["weight"] != weight {
+        return Err(invalid(
+            "module capture was not recorded for selected weight",
+        ));
+    }
+    let good_calls = raw["good_calls"].as_u64().unwrap_or(0);
+    let bad_calls = raw["bad_calls"].as_u64().unwrap_or(0);
+    if good_calls < 4
+        || bad_calls < 4
+        || good_calls != bad_calls
+        || raw["good_rows"].as_u64().unwrap_or(0) == 0
+        || raw["bad_rows"].as_u64().unwrap_or(0) == 0
+    {
+        return Err(invalid("insufficient paired real module-input activations"));
+    }
+    let good = raw["input_good_mean"]
+        .as_array()
+        .ok_or_else(|| invalid("capture lacks input_good_mean"))?;
+    let bad = raw["input_bad_mean"]
+        .as_array()
+        .ok_or_else(|| invalid("capture lacks input_bad_mean"))?;
+    if good.is_empty() || good.len() != bad.len() || good.len() > 131072 {
+        return Err(invalid("capture input means have incompatible dimensions"));
+    }
+    let mut direction = Vec::with_capacity(good.len());
+    let mut norm = 0.0_f64;
+    for (g, b) in good.iter().zip(bad) {
+        let g = g
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| invalid("nonfinite good activation"))?;
+        let b = b
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| invalid("nonfinite bad activation"))?;
+        let delta = b - g;
+        norm = norm.hypot(delta);
+        direction.push(delta);
+    }
+    if !norm.is_finite() || norm < 1e-30 {
+        return Err(invalid(
+            "measured module-input difference has zero/invalid norm",
+        ));
+    }
+    recipe["preserve_row_norms"] = json!(false);
+    recipe["edits"][0]["input_direction"] =
+        json!(direction.iter().map(|x| x / norm).collect::<Vec<_>>());
+    recipe["input_capture_evidence"] = json!({
+        "source": captured.to_string_lossy(),
+        "weight": weight,
+        "good_calls": good_calls,
+        "bad_calls": bad_calls,
+        "good_rows": raw["good_rows"],
+        "bad_rows": raw["bad_rows"],
+        "width": good.len(),
+        "capture_scope": "MEASURED_MODULE_INPUT; SMALL_DEVELOPMENT_SAMPLE",
+        "model_behaviour": "NOT_EVALUATED"
+    });
+    Ok(recipe)
+}
+
 /// Multi-block recipe: one edit per (block, strength) pair. Blocks must be
 /// unique, and gguf_edit's recipe limit of 256 edits still applies.
 pub fn recipe_from_control_vector_blocks(path: &Path, edits: &[(usize, f64)]) -> io::Result<Value> {
@@ -230,6 +307,24 @@ mod tests {
         assert_eq!(recipe["edits"][0]["direction"], json!([0.6, 0.8]));
         assert!(recipe_from_control_vector(&path, 1, 0.5).is_err());
         assert!(recipe_from_control_vector(&path, 2, 1.5).is_err());
+        let capture = dir.join("captured.json");
+        let raw = json!({"schema":"ojon.module_input_capture.v1",
+            "weight":"blk.2.attn_output.weight","good_calls":4,"bad_calls":4,
+            "good_rows":60,"bad_rows":60,
+            "input_good_mean":[1.0,1.0],"input_bad_mean":[2.0,1.0]});
+        fs::write(&capture, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let two_sided = recipe_with_measured_module_input(&path, &capture, 2, 0.5).unwrap();
+        assert_eq!(two_sided["preserve_row_norms"], false);
+        assert_eq!(two_sided["edits"][0]["input_direction"], json!([1.0, 0.0]));
+        assert_eq!(two_sided["input_capture_evidence"]["good_calls"], 4);
+        let mut invalid_capture = raw;
+        invalid_capture["weight"] = json!("blk.3.attn_output.weight");
+        fs::write(&capture, serde_json::to_vec(&invalid_capture).unwrap()).unwrap();
+        assert!(recipe_with_measured_module_input(&path, &capture, 2, 0.5).is_err());
+        invalid_capture["weight"] = json!("blk.2.attn_output.weight");
+        invalid_capture["good_calls"] = json!(1);
+        fs::write(&capture, serde_json::to_vec(&invalid_capture).unwrap()).unwrap();
+        assert!(recipe_with_measured_module_input(&path, &capture, 2, 0.5).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
 }

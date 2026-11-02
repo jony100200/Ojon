@@ -54,7 +54,7 @@ Commands:
   ojon uncensor-trace-run <original-HF-folder-or-F16-GGUF> <paired-activations.jsonl> <new-model-folder-or-GGUF> [same options] --confirm
   ojon abliterate-gguf-plan <original-F16-BF16-GGUF> <direction-recipe.json> <new-model.gguf> [--json]
   ojon abliterate-gguf-run <original-F16-BF16-GGUF> <direction-recipe.json> <new-model.gguf> --confirm [--json]
-  ojon uncensor-cvector-plan <original-F16-BF16-GGUF> <control-vector.gguf> <new-model.gguf> --block N [--strength 0.7] [--json]
+  ojon uncensor-cvector-plan <original-F16-BF16-GGUF> <control-vector.gguf> <new-model.gguf> --block N [--strength 0.7] [--input-capture module-input.json] [--json]
   ojon uncensor-cvector-run <original-F16-BF16-GGUF> <control-vector.gguf> <new-model.gguf> --block N [--strength 0.7] --confirm [--json]
   ojon uncensor-auto-plan <original-F16-GGUF> <output-dir> --refusal-suite probes.json --task-suite tasks.json --paired prompts-folder [--strengths 0.1,0.2,0.35] [--blocks 13,14,15] [--max-capability-loss 0.02] [--max-benign-overrefusal-rate 0.05] [--quantize Q5_K_M] [--server llama-server] [--gpu-layers N] [--device ID] [--json]
   ojon uncensor-auto-run  <original-F16-GGUF> <output-dir> [same options] --confirm [--json]   Automatic refusal-edit sweep: every candidate is really measured; smallest-refusal quality-passing winner is published

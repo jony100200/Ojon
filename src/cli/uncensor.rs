@@ -336,6 +336,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let vector = PathBuf::from(next_argument(&mut args, "llama.cpp control vector GGUF")?);
             let output = PathBuf::from(next_argument(&mut args, "new edited GGUF")?);
             let (mut block, mut strength, mut confirmed, mut json) = (None, 0.7f64, false, false);
+            let mut input_capture: Option<PathBuf> = None;
             while let Some(option) = args.next() {
                 match option.to_str() {
                     Some("--block") => {
@@ -351,6 +352,12 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                             .to_string_lossy()
                             .parse()
                             .map_err(|_| invalid("strength must be numeric"))?
+                    }
+                    Some("--input-capture") => {
+                        input_capture = Some(PathBuf::from(next_argument(
+                            &mut args,
+                            "measured module-input capture JSON",
+                        )?))
                     }
                     Some("--confirm") => confirmed = true,
                     Some("--json") => json = true,
@@ -369,8 +376,13 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 return Err(invalid("uncensor-cvector-run requires --confirm"));
             }
             let block = block.ok_or_else(|| invalid("--block N is required"))?;
-            let recipe =
-                ojon_backend::cvector_import::recipe_from_control_vector(&vector, block, strength)?;
+            let recipe = if let Some(capture) = &input_capture {
+                ojon_backend::cvector_import::recipe_with_measured_module_input(
+                    &vector, capture, block, strength,
+                )?
+            } else {
+                ojon_backend::cvector_import::recipe_from_control_vector(&vector, block, strength)?
+            };
             let plan = ojon_backend::prepare_gguf_abliteration_value(&source, &recipe, &output)?;
             let model = if execute {
                 ojon_backend::run_gguf_abliteration(&plan, |line| eprintln!("{line}"))?
@@ -381,6 +393,8 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 "model":model,"control_vector":vector,"selected_block":block,
                 "direction_origin":"LLAMA_CPP_RESIDUAL_CONTROL_VECTOR",
                 "projection_target":"ATTENTION_OUTPUT_WEIGHT",
+                "projection_method":if input_capture.is_some() {"TWO_SIDED_RANK_ONE_PROJECTION"} else {"OUTPUT_DIRECTION_PROJECTION"},
+                "input_capture":input_capture,
                 "model_load":"NOT_TESTED","refusal_rate":"NOT_EVALUATED",
                 "capability_retention":"NOT_EVALUATED",
                 "status":if execute{"EDITED_GGUF_NOT_VALIDATED"}else{"PLAN_ONLY"}});
