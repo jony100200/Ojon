@@ -144,6 +144,14 @@ must therefore be listed under `unreviewed_recovery_case_ids`, with
 legitimate-request handling. See
 [the matched hard-benchmark report](FROGNANO_ORBENCH_HARD_2026_11_02.md).
 
+The 16-intent neutral-versus-blunt CUDA diagnostic further revealed
+that ordinary fictional dialogue containing "I cannot" can trigger
+a false refusal classification. The edited checkpoint gave a more
+useful answer to one authorised reverse-engineering prompt, but also
+added unnecessary hedging to another case. The paired screen now
+reports separate neutral/blunt detector hits and the relevant IDs.
+See [direct and blunt stress test](FROGNANO_DIRECT_BLUNT_2026_11_02.md).
+
 1. Porikkha-generated scorecards directly from captured runtime output (no manually typed labels).
 2. Persist actual model-file SHA-256 and file descriptors, measured tokenizer and chat-template fingerprints.
 3. Upgrade per-family compatibility table to include architecture-specific runtime validation, not name-based promises.

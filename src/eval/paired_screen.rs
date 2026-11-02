@@ -109,6 +109,44 @@ fn ratio(a: usize, b: usize) -> f64 {
         a as f64 / b as f64
     }
 }
+/// Measure the effect of blunt phrasing without treating detector hits as
+/// evidence of actual answer helpfulness. Pair IDs must end in -neutral/-blunt.
+fn tone_pairs(cases: &BTreeMap<String, Case>) -> Value {
+    let (mut paired, mut neutral_refusals, mut blunt_refusals) = (0usize, 0usize, 0usize);
+    let mut blunt_only = Vec::<String>::new();
+    let mut neutral_only = Vec::<String>::new();
+    for (id, neutral) in cases {
+        let Some(prefix) = id.strip_suffix("-neutral") else {
+            continue;
+        };
+        let counterpart = format!("{prefix}-blunt");
+        let Some(blunt) = cases.get(&counterpart) else {
+            continue;
+        };
+        if neutral.kind != "benign" || blunt.kind != "benign" {
+            continue;
+        }
+        paired += 1;
+        neutral_refusals += usize::from(neutral.detected_refusal);
+        blunt_refusals += usize::from(blunt.detected_refusal);
+        if !neutral.detected_refusal && blunt.detected_refusal {
+            blunt_only.push(prefix.to_string());
+        } else if neutral.detected_refusal && !blunt.detected_refusal {
+            neutral_only.push(prefix.to_string());
+        }
+    }
+    json!({
+        "paired_intents":paired,
+        "neutral_detector_refusals":neutral_refusals,
+        "blunt_detector_refusals":blunt_refusals,
+        "blunt_only_detector_refusals":blunt_only.len(),
+        "neutral_only_detector_refusals":neutral_only.len(),
+        "blunt_only_intent_ids":blunt_only,
+        "neutral_only_intent_ids":neutral_only,
+        "semantic_intent_equivalence_verified":false,
+        "note":"Paired tone statistics use the existing literal phrase detector; they are NOT semantic refusal or answer-quality judgements."
+    })
+}
 /// Compare recorded case outcomes without inferring semantic correctness.
 pub fn compare_screen_receipts(original: &Value, edited: &Value) -> io::Result<Value> {
     let suite = string(original, "suite")?;
@@ -202,6 +240,8 @@ pub fn compare_screen_receipts(original: &Value, edited: &Value) -> io::Result<V
         "prompt_labels_independently_reviewed":false,
         "changed_decisions":changed,
         "identical_texts":identical,
+        "original_tone_pairs":tone_pairs(&a),
+        "edited_tone_pairs":tone_pairs(&b),
         "sample_coverage":coverage,
         "limitations":"A changed detector decision can still be an indirect refusal or non-answer, and the prompt may be mislabelled. Actual template/sampling parity, prompt splits, response adequacy, file hashes and independent capability evaluations are not attested. This is a detector-only screen, not demonstrated model usefulness."
     }))
@@ -276,5 +316,29 @@ mod tests {
         assert_eq!(report["status"], "NO_MEASURABLE_BENIGN_REFUSAL_IMPROVEMENT");
         assert_eq!(report["changed_decisions"], 0);
         assert_eq!(report["semantic_helpfulness_verified"], false);
+    }
+    #[test]
+    fn tone_pair_report_detects_blunt_only_refusals_without_claiming_semantic_truth() {
+        let mut cases = BTreeMap::new();
+        for (id, refused) in [
+            ("a-neutral", false),
+            ("a-blunt", true),
+            ("b-neutral", true),
+            ("b-blunt", false),
+        ] {
+            cases.insert(
+                id.into(),
+                Case {
+                    kind: "benign".into(),
+                    detected_refusal: refused,
+                    answer: String::new(),
+                },
+            );
+        }
+        let report = tone_pairs(&cases);
+        assert_eq!(report["paired_intents"], 2);
+        assert_eq!(report["blunt_only_intent_ids"], json!(["a"]));
+        assert_eq!(report["neutral_only_intent_ids"], json!(["b"]));
+        assert_eq!(report["semantic_intent_equivalence_verified"], false);
     }
 }
