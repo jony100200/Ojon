@@ -16,6 +16,8 @@ Commands:
   ojon backends [--json]     Detect installed engines and show official download links
   ojon backends --probe [--json]     Explicitly probe installed runtime device IDs and quantizer formats\n  ojon settings path|show|set <key> <value>|clear <key>   Manage local per-user preferences
   ojon probe <model-path> [--json]   Identify model format/family without loading weights
+  ojon behaviour-audit <paired-scores.json> [--json]   Independently gate held-out capability, benign refusals and behavioural controls (read-only; rejects unverified claims)
+  ojon model-edit-coverage <model.gguf> [--json]   Show per-layer tensor eligibility and unsupported paths without loading weights
   ojon flint-inspect <model.gguf|dir> [--json]   Inspect Flint MoE 256-expert topology
   ojon flint-pipeline-plan <model.gguf|dir> [--json]   Plan multi-stage RoCo quantization and hardware fit
   ojon flint-evaluate <candidate.pending> [--reference-logits <path>] [--tool <perplexity>] [--gpu-layers N] [--json]

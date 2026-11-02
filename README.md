@@ -37,6 +37,8 @@ Instead of juggling a dozen separate utilities, **Ojon aims to bring model optim
 | **Speech Quant + WER Gate** | Quantize a whisper.cpp model with its own `whisper-quantize` (q8_0 / q5_0 / q4_0) and gate each candidate on word error rate against the original on your own clips. | Available (`whisper-quant-plan` / `whisper-quant-run` / `whisper-parity-plan` / `whisper-parity-run`) |
 | **Calibration Corpus** | Turn your own chats, docs and code into a clean, deduplicated calibration file with a size report. | Available (`corpus-build`) |
 | **Compare Before & After** | Check size, model behaviour and performance rather than guessing. | Available workflows; expanding |
+| **Behaviour Quality Audit** | Check held-out legitimate-request handling, capability retention, confidence bounds and behavioural controls from independently scored pairs; refuse unsupported quality claims. | Available (read-only CLI; external scoring required) |
+| **Model Editing Coverage** | Inspect real GGUF matrices to show supported structural targets and unsupported model paths before attempting an edit. | Available (read-only CLI preflight) |
 | **Uncensor Model** | Explore reduced refusal behaviour while testing whether useful abilities are preserved. | Experimental; automation in development |
 | **Fine-tune & Distil** | Optionally specialise a model, teach a smaller one from a larger one or recover performance. | Planned/experimental |
 | **Desktop Workstation** | Inspect models and manage supported workflows through a native graphical interface. | Pre-alpha |

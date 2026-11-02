@@ -102,6 +102,37 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             }
             Ok(true)
         }
+        "behaviour-audit" => {
+            let source = PathBuf::from(next_argument(&mut args, "paired quality observations JSON")?);
+            match args.next() {
+                None => {}
+                Some(flag) if flag == "--json" => {}
+                _ => return Err(invalid("behaviour-audit accepts only an optional --json")),
+            }
+            if args.next().is_some() {
+                return Err(invalid("too many behaviour-audit arguments"));
+            }
+            let report = ojon_backend::eval::behaviour_audit::audit_behaviour_file(&source)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if report["status"] != "PASS_ON_SUPPLIED_EVIDENCE" {
+                return Err(invalid("behaviour audit did not meet evidence gates"));
+            }
+            Ok(true)
+        }
+        "model-edit-coverage" => {
+            let model = PathBuf::from(next_argument(&mut args, "model GGUF path")?);
+            match args.next() {
+                None => {}
+                Some(flag) if flag == "--json" => {}
+                _ => return Err(invalid("model-edit-coverage accepts only --json")),
+            }
+            if args.next().is_some() {
+                return Err(invalid("too many model-edit-coverage arguments"));
+            }
+            let report = ojon_backend::eval::model_coverage::inspect_edit_coverage(&model)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            Ok(true)
+        }
         "dataset-audit" => {
             let path = PathBuf::from(next_argument(&mut args, "dataset file (.jsonl or .json)")?);
             let mut json = false;

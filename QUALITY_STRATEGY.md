@@ -32,6 +32,10 @@ proof of retained capability.
 
 ## Directional editing and automatic uncensoring
 
+For explicit GGUF per-layer structural eligibility and independent paired quality
+evidence gates, see [`docs/BEHAVIOUR_QA.md`](docs/BEHAVIOUR_QA.md).
+These read-only checks are **not** model edits or independent runtime attestations.
+
 Research and implementation gaps against Heretic 2.x ARA (including
 hybrid-attention coverage and capability gates) are tracked in
 [`docs/HERETIC_2_RESEARCH.md`](docs/HERETIC_2_RESEARCH.md).
