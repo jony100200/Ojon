@@ -575,6 +575,141 @@ pub fn inspect_gguf_tensors(path: &Path) -> io::Result<Vec<GgufTensor>> {
     Ok(inspect_gguf_inner(path, true)?.1)
 }
 
+/// Bounded identity view of GGUF metadata: integer/bool/float scalars, short
+/// strings (<= 4 KiB) and a count + SHA-256 digest for every array (tokenizer
+/// tokens, merges, token types...). Long strings such as chat templates are
+/// digested, not stored. No tensor data is read.
+#[derive(Clone, Debug, Default)]
+pub struct GgufMetadata {
+    pub scalars: BTreeMap<String, serde_json::Value>,
+    pub arrays: BTreeMap<String, ArrayDigest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArrayDigest {
+    pub count: u64,
+    pub sha256: String,
+}
+
+impl GgufMetadata {
+    pub fn int(&self, key: &str) -> Option<i64> {
+        self.scalars.get(key).and_then(serde_json::Value::as_i64)
+    }
+    pub fn str(&self, key: &str) -> Option<&str> {
+        self.scalars.get(key).and_then(serde_json::Value::as_str)
+    }
+}
+
+fn read_scalar(reader: &mut Reader, ty: u32) -> io::Result<serde_json::Value> {
+    use serde_json::json;
+    let width = scalar_width(ty).ok_or_else(|| invalid("unsupported GGUF metadata type"))?;
+    let v = match (ty, width) {
+        (7, _) => json!(reader.raw::<1>()?[0] != 0),
+        (0, _) => json!(reader.raw::<1>()?[0]),
+        (1, _) => json!(reader.raw::<1>()?[0] as i8),
+        (2, _) => json!(reader.u16()?),
+        (3, _) => json!(reader.u16()? as i16),
+        (4, _) => json!(reader.u32()?),
+        (5, _) => json!(reader.u32()? as i32),
+        (6, _) => json!(f32::from_bits(reader.u32()?)),
+        (10, _) => json!(reader.u64()?),
+        (11, _) => json!(reader.u64()? as i64),
+        (12, _) => json!(f64::from_bits(reader.u64()?)),
+        _ => return Err(invalid("unsupported GGUF scalar")),
+    };
+    Ok(v)
+}
+
+fn digest_array(reader: &mut Reader) -> io::Result<ArrayDigest> {
+    use sha2::{Digest, Sha256};
+    let elem_type = reader.u32()?;
+    let count = reader.u64()?;
+    let mut hasher = Sha256::new();
+    hasher.update(elem_type.to_le_bytes());
+    if elem_type == 8 {
+        if count > reader.size / 8 {
+            return Err(invalid("invalid GGUF string array length"));
+        }
+        for _ in 0..count {
+            let len = reader.u64()?;
+            reader.ensure(len)?;
+            let mut bytes = vec![0u8; len as usize];
+            reader.file.read_exact(&mut bytes)?;
+            hasher.update(len.to_le_bytes());
+            hasher.update(&bytes);
+        }
+    } else {
+        let width = scalar_width(elem_type)
+            .ok_or_else(|| invalid("unsupported GGUF array element type"))?;
+        let mut left = count
+            .checked_mul(width)
+            .ok_or_else(|| invalid("GGUF array overflow"))?;
+        reader.ensure(left)?;
+        let mut buf = vec![0u8; 1 << 16];
+        while left > 0 {
+            let n = left.min(buf.len() as u64) as usize;
+            reader.file.read_exact(&mut buf[..n])?;
+            hasher.update(&buf[..n]);
+            left -= n as u64;
+        }
+    }
+    Ok(ArrayDigest {
+        count,
+        sha256: format!("{:x}", hasher.finalize()),
+    })
+}
+
+/// Reads the metadata section only (see [`GgufMetadata`]).
+pub fn inspect_gguf_metadata(path: &Path) -> io::Result<GgufMetadata> {
+    use sha2::{Digest, Sha256};
+    let file = File::open(path)?;
+    let size = file.metadata()?.len();
+    let mut reader = Reader { file, size, big_endian: false };
+    if size < 24 || &reader.raw::<4>()? != b"GGUF" {
+        return Err(invalid("not a GGUF file (wrong magic)"));
+    }
+    let ver = reader.raw::<4>()?;
+    reader.big_endian = !matches!(u32::from_le_bytes(ver), 2 | 3);
+    if reader.big_endian && u32::from_be_bytes(ver) != 3 {
+        return Err(invalid("unsupported GGUF version (requires v2 or v3)"));
+    }
+    let _tensor_count = reader.u64()?;
+    let metadata_count = reader.u64()?;
+    if metadata_count > size / 12 {
+        return Err(invalid("impossible GGUF item counts for file size"));
+    }
+    let mut meta = GgufMetadata::default();
+    for _ in 0..metadata_count {
+        let key = reader
+            .string(65_535)?
+            .ok_or_else(|| invalid("oversized GGUF metadata key"))?;
+        let ty = reader.u32()?;
+        match ty {
+            8 => {
+                let n = reader.u64()?;
+                reader.ensure(n)?;
+                let mut bytes = vec![0u8; n as usize];
+                reader.file.read_exact(&mut bytes)?;
+                let value = if n <= 4096 {
+                    serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned())
+                } else {
+                    serde_json::json!({"bytes": n, "sha256": format!("{:x}", Sha256::digest(&bytes))})
+                };
+                meta.scalars.insert(key, value);
+            }
+            9 => {
+                let digest = digest_array(&mut reader)?;
+                meta.arrays.insert(key, digest);
+            }
+            _ => {
+                let v = read_scalar(&mut reader, ty)?;
+                meta.scalars.insert(key, v);
+            }
+        }
+    }
+    Ok(meta)
+}
+
 /// For GGUF-format llama-imatrix files: read bounded F32 in_sum2 and counts
 /// arrays and derive the mean squared activation-energy proxy per tensor.
 /// This is a proxy, not measured post-quantization task sensitivity.

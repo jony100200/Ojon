@@ -33,6 +33,9 @@ Commands:
   ojon optimize-workflow-plan <model-path> [--baseline current-Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--server-tool path-to-llama-server] [--goal balanced|smallest|fastest] [--precisions IQ4_XS,Q3_K_M] [--bench-prompt-tokens 512] [--bench-gen-tokens 128] [--bench-repetitions 3] [--balanced-speed-ratio 0.85] [--device auto|cpu|cuda|xpu] [--runtime-device SYCL0|CUDA0] [--gpu-layers 99] [--min-saving-percent 5] [--max-loss-points 0] [--json]
   ojon optimize-plan <model-path> [--device auto|cpu|cuda|xpu] [--json]   Compare candidate routes without converting
   ojon resource-plan <model-path> <existing-output-parent> [--mode hqq|openvino|autoround|gguf|pack|exl3] [--device cpu|cuda|xpu|auto] [--json]
+  ojon mtp-inspect <model.gguf|hf-folder> [--json]   Detect MTP/NextN heads (never invents them)
+  ojon mtp-verify-preserved <source> <optimised> [--json]   FAIL if quantisation dropped MTP heads
+  ojon draft-compat <target.gguf> <draft.gguf> [--json]   Speculative draft tokenizer identity
   ojon recommend <quality-evidence.json> [--json]  Smallest verified model within tolerance
   ojon ara-fit <module-io-calibration.json> <new-lowrank-edit-recipe.json> --confirm [--json]
   ojon method-select <measured-quality-scores.json> [--json]

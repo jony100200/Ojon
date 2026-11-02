@@ -58,6 +58,7 @@ pub use self::models::gguf;
 pub use self::models::hf;
 pub use self::models::llama;
 pub use self::models::mmproj;
+pub use self::models::mtp;
 pub use self::models::model_build;
 pub use self::models::whisper;
 pub use self::models::lora_merge;

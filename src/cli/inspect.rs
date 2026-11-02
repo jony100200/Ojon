@@ -190,6 +190,37 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(true)
         }
+        "mtp-inspect" | "mtp-verify-preserved" | "draft-compat" => {
+            let first = PathBuf::from(next_argument(&mut args, "model (GGUF file or HF folder)")?);
+            let second = if cmd == "mtp-inspect" {
+                None
+            } else {
+                Some(PathBuf::from(next_argument(&mut args, "second model")?))
+            };
+            let mut json = false;
+            for arg in args.by_ref() {
+                match arg.to_str() {
+                    Some("--json") => json = true,
+                    _ => return Err(invalid(format!("unknown {cmd} option: {}", arg.to_string_lossy()))),
+                }
+            }
+            let report = match (cmd, second) {
+                ("mtp-inspect", _) => mtp::inventory(&first)?,
+                ("mtp-verify-preserved", Some(out)) => mtp::verify_preserved(&first, &out)?,
+                (_, Some(draft)) => mtp::draft_compat(&first, &draft)?,
+                _ => unreachable!(),
+            };
+            if json {
+                println!("{report}");
+            } else {
+                println!("{}", serde_json::to_string_pretty(&report).map_err(io::Error::other)?);
+            }
+            let failed = report["status"] == "FAIL" || report["status"] == "INCOMPATIBLE";
+            if failed {
+                return Err(invalid(format!("{cmd}: {}", report["status"])));
+            }
+            Ok(true)
+        }
         "inspect" | "verify" => {
             let path = PathBuf::from(next_argument(&mut args, "GGUF file")?);
             if args.next().is_some() {
