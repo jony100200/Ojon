@@ -334,7 +334,6 @@ struct Workstation {
     )>,
     unc_auto_result: Option<serde_json::Value>,
     learn_subtab: usize,
-    learn_dataset_filter: usize,
     learn_train_quant: usize,
     learn_train_rank: usize,
     learn_last_action_msg: Option<String>,
@@ -512,7 +511,6 @@ impl Workstation {
             unc_auto_planned:None,
             unc_auto_result:None,
             learn_subtab: 0,
-            learn_dataset_filter: 0,
             learn_train_quant: 0,
             learn_train_rank: 0,
             learn_last_action_msg: None,
@@ -2239,7 +2237,6 @@ impl Workstation {
         let unc_auto_planned = self.unc_auto_planned.as_ref();
         let unc_auto_result = self.unc_auto_result.as_ref();
         let learn_subtab = &mut self.learn_subtab;
-        let learn_dataset_filter = &mut self.learn_dataset_filter;
         let learn_train_quant = &mut self.learn_train_quant;
         let _learn_train_rank = &mut self.learn_train_rank;
         let learn_last_action_msg = &mut self.learn_last_action_msg;
@@ -2685,7 +2682,7 @@ impl Workstation {
                         });
                     } else {
                         col.card(54.0, |bar|{
-                            bar.tabs(&["Optimize Model","Manual Tools","Uncensor Model","Ojon Learn"], workspace_tab);
+                            bar.tabs(&["Optimize Model","Manual Tools","Uncensor Model","Fine-tune with Bunon"], workspace_tab);
                         });
                         if *workspace_tab==0 {
                             col.glass_card(if *advanced_opt_expanded { 430.0 } else { 250.0 }, |card|{
@@ -3215,109 +3212,61 @@ impl Workstation {
                             });
                         }else if *workspace_tab==3{
                             col.glass_card(420.0, |card|{
-                                card.heading("02   OJON LEARN — DISTILLATION, FINE-TUNING & DATA FLYWHEEL");
-                                let learn_tabs = ["Collector & Telemetry", "Dataset Curation", "Post-Training (SFT)", "Evaluate & Promote"];
+                                card.heading("02   FINE-TUNE WITH BUNON — TRAINING DATA & JOBS");
+                                let learn_tabs = ["Collector Status", "Dataset Curation", "Fine-tune Plan", "Packages"];
                                 card.tabs(&learn_tabs, learn_subtab);
-
+                                // Bunon owns collection, curation, distillation and fine-tuning.
+                                // Ojon only forwards; every number shown here comes from bunon-learn.
+                                match ojon_backend::bunon_bridge::bunon_learn_binary() {
+                                    Some(path) => { card.status_pill(&format!("Bunon connected: {}", path.display()), true); }
+                                    None => { card.status_pill("Bunon not installed: quantisation and editing still work; install bunon-learn to fine-tune", false); }
+                                }
+                                let data_dir = std::path::PathBuf::from("collector");
+                                let run = |cmd: &str, args: Vec<std::ffi::OsString>| -> Result<serde_json::Value, String> {
+                                    let out = ojon_backend::bunon_bridge::forward_capture(cmd, &args).map_err(|e| e.to_string())?;
+                                    serde_json::from_str(out.trim()).map_err(|e| format!("bunon-learn {cmd} returned non-JSON output: {e}"))
+                                };
                                 if *learn_subtab == 0 {
-                                    card.label("Local Loopback Capture Gateway: intercepts coding assistant traces (/v1/chat/completions & /v1/traces) with PII redaction.");
-                                    card.horizontal(28.0, |row| {
-                                        row.label("Loopback Port: 8089");
-                                        row.status_pill("Gateway Ready (6 Utility Models Registered)", true);
-                                    });
-                                    card.label("Active Data Store: %APPDATA%\\Ojon\\collector\\collected_episodes.jsonl");
-                                    card.label("Outcome Verification: Compiler / test / schema exit codes recorded as reward signals (+1.0 / -1.0 / 0.0).");
-                                    if card.button_secondary("Refresh Collector Telemetry").clicked() {
-                                        let store_dir = ojon_backend::DaemonConfig::default().storage_dir;
-                                        match ojon_backend::LearnCollector::new(store_dir) {
-                                            Ok(coll) => {
-                                                let st = coll.get_stats(8089);
-                                                *learn_last_action_msg = Some(format!(
-                                                    "Telemetry refreshed: {} episodes ({} verified, {} failed, {} redacted).",
-                                                    st.total_episodes, st.verified_success_count, st.failed_retry_count, st.redacted_count
-                                                ));
-                                            }
-                                            Err(e) => {
-                                                *learn_last_action_msg = Some(format!("Collector telemetry check failed: {e}"));
-                                            }
-                                        }
+                                    card.label("Bunon's collector records agent sessions with redaction and execution-verified labels.");
+                                    if card.button_secondary("Refresh Collector Status").clicked() {
+                                        *learn_last_action_msg = Some(match run("learn-collector-status", vec!["--data-dir".into(), data_dir.clone().into(), "--json".into()]) {
+                                            Ok(v) => format!("Collector {}: {} episodes ({} verified, {} failed, {} unverified).",
+                                                v["liveness"].as_str().unwrap_or("unknown"), v["total_episodes"], v["verified_success_count"], v["failed_retry_count"], v["unverified_count"]),
+                                            Err(e) => format!("Collector status unavailable: {e}"),
+                                        });
                                     }
                                 } else if *learn_subtab == 1 {
-                                    card.label("Curated Public Trajectories & Dual-Buffer Anti-Catastrophic Splitter:");
-                                    card.dropdown("Dataset Catalog", learn_dataset_filter, &[
-                                        "All Curated Datasets (12 Canonical Registries)",
-                                        "SWE / Coding Agent (SI2CA, NVIDIA SWE, SWE-smith, SWE-Hero)",
-                                        "Developer Traces (SWE-chat, Share-Codex, Trace-Commons)",
-                                        "Reasoning & Planning (OpenThoughts-3, Nemotron-Agentic-v2)",
-                                        "Quarantined Dumps (FABLE.5, Fable-GPT-5.5) [Audit Required]"
-                                    ]);
-                                    card.label("Dual-Buffer Allocation: 8% Static Anchor (Math/Syntax/Tool-Decline) + K=3 Recency Window");
-                                    if card.button_secondary("Run Dual-Buffer Curation & Export").clicked() {
-                                        let store_dir = ojon_backend::DaemonConfig::default().storage_dir;
-                                        let ep_file = store_dir.join("collected_episodes.jsonl");
-                                        let out_dir = store_dir.join("curated");
-                                        let eps = ojon_backend::load_episodes_from_jsonl(&ep_file).unwrap_or_default();
-                                        let batch = ojon_backend::partition_dual_buffer(&eps, &ojon_backend::DualBufferConfig::default());
-                                        match ojon_backend::export_to_llamafactory(&batch, &out_dir) {
-                                            Ok(rec) => {
-                                                *learn_last_action_msg = Some(format!(
-                                                    "Curated split exported: {} anchor, {} recent, {} DPO pairs to {}.",
-                                                    rec.anchor_count, rec.recency_count, rec.dpo_pair_count, out_dir.display()
-                                                ));
-                                            }
-                                            Err(e) => {
-                                                *learn_last_action_msg = Some(format!("Curation export error: {e}"));
-                                            }
-                                        }
+                                    card.label("Dual-buffer curation (static anchors + recency window) into SFT/DPO exports, run by Bunon.");
+                                    if card.button_secondary("Run Curation & Export").clicked() {
+                                        let episodes = data_dir.join("collected_episodes.jsonl");
+                                        let out_dir = data_dir.join("curated");
+                                        *learn_last_action_msg = Some(match run("learn-curate", vec![episodes.into(), out_dir.clone().into(), "--json".into()]) {
+                                            Ok(v) => format!("Curated: {} anchor, {} recent, {} DPO pairs to {}.", v["anchor_count"], v["recency_count"], v["dpo_pair_count"], out_dir.display()),
+                                            Err(e) => format!("Curation failed: {e}"),
+                                        });
                                     }
                                 } else if *learn_subtab == 2 {
-                                    card.label("Hardware-Aware Post-Training & Distillation Planner:");
-                                    card.label("Probed Accelerator: NVIDIA RTX 4060 Ti 16GB (CUDA High VRAM, BF16 Supported) / Intel Arc / CPU");
-                                    card.dropdown("LoRA Training Strategy", learn_train_quant, &[
-                                        "NF4 QLoRA (Rank 16, Alpha 32, Targets: q,k,v,o,gate,up,down) [Recommended]",
-                                        "BF16 LoRA (Unquantized Base Model, 1B-4B Scale)",
+                                    card.label("Bunon plans LoRA/QLoRA fine-tuning; Ojon then merges the adapter and optimises the result.");
+                                    card.dropdown("Adapter Base Precision", learn_train_quant, &[
+                                        "4-bit NF4 QLoRA (--quant 4) [Recommended]",
+                                        "8-bit LoRA base (--quant 8)",
                                     ]);
-                                    card.label("Effective Batch Size: 8 (Microbatch 1, Grad Accum 8, Gradient Checkpointing: Active)");
-                                    if card.button_secondary("Generate LLaMA-Factory Recipe & Dry Run").clicked() {
-                                        let store_dir = ojon_backend::DaemonConfig::default().storage_dir;
-                                        let q_bits = if *learn_train_quant == 0 { Some(4) } else { None };
-                                        let base_model_str = if source.trim().is_empty() { "base_model" } else { source.trim() };
-                                        let plan = ojon_backend::LearnTrainPlan::new(
-                                            std::path::PathBuf::from(base_model_str),
-                                            store_dir.join("curated"),
-                                            store_dir.join("train_out"),
-                                            Some(q_bits),
-                                        );
-                                        match ojon_backend::execute_training_plan(&plan, true, None) {
-                                            Ok(rec) => {
-                                                *learn_last_action_msg = Some(format!(
-                                                    "Training plan validated ({}): {}",
-                                                    rec.status,
-                                                    rec.yaml_config_path
-                                                ));
-                                            }
-                                            Err(e) => {
-                                                *learn_last_action_msg = Some(format!("Training plan error: {e}"));
-                                            }
-                                        }
+                                    if card.button_secondary("Generate Fine-tune Plan (no training)").clicked() {
+                                        let base = if source.trim().is_empty() { "base_model" } else { source.trim() };
+                                        let bits = if *learn_train_quant == 0 { "4" } else { "8" };
+                                        *learn_last_action_msg = Some(match run("learn-train-plan", vec![base.into(), data_dir.join("curated").into(), data_dir.join("train_out").into(), "--quant".into(), bits.into(), "--json".into()]) {
+                                            Ok(v) => format!("Plan (not run): {:?} on {} — LoRA r={} alpha={}, base {}-bit.",
+                                                v["hardware"]["tier"], v["hardware"]["device_name"].as_str().unwrap_or("unknown device"), v["lora_rank"], v["lora_alpha"], v["quantization_bit"]),
+                                            Err(e) => format!("Fine-tune plan failed: {e}"),
+                                        });
                                     }
                                 } else {
-                                    card.label("Four-Way Candidate Comparison & Promotion Gate:");
-                                    card.label("Gates: Size Reduction >= 15% | Must-Pass Drop <= 1.0 pt | Silent Tool-Decline >= 80%");
-                                    card.horizontal(24.0, |pills| {
-                                        pills.status_pill("Tool-Decline: 88.0% (PASS)", true);
-                                        pills.status_pill("Must-Pass Score: 88.0 pts (PASS)", true);
-                                        pills.status_pill("Compression: 67.5% (PASS)", true);
-                                    });
-                                    card.label("Active Promoted Model: student-q4_k_m.gguf (Rollback Pointer: student-fused-fp16)");
-                                    if card.button_secondary("Evaluate & Verify Promotion Gates").clicked() {
-                                        let util_count = ojon_backend::default_utility_models().len();
-                                        let store_dir = ojon_backend::DaemonConfig::default().storage_dir;
-                                        let active_pkgs = ojon_backend::list_active_packages(&store_dir).map(|v| v.len()).unwrap_or(0);
-                                        *learn_last_action_msg = Some(format!(
-                                            "Promotion & package gates verified ({} utility models ready, {} active packages installed).",
-                                            util_count, active_pkgs
-                                        ));
+                                    card.label("Promotion is decided by Bunon's job verify using Ojon task-eval on the frozen held-out suite.");
+                                    if card.button_secondary("List Installed Packages").clicked() {
+                                        *learn_last_action_msg = Some(match run("learn-package-list", vec![data_dir.clone().into(), "--json".into()]) {
+                                            Ok(v) => format!("{} active packages under {}.", v.as_array().map_or(0, |a| a.len()), data_dir.display()),
+                                            Err(e) => format!("Package list unavailable: {e}"),
+                                        });
                                     }
                                 }
 
@@ -3722,7 +3671,7 @@ mod tests {
         hit(&mut ws, 202.0);
         assert_eq!(ws.workspace_tab, 1, "Manual Tools must remain accessible");
         hit(&mut ws, 246.0);
-        assert_eq!(ws.workspace_tab, 3, "Learn should open Ojon Learn view");
+        assert_eq!(ws.workspace_tab, 3, "Learn should open the Fine-tune with Bunon view");
         hit(&mut ws, 26.0);
         assert_eq!(ws.workspace_tab, 0);
         assert_eq!(ws.optimize_settings_tab, 0);

@@ -4,7 +4,7 @@
 
 ## 1. What Ojon does
 
-Ojon is designed to be **one place to inspect, quantize, and test models** using existing engines. It does not train a model or invent a new universal quantization format.
+Ojon is designed to be **one place to inspect, quantize, and test models** using existing engines. It does not train models (that is Bunon's job) or invent a new universal quantization format.
 
 Intended path: **Import → Inspect → Choose supported conversion → Preflight → Quantize → Test → Export**.
 
@@ -216,15 +216,14 @@ ojon probe /models/my-hf-model-folder --json
 ojon backends --json
 ```
 
-For optional LoRA/QLoRA supervised fine-tuning, install public [LLaMA-Factory](https://github.com/hiyouga/LlamaFactory) in a separate compatible Python environment. Supply a local Hugging Face model checkpoint, a local dataset with `dataset_info.json`, and a reviewed LLaMA-Factory YAML config. Ojon only preflights and launches its **existing** trainer; it does not implement training math.
+Fine-tuning, distillation and training-data curation are owned by [Bunon](https://github.com/jony100200/Bunon). Ojon forwards the legacy commands (`train-plan`, `train-run`, `learn-*`, `distill-plan`, `dataset-audit`, `retrieve`) unchanged to `bunon-learn` when Bunon is installed (`bunon-learn` on `PATH`, or `OJON_BUNON_BIN`). Without Bunon these commands exit with installation instructions; everything else in this guide keeps working.
 
 ```bash
-ojon train-plan /data/train-lora.yaml --json
-# Only after manually approving model, dataset and resource use:
-ojon train-run /data/train-lora.yaml --confirm
+ojon train-plan /data/train-lora.yaml --json        # runs bunon-learn train-plan
+ojon train-run /data/train-lora.yaml --confirm      # only after approving model, data and resources
 ```
 
-Teacher–student distillation is a future **separate** workflow; it is **not currently implemented**. QLoRA is parameter-efficient fine-tuning, not a substitute for a tested deployable quantized model.
+Ojon keeps the post-training steps: `lora-merge-plan`/`lora-merge-run` merge a compatible adapter, then the normal quantise / evaluate / verify workflow applies. Bunon calls back into Ojon (`ojon task-eval-run`) to score a merged candidate on the frozen held-out suite. QLoRA is parameter-efficient fine-tuning, not a substitute for a tested deployable quantized model.
 
 For supported GGUF LLMs, a quality-aware converter may use an **importance matrix** made from representative text with the official `llama-imatrix` binary:
 

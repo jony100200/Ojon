@@ -2117,67 +2117,6 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             }
             Ok(true)
         }
-        "train-plan" | "train-run" => {
-            let run = cmd == "train-run";
-            let config = PathBuf::from(next_argument(&mut args, "training YAML config")?);
-            let mut trainer = discovered_path(BackendId::LlamaFactory)
-                .unwrap_or_else(|| PathBuf::from("llamafactory-cli"));
-            let mut json = false;
-            let mut confirm = false;
-            while let Some(option) = args.next() {
-                match option.to_str() {
-                    Some("--tool") => {
-                        trainer = PathBuf::from(next_argument(&mut args, "trainer executable")?)
-                    }
-                    Some("--json") if !run => json = true,
-                    Some("--confirm") if run => confirm = true,
-                    _ => {
-                        return Err(invalid(format!(
-                            "unknown train option: {}",
-                            option.to_string_lossy()
-                        )))
-                    }
-                }
-            }
-            let plan = prepare_train(&config, &trainer)?;
-            if !run {
-                if json {
-                    println!("{}", plan.json());
-                } else {
-                    println!("trainer: {}", plan.trainer.display());
-                    println!("config: {}", plan.config.display());
-                    println!("model: {}", plan.model.display());
-                    println!(
-                        "dataset: {} (from {})",
-                        plan.dataset,
-                        plan.data_dir.display()
-                    );
-                    println!("output: {}", plan.output_dir.display());
-                    println!(
-                        "training: {}",
-                        if plan.quantization_bit.is_some() {
-                            "QLoRA"
-                        } else {
-                            "LoRA"
-                        }
-                    );
-                    println!("model_compatibility: NOT_VERIFIED; peak_VRAM: UNKNOWN");
-                    println!("status: PLAN_ONLY; no external process launched");
-                }
-            } else {
-                if !confirm {
-                    return Err(invalid("training may use substantial RAM/VRAM and write output; explicitly pass --confirm to start"));
-                }
-                eprintln!("Ojon: user-confirmed external training job; examine YAML/data permissions before executing.");
-                run_train(&plan)?;
-                println!(
-                    "trainer_exit: SUCCESS; output_dir: {}",
-                    plan.output_dir.display()
-                );
-                println!("quality_benchmark: NOT_RUN; distillation: NOT_IMPLEMENTED");
-            }
-            Ok(true)
-        }
         "plan" => {
             let plan = parse_plan(args)?;
             show_plan(&plan);

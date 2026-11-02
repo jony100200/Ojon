@@ -6,7 +6,7 @@
 
 Large models demand more storage, memory and expensive hardware. Ojon is a free, open-source workstation from **[Kalponic Studio](https://github.com/jony100200)** built to help you make AI models smaller, test what you actually lose, and get more out of the computer you already own.
 
-Instead of juggling a dozen separate utilities, **Ojon aims to bring model optimisation, uncensoring, fine-tuning and distillation into one straightforward desktop app.**
+Instead of juggling a dozen separate utilities, **Ojon aims to bring model inspection, quantisation, hardware-fit optimisation, behaviour editing, evaluation and verified release into one straightforward desktop app.** Fine-tuning and distillation are done by its companion project [Bunon](https://github.com/jony100200/Bunon); Ojon then merges, optimises and verifies the result.
 
 **[Explore the features](#what-ojon-is-for) · [Get started](#get-started) · [Help build Ojon](#help-build-ojon)**
 
@@ -42,7 +42,7 @@ Instead of juggling a dozen separate utilities, **Ojon aims to bring model optim
 | **Model Editing Coverage** | Inspect real GGUF matrices to show supported structural targets and unsupported model paths before attempting an edit. | Available (read-only CLI preflight) |
 | **Bahon Q8 Pack Inspection** | Independently verify the Bahon v1 packed-model manifest, SHA-256, Q8 G64 scales and F32 tensors using `ojon bahon-pack-verify MODEL_DIR --json`. No re-quantisation or inference is performed. | Experimental read-only interoperability gate |
 | **Uncensor Model** | Explore reduced refusal behaviour while testing whether useful abilities are preserved. | Experimental; automation in development |
-| **Fine-tune & Distil** | Optionally specialise a model, teach a smaller one from a larger one or recover performance. | Planned/experimental |
+| **Fine-tune with Bunon** | Optional hand-off: Bunon trains LoRA/QLoRA adapters, distils or recovers quality; Ojon merges and re-optimises. | Optional, requires Bunon |
 | **Desktop Workstation** | Inspect models and manage supported workflows through a native graphical interface. | Pre-alpha |
 | **Local-first & Open Source** | Bring your own supported tools and models, with no required hosted account. | Available |
 
@@ -64,7 +64,7 @@ Ojon's long-term goal is to support **all major AI model families**, using the r
 ## How it should work
 
 1. **Choose a model.** Ojon identifies what it is and checks compatible tools.
-2. **Choose your goal.** Make it smaller; optionally edit refusal behaviour, fine-tune or distil when supported.
+2. **Choose your goal.** Make it smaller; optionally edit refusal behaviour, or hand off to Bunon to fine-tune or distil.
 3. **Find the right approach.** Ojon compares suitable methods for your model and hardware.
 4. **Test the results.** Check whether it loads, how much memory it uses, how fast it runs and how well it performs.
 5. **Keep the best version.** Export the smallest candidate that passes your chosen tests — or get an honest report if none does.
@@ -92,31 +92,13 @@ cargo run --locked --features gui --bin ojon-gui
 cargo run --locked --bin ojon -- backends
 ```
 
-Collect local agent sessions with the headless daemon. It does not train a model and it does not upload episodes. Without a sources file it only accepts posts to `http://127.0.0.1:8089/v1/events`. To watch session directories, pass `--sources` or create `sources.json` in the data directory:
-
-```bash
-cargo run --locked --bin ojon -- learn-daemon-run --data-dir collector --sources sources.json
-```
-
-```json
-{
-  "sources": [
-    {"id": "claude", "agent": "claude", "path": "~/.claude/projects"},
-    {"id": "dolil", "agent": "dolil", "path": "agent_runs"},
-    {"id": "pothik", "agent": "pothik", "path": "runs"},
-    {"id": "kimi", "agent": "kimi", "path": "~/.kimi-code/sessions"},
-    {"id": "agy", "agent": "agy", "path": "transcripts"}
-  ]
-}
-```
-
-`agent` is `agy`, `claude`, `dolil`, `kimi`, `pothik`, or `auto`. The daemon stats those directories and opens a `.json` or `.jsonl` file only after its size or modification time changes. Episodes are deduplicated, secrets in the captured text are redacted, and a diff is stored without being treated as a passing test. Kimi wire imports keep assistant text and tool evidence without reasoning traces; every imported episode records its source session, event IDs, line span and record hash. Curation exports task/session/repository metadata and a `curation_receipt.json` that separates collected, verified, duplicate, exported and trained counts. DPO pairs require the same prompt and a later verified repair. `daemon_status.json` reports per-agent counts, the last collection time, errors, and `healthy`, `degraded`, or `stopped`.
+Agent-session collection, dataset curation, distillation datasets and LoRA/QLoRA training jobs moved to [Bunon](https://github.com/jony100200/Bunon) on 2026-11-02. The legacy `ojon learn-*`, `train-plan`, `train-run`, `distill-plan`, `dataset-audit` and `retrieve` commands still work: Ojon forwards them unchanged to Bunon's `bunon-learn` when it is installed (on `PATH` or via `OJON_BUNON_BIN`), and otherwise exits with a message explaining how to install it. Collected data, receipts and schema names are unchanged.
 
 Read the [User Guide](USER_GUIDE.md) for setup and supported workflows. For video quantisation, follow the [MiniMax H3 W4A4/NVFP4 guide](docs/MINIMAX_H3.md), which distinguishes packed W4A4 components from ComfyUI-compatible NVFP4 safetensors. The measured mixed-precision method is in [Recipe Search](docs/RECIPE_SEARCH.md).
 
 ## Where we're heading
 
-Our priorities are simple: **finish reliable model optimisation and meaningful before/after comparisons; make model editing practical; extend verified support to image, video, audio and utility models; and add optional fine-tuning and distillation.**
+Our priorities are simple: **finish reliable model optimisation and meaningful before/after comparisons; make model editing practical; extend verified support to image, video, audio and utility models; and hand off fine-tuning and distillation to Bunon through a stable, optional interface.**
 
 Every new model family must produce files that **actually work in their intended applications**, not just smaller files on disk.
 

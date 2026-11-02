@@ -9,7 +9,6 @@ pub mod common;
 pub mod diffusion;
 pub mod flint;
 pub mod inspect;
-pub mod learn;
 pub mod quant;
 pub mod uncensor;
 
@@ -24,6 +23,15 @@ pub fn run() -> io::Result<()> {
         Some(c) => c,
         None => return Err(common::invalid("command must be valid Unicode")),
     };
+
+    // Training data and training jobs moved to Bunon: forward the legacy commands.
+    if ojon_backend::bunon_bridge::is_forwarded(cmd) {
+        let status = ojon_backend::bunon_bridge::forward(cmd, args)?;
+        if status.success() {
+            return Ok(());
+        }
+        std::process::exit(status.code().unwrap_or(1));
+    }
 
     if auto::handle(cmd, &mut args)? {
         return Ok(());
@@ -41,9 +49,6 @@ pub fn run() -> io::Result<()> {
         return Ok(());
     }
     if diffusion::handle(cmd, &mut args)? {
-        return Ok(());
-    }
-    if learn::handle(cmd, &mut args)? {
         return Ok(());
     }
     if ocr::handle(cmd, &mut args)? {

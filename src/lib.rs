@@ -3,7 +3,6 @@
 
 pub mod core;
 pub mod eval;
-pub mod learn;
 pub mod models;
 pub mod quant;
 pub mod uncensor;
@@ -11,6 +10,7 @@ pub mod workflows;
 
 // Root-level module re-exports for transparent backward compatibility
 // Core
+pub use self::core::bunon_bridge;
 pub use self::core::discovery;
 pub use self::core::jobs;
 pub use self::core::probe;
@@ -64,7 +64,6 @@ pub use self::models::lora_merge;
 
 // Eval
 pub use self::eval::benchmark;
-pub use self::eval::distill;
 pub use self::eval::eval_session;
 pub use self::eval::method_select;
 pub use self::eval::quality;
@@ -76,7 +75,6 @@ pub use self::workflows::optimize_workflow;
 pub use self::workflows::options;
 pub use self::workflows::research_routes;
 pub use self::workflows::simple_workflow;
-pub use self::workflows::train;
 
 // Re-export specific public items
 pub use self::workflows::flint_pipeline;
@@ -126,10 +124,6 @@ pub use discovery::{
     hf_python_path, open_official_download_page, probe_backend_capabilities,
     probe_quantizer_capabilities, probe_quantizer_formats, probe_runtime_devices, BackendId,
     FoundBackend, Integration,
-};
-pub use distill::{
-    audit_dataset_file, prepare_distill_plan, retrieve_recipes, DatasetAuditReport, DatasetEntry,
-    DistillPlan, KnowledgeTier, RecipeMatch,
 };
 pub use exl3::{prepare_exl3, run_exl3, Exl3Plan, Exl3Request};
 pub use gguf::{
@@ -187,31 +181,6 @@ pub use sweep::{execute_sweep, parse_precisions, prepare_sweep, SweepPlan};
 pub use task_eval::{
     inspect_task_suite, parse_eval_suite, prepare_eval, run_eval, EvalPlan, EvalRequest, EvalSuite,
 };
-pub use train::{prepare_train, run_train, TrainPlan};
 pub use uncensor_auto::{prepare_uncensor_auto, run_uncensor_auto, UncensorAutoRequest};
 pub use uncensor_trace::{prepare_uncensor_from_trace, run_uncensor_from_trace, UncensorTracePlan};
 
-// Learn
-pub use self::learn::{
-    apply_supersession, assess_collector_liveness, collector, compute_content_hash,
-    create_knowledge_item,
-    create_knowledge_pack, create_model_release, create_skill_pack, curate, daemon,
-    default_utility_models, eval as learn_eval, evaluate_and_promote, execute_training_plan,
-    export_to_llamafactory, extract_clean_text, extract_episode_metadata,
-    fetch_online_knowledge_url, format_epoch_iso, get_dataset_by_id, harvest_agent_sessions,
-    has_deterministic_verification, hash_file_contents, import_and_sanitize_jsonl, install_package,
-    install_package_for_model, knowledge, list_active_packages, list_curated_datasets,
-    load_episodes_from_jsonl, load_knowledge_store, packages, parse_iso_date_to_epoch,
-    partition_dual_buffer, probe_host_hardware, redact_json_secrets, redact_secrets, registry,
-    rollback_package, sanitize_untrusted_knowledge, save_knowledge_store, sha256_bytes, sha256_hex,
-    temporal, train as learn_train, verify_package_integrity, AugmentedPromptResponse,
-    CandidateModelEvaluation, CandidateType, CollectedEpisode, CollectorLiveness, CollectorStats,
-    CuratedBatch,
-    CurationReceipt, DaemonConfig, DaemonStatus, DatasetCatalogEntry, DatasetCategory,
-    DpoPreferencePair, DualBufferConfig, EpisodeOutcome, ExtractedEpisodeMetadata, GateCheckResult,
-    HardwareDiagnosis, HardwareTier, HarvestReceipt, ImportReceipt, InstallReceipt, KnowledgeItem,
-    KnowledgeItemInput, KnowledgeSourceKind, LearnCollector, LearnDaemon, LearnTrainPlan, PackageKind,
-    PackageManifest, PackageMeta, PromotedModelPointer, PromotionDecision, PromotionPolicy, RollbackReceipt,
-    TemporalKnowledgeEngine, TemporalRetrievalQuery, TemporalSearchResult, ToolCallRecord,
-    TrainReceipt, UtilityModelSpec, CANONICAL_TOOL_DECLINE_SUITE, CURATED_DATASETS,
-};

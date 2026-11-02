@@ -33,11 +33,6 @@ Commands:
   ojon optimize-workflow-plan <model-path> [--baseline current-Q4.gguf] [--candidate name=smaller.gguf] [--suite tasks.json] [--output-dir folder] [--server-tool path-to-llama-server] [--goal balanced|smallest|fastest] [--precisions IQ4_XS,Q3_K_M] [--bench-prompt-tokens 512] [--bench-gen-tokens 128] [--bench-repetitions 3] [--balanced-speed-ratio 0.85] [--device auto|cpu|cuda|xpu] [--runtime-device SYCL0|CUDA0] [--gpu-layers 99] [--min-saving-percent 5] [--max-loss-points 0] [--json]
   ojon optimize-plan <model-path> [--device auto|cpu|cuda|xpu] [--json]   Compare candidate routes without converting
   ojon resource-plan <model-path> <existing-output-parent> [--mode hqq|openvino|autoround|gguf|pack|exl3] [--device cpu|cuda|xpu|auto] [--json]
-  ojon dataset-audit <dataset.jsonl> [--json]   Audit external dataset for drift, dead paths, staleness
-  ojon distill-plan  <dataset.jsonl> <output-dir> [--min-score 0.5] [--json]  Curate SFT split
-  ojon retrieve      <dataset.jsonl> <query> [--limit 5] [--min-score 0.4] [--json] [--markdown]
-  ojon train-plan <config.yaml> [--tool <llamafactory-cli>] [--json]
-  ojon train-run  <config.yaml> [--tool <llamafactory-cli>] --confirm
   ojon recommend <quality-evidence.json> [--json]  Smallest verified model within tolerance
   ojon ara-fit <module-io-calibration.json> <new-lowrank-edit-recipe.json> --confirm [--json]
   ojon method-select <measured-quality-scores.json> [--json]
@@ -139,23 +134,15 @@ Commands:
   ojon smoke     <model.gguf> [--tool <llama-cli>] [--tokens 16] [--gpu-layers 0] [--prompt text]
   ojon plan      <input.gguf> <output.gguf> [options]
   ojon quantize  <input.gguf> <output.gguf> [options]
-  ojon learn-collector-status [--port <port>] [--data-dir <path>] [--json]
-  ojon learn-collector-start  [--port <port>] [--data-dir <path>] [--non-blocking]
-  ojon learn-harvest          <agent-runs-dir> [--data-dir <path>] [--json]   Harvest agent session logs into collector episodes (verified, failed, unverified; secrets redacted)
-  ojon learn-dataset-list     [--category <name>] [--json]
-  ojon learn-dataset-import   <input.jsonl> <output.jsonl> [--json]
-  ojon learn-utility-models   [--json]   List the static catalogue of small utility models (OCR, embedding, reranker, detection) and their jobs
-  ojon learn-curate           <episodes.jsonl> <output-dir> [--anchor-ratio 0.08] [--recency-k 3] [--json]
-  ojon learn-train-plan       <model-dir> <dataset-dir> <output-dir> [--quant 4] [--json]
-  ojon learn-train-run        <model-dir> <dataset-dir> <output-dir> [--quant 4] [--dry-run] [--confirm]
-  ojon learn-promote          <eval-matrix.json> <candidate-id> <pointer-file> [--json]
-  ojon learn-knowledge-add    <store.jsonl> <source-url> <title> <domain> <content-file|text> [options]
-  ojon learn-temporal-query   <store.jsonl> <query-text> [--as-of <epoch|YYYY-MM-DD>] [--domain <d>] [--augment] [--json]
-  ojon learn-package-create   <knowledge|skill|release> <id> <name> <version> <input-path> <dest-dir> [options]
-  ojon learn-package-install  <pkg-dir> <install-root> [--json]
-  ojon learn-package-list     <install-root> [--json]   List installed knowledge/skill/release packages under an install root
-  ojon learn-package-rollback <knowledge|skill|release> <install-root> [--json]
-  ojon learn-daemon-run       [--port <port>] [--data-dir <path>] [--sources <file>] [--max-disk-mb <N>] [--timeout-s <N>]
+
+Training data and training jobs (owned by Bunon; forwarded to `bunon-learn`):
+  ojon learn-collector-status|learn-collector-start|learn-harvest|learn-utility-models
+  ojon learn-dataset-list|learn-dataset-import|learn-curate|learn-daemon-run
+  ojon learn-train-plan|learn-train-run|learn-promote|learn-knowledge-add|learn-temporal-query
+  ojon learn-package-create|learn-package-install|learn-package-list|learn-package-rollback
+  ojon dataset-audit|distill-plan|retrieve|train-plan|train-run
+  These run only when Bunon is installed (`bunon-learn` on PATH or OJON_BUNON_BIN);
+  arguments are passed through unchanged. Run `bunon-learn --help` for details.
 
 Quantization options:
   --tool <path>          Installed llama-quantize executable (default: llama-quantize in PATH)
@@ -180,8 +167,7 @@ Important:
   - Existing outputs are never overwritten; no backend is installed automatically.
   - 'smoke' optionally runs real llama-cli inference; exit status is NOT a quality assessment.
   - The native Kathamo interface is in the optional ojon-gui binary.
-  - Only externally configured LLaMA-Factory LoRA/QLoRA SFT is currently wired.
-  - Teacher/student distillation and automatic data generation are NOT implemented.
+  - Fine-tuning, distillation and dataset curation are Bunon's; Ojon merges compatible adapters and optimises the result.
   - Recommendation reads independently measured task metrics. It does not fabricate quality.
   - Agent probe/plan commands are read-only. Quantization sweeps and training need explicit --confirm.
   - Sweep conversion DOES NOT evaluate quality; it writes real results for later baseline comparison.
