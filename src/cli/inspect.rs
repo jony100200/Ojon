@@ -9,6 +9,17 @@ use std::str::FromStr;
 
 pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result<bool> {
     match cmd {
+        "bahon-pack-verify" => {
+            let folder = PathBuf::from(next_argument(&mut args, "Bahon packed model folder")?);
+            if let Some(option) = args.next() {
+                if option != "--json" || args.next().is_some() {
+                    return Err(invalid("bahon-pack-verify accepts only optional --json"));
+                }
+            }
+            let report = ojon_backend::models::bahon_pack::inspect_bahon_pack(&folder)?;
+            println!("{}", serde_json::to_string_pretty(&report.as_json())?);
+            Ok(true)
+        }
         "settings" => {
             let op = next_argument(&mut args, "settings subcommand (path/show/set/clear)")?;
             match op.to_str() {

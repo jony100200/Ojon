@@ -12,6 +12,7 @@ pub fn usage() {
 
 Commands:
   ojon inspect   <model.gguf>
+  ojon bahon-pack-verify <packed-model-dir> [--json]   Independent Bahon v1 Q8 pack integrity check (read-only)
   ojon verify    <model.gguf>
   ojon backends [--json]     Detect installed engines and show official download links
   ojon backends --probe [--json]     Explicitly probe installed runtime device IDs and quantizer formats\n  ojon settings path|show|set <key> <value>|clear <key>   Manage local per-user preferences

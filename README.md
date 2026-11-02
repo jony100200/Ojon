@@ -40,6 +40,7 @@ Instead of juggling a dozen separate utilities, **Ojon aims to bring model optim
 | **Behaviour Quality Audit** | Check held-out legitimate-request handling, capability retention, confidence bounds and behavioural controls; optionally SHA-256 verify the actual original, candidate and evaluation files. | Available (read-only CLI; external scoring and runtime evidence required) |
 | **Task Receipt Audit** | Recheck every model result against the stored original and candidate scores; reject missing tasks, mismatched categories, fabricated aggregates and measured capability regressions. | Available (`task-receipt-audit`; read-only, source receipt required) |
 | **Model Editing Coverage** | Inspect real GGUF matrices to show supported structural targets and unsupported model paths before attempting an edit. | Available (read-only CLI preflight) |
+| **Bahon Q8 Pack Inspection** | Independently verify the Bahon v1 packed-model manifest, SHA-256, Q8 G64 scales and F32 tensors using `ojon bahon-pack-verify MODEL_DIR --json`. No re-quantisation or inference is performed. | Experimental read-only interoperability gate |
 | **Uncensor Model** | Explore reduced refusal behaviour while testing whether useful abilities are preserved. | Experimental; automation in development |
 | **Fine-tune & Distil** | Optionally specialise a model, teach a smaller one from a larger one or recover performance. | Planned/experimental |
 | **Desktop Workstation** | Inspect models and manage supported workflows through a native graphical interface. | Pre-alpha |
