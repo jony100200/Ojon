@@ -165,13 +165,12 @@ fn attn_blocks(source: &Path) -> io::Result<Vec<usize>> {
 }
 
 fn default_sweep_blocks(blocks: &[usize]) -> Vec<usize> {
-    let middle = blocks[blocks.len() * 2 / 3];
-    [middle.wrapping_sub(1), middle, middle + 1]
-        .into_iter()
-        .filter(|b| blocks.contains(b))
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect()
+    // Hybrid architectures often expose conventional attention output only
+    // every few layers. Index the supported blocks rather than assuming
+    // that adjacent numeric layer IDs are present.
+    let middle = blocks.len() * 2 / 3;
+    let start = middle.saturating_sub(1).min(blocks.len().saturating_sub(3));
+    blocks[start..(start + 3).min(blocks.len())].to_vec()
 }
 
 pub fn prepare_uncensor_auto(mut request: UncensorAutoRequest) -> io::Result<UncensorAutoPlan> {
@@ -1026,6 +1025,15 @@ pub fn run_uncensor_auto(plan: &UncensorAutoPlan, mut log: impl FnMut(&str)) -> 
 mod tests {
     use super::*;
     use std::io::Seek;
+
+    #[test]
+    fn default_sweep_selects_three_existing_blocks_on_hybrid_models() {
+        // E.g. Qwen3.5 hybrid: full attention is only every fourth layer.
+        let sparse = [3, 7, 11, 15, 19, 23, 27, 31];
+        assert_eq!(default_sweep_blocks(&sparse), vec![19, 23, 27]);
+        assert_eq!(default_sweep_blocks(&[0, 1, 2]), vec![0, 1, 2]);
+        assert_eq!(default_sweep_blocks(&[0, 1, 2, 3, 4, 5]), vec![3, 4, 5]);
+    }
 
     fn write_mock_model(path: &Path) {
         fn write_str(f: &mut File, value: &str) {

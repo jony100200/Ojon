@@ -32,6 +32,10 @@ proof of retained capability.
 
 ## Directional editing and automatic uncensoring
 
+Research and implementation gaps against Heretic 2.x ARA (including
+hybrid-attention coverage and capability gates) are tracked in
+[`docs/HERETIC_2_RESEARCH.md`](docs/HERETIC_2_RESEARCH.md).
+
 An original single-file little-endian F16/BF16/F32 GGUF can be edited
 directly with a measured activation direction. Ojon writes a separate GGUF
 and recipe receipt while preserving the original. The supported projection targets are exact
