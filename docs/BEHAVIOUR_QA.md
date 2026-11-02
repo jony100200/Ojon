@@ -136,6 +136,14 @@ the original model had no detected unnecessary refusals, and the edit
 did not change any decision. Its proper screening status is
 `NO_BASELINE_OVERREFUSAL_TO_IMPROVE`, not a success claim.
 
+The next OR-Bench-Hard run found a single apparent detector improvement
+across 40 difficult prompts. Review showed that the changed model answer
+still did not address the request. A changed phrase-detector decision
+must therefore be listed under `unreviewed_recovery_case_ids`, with
+`semantic_helpfulness_verified=false`, not advertised as improved
+legitimate-request handling. See
+[the matched hard-benchmark report](FROGNANO_ORBENCH_HARD_2026_11_02.md).
+
 1. Porikkha-generated scorecards directly from captured runtime output (no manually typed labels).
 2. Persist actual model-file SHA-256 and file descriptors, measured tokenizer and chat-template fingerprints.
 3. Upgrade per-family compatibility table to include architecture-specific runtime validation, not name-based promises.
