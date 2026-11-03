@@ -338,7 +338,8 @@ where
             return Err(invalid(format!("refusing to overwrite {}", out_path.display())));
         }
     }
-    fs::write(&tt_path, format!("{prefix}{}", render_full(levels)))?;
+    let mtp_pin = mtp_block_pin(&plan.job.source, plan.job.base)?;
+    fs::write(&tt_path, format!("{mtp_pin}{prefix}{}", render_full(levels)))?;
     let started = Instant::now();
     let mut q = prepare_gguf(&plan.job.source, &out_path, &plan.job.quantize_tool, main_precision_for(plan.job.base)?, plan.job.threads)?
         .with_tensor_type_file(&tt_path)?;
@@ -350,6 +351,35 @@ where
     }
     let done = quantize_gguf_with_log(&q, |line| log(line))?;
     Ok(Quantized { path: done.output, bytes: done.output_info.file_bytes, seconds: started.elapsed().as_secs_f64() })
+}
+
+/// Tensor-type lines that keep MTP (next-token prediction) blocks at the base level.
+/// Those blocks (`<arch>.nextn_predict_layers` last of `<arch>.block_count`) never run
+/// in a normal forward pass, so the imatrix has no data for them and llama-quantize
+/// refuses very-low-bit types there ("Missing importance matrix for tensor
+/// blk.64.attn_k.weight", Qwen3.8-27B). Their `nextn.*` tensors stay in the Mtp class.
+/// First matching pattern wins, so these lines go first.
+fn mtp_block_pin(source: &Path, base_level: &str) -> io::Result<String> {
+    let meta = crate::models::gguf::inspect_gguf_metadata(source)?;
+    Ok(mtp_pin_lines(
+        meta.str("general.architecture").and_then(|arch| {
+            Some((
+                meta.int(&format!("{arch}.block_count"))?,
+                meta.int(&format!("{arch}.nextn_predict_layers"))?,
+            ))
+        }),
+        base_level,
+    ))
+}
+
+fn mtp_pin_lines(blocks_and_nextn: Option<(i64, i64)>, base_level: &str) -> String {
+    match blocks_and_nextn {
+        Some((blocks, nextn)) if nextn > 0 && blocks > nextn => {
+            let ids: Vec<String> = (blocks - nextn..blocks).map(|b| b.to_string()).collect();
+            format!("^blk\\.({})\\.(?!nextn\\.).*\\.weight$={base_level}\n", ids.join("|"))
+        }
+        _ => String::new(),
+    }
 }
 
 /// Build the probe "base + `class` at `level`" by splicing (see the probe loop).
@@ -1087,6 +1117,17 @@ mod tests {
     fn plain_strips_only_the_windows_verbatim_prefix() {
         assert_eq!(plain(Path::new(r"\\?\C:\m\x.gguf")), r"C:\m\x.gguf");
         assert_eq!(plain(Path::new("/srv/models/x.gguf")), "/srv/models/x.gguf");
+    }
+
+    #[test]
+    fn mtp_blocks_are_pinned_to_base_except_their_nextn_tensors() {
+        // Qwen3.8-27B: 65 blocks, the last one is the MTP layer.
+        let pin = mtp_pin_lines(Some((65, 1)), "q5_k");
+        assert_eq!(pin, "^blk\\.(64)\\.(?!nextn\\.).*\\.weight$=q5_k\n");
+        assert_eq!(mtp_pin_lines(Some((48, 2)), "q6_k"), "^blk\\.(46|47)\\.(?!nextn\\.).*\\.weight$=q6_k\n");
+        // No MTP layers, or no metadata: nothing pinned.
+        assert_eq!(mtp_pin_lines(Some((32, 0)), "q5_k"), "");
+        assert_eq!(mtp_pin_lines(None, "q5_k"), "");
     }
 
     #[test]
