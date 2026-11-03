@@ -6,6 +6,32 @@ than you allow?** This note explains what the code does, why it is built this
 way, and how to read its receipts. It is written so you can reproduce the
 method with any llama.cpp build.
 
+## CPU-only first experiment
+
+GGUF conversion itself does not need a GPU. Ojon's `recipe-plan` and
+`recipe-run` now default to **zero GPU layers**, including optional imatrix
+calibration and KL-divergence evaluation. Opt in to `--ngl 99` or
+`--ngl auto` only when a GPU has been explicitly made available.
+
+For an initial low-cost reproducibility check, use an original 0.6B–1B F16
+GGUF, a separate calibration text file and a *different* held-out evaluation
+text file. Ensure enough **free host RAM** (the shared-workstation CPU-job
+policy may require at least 8 GiB free) and disk capacity before starting.
+Never evict a model another agent is using.
+
+```text
+ojon recipe-plan <original-f16.gguf> <existing-empty-output-directory> --corpus <calibration.txt> --eval-corpus <heldout.txt> --quantize-tool <llama-quantize> --perplexity-tool <llama-perplexity> --imatrix auto --imatrix-tool <llama-imatrix> --ngl 0 --threads 4 --ctx 512 --chunks 8 --base q5_k --floor q4_k --budget 0.01 --budget-p99 0.05
+```
+
+The plan records the prospective number of conversions. If acceptable,
+repeat the same arguments with `recipe-run` instead of `recipe-plan`, plus
+`--resume --confirm`; **`--resume` is required** because planning has
+already written `recipe-plan.json`. No inference or conversion is run by
+the planning command. For a fair comparison, quantise the same original with
+unmodified upstream `llama-quantize` using the same imatrix and evaluate
+the original, stock and Ojon candidates on exactly the same held-out
+corpus. A KL-budget pass is not proof of general capability retention.
+
 ## 1. Why a single format is the wrong unit
 
 A GGUF format such as `Q4_K_M` is already a fixed mixed-precision recipe:
