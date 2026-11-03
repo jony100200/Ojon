@@ -91,6 +91,10 @@ pub struct RecipeJob {
     /// and last two blocks of every lowered class at the base level; adopt it
     /// only if it measures better and is not more than 2% bigger.
     pub refine_boundaries: bool,
+    /// Select the final recipe at this FILE size (bytes) instead of the KLD budget:
+    /// the best measured recipe that fits, e.g. to compare with another quant at
+    /// exactly its size. Probes are the same, so a resumed run can re-target cheaply.
+    pub target_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -684,7 +688,18 @@ where
         }
     }
 
-    let recipe: Recipe = select_recipe(plan.job.base, &plan.present, base_kld.mean, &measured, plan.job.budget_kld)?;
+    let recipe: Recipe = match plan.job.target_bytes {
+        Some(target_file_bytes) => {
+            // Recipe bytes are nominal weight bytes; the file also holds untouched
+            // tensors and metadata. Convert with the base quant's measured overhead.
+            let base_nominal = select_recipe(plan.job.base, &plan.present, base_kld.mean, &[], 0.0)?.base_bytes;
+            let overhead = base.bytes.saturating_sub(base_nominal);
+            let target_nominal = target_file_bytes.saturating_sub(overhead);
+            log(&format!("[ojon] size target: {target_file_bytes} file bytes (~{target_nominal} weight bytes after {overhead} of non-recipe data)"));
+            crate::quant::recipe::select_recipe_for_size(plan.job.base, &plan.present, base_kld.mean, &measured, target_nominal)?
+        }
+        None => select_recipe(plan.job.base, &plan.present, base_kld.mean, &measured, plan.job.budget_kld)?,
+    };
     log(&format!("[ojon] selected recipe: {} steps, predicted KLD delta {:.6}, predicted {:.1}% of base bytes",
         recipe.steps.len(), recipe.predicted_kld_delta, 100.0 * recipe.predicted_bytes as f64 / recipe.base_bytes.max(1) as f64));
     let final_q = quantize_with(plan, "recipe", &recipe.levels, &mut log)?;
@@ -1091,7 +1106,7 @@ mod tests {
         let job = RecipeJob {
             source: dir.join("missing.gguf"), output_dir: dir.clone(), base: "q5_k", floor: "iq2_s", budget_kld: 0.01,
             quantize_tool: PathBuf::from("llama-quantize"), imatrix: None, imatrix_tool: None, threads: 4, kld,
-            keep_probes: false, budget_p99: None, resume: false, eval_corpus: None, refine_boundaries: true,
+            keep_probes: false, budget_p99: None, resume: false, eval_corpus: None, refine_boundaries: true, target_bytes: None,
         };
         assert!(prepare_recipe(RecipeJob { budget_p99: Some(-0.5), ..job.clone() }).is_err());
         assert!(prepare_recipe(RecipeJob { budget_kld: 2.0, ..job.clone() }).is_err());

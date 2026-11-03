@@ -395,6 +395,43 @@ pub fn select_recipe(
     Ok(Recipe { levels, predicted_kld_delta: spent, predicted_bytes, base_bytes, steps })
 }
 
+/// The greedy recipe at a SIZE target instead of a KLD budget: the greedy order does
+/// not depend on the budget (the budget only decides where to stop), so this walks the
+/// unbounded sequence and keeps the shortest prefix whose predicted bytes fit
+/// `target_bytes` (nominal weight bytes, the same scale as `Recipe::predicted_bytes`).
+/// This is how to compare against another quant at exactly its size.
+pub fn select_recipe_for_size(
+    base: &str,
+    present: &BTreeMap<TensorClass, u64>,
+    base_kld: f64,
+    measured: &[Measured],
+    target_bytes: u64,
+) -> io::Result<Recipe> {
+    let full = select_recipe(base, present, base_kld, measured, f64::MAX)?;
+    let base_level: &'static str = LADDER[ladder_index(base).unwrap()].0;
+    let mut levels: BTreeMap<TensorClass, &'static str> = present.keys().map(|c| (*c, base_level)).collect();
+    let bytes_of = |levels: &BTreeMap<TensorClass, &'static str>| -> u64 {
+        present.iter().map(|(c, e)| class_bytes(*e, levels[c])).sum()
+    };
+    let mut steps = Vec::new();
+    let mut spent = 0.0;
+    for step in full.steps {
+        if bytes_of(&levels) <= target_bytes {
+            break;
+        }
+        spent += step.kld_added;
+        levels.insert(step.class, step.to);
+        steps.push(step);
+    }
+    let predicted_bytes = bytes_of(&levels);
+    if predicted_bytes > target_bytes {
+        return Err(invalid(format!(
+            "no measured recipe reaches {target_bytes} nominal bytes (smallest: {predicted_bytes}); probe lower levels"
+        )));
+    }
+    Ok(Recipe { levels, predicted_kld_delta: spent, predicted_bytes, base_bytes: full.base_bytes, steps })
+}
+
 /// `--tensor-type-file` body for a probe: only the probed class differs from
 /// the converter's base format, which the caller passes as the main precision.
 pub fn render_probe(class: TensorClass, level: &str) -> String {
@@ -646,6 +683,31 @@ mod tests {
         // beats the expert gate/up step (0.001 for 63 MB)
         assert_eq!(r.steps.first().unwrap().class, TensorClass::Output);
         assert_eq!(r.steps.len(), 3);
+    }
+
+    #[test]
+    fn size_target_takes_the_greedy_prefix_that_fits() {
+        let present = class_elements(&moe_model());
+        let base_kld = 0.010;
+        let measured = vec![
+            Measured { class: TensorClass::ExpertGateUp, level: "q4_k", mean_kld: 0.011 },
+            Measured { class: TensorClass::ExpertGateUp, level: "iq4_xs", mean_kld: 0.012 },
+            Measured { class: TensorClass::ExpertGateUp, level: "q3_k", mean_kld: 0.030 },
+            Measured { class: TensorClass::AttnVo, level: "q4_k", mean_kld: 0.025 },
+            Measured { class: TensorClass::Output, level: "q4_k", mean_kld: 0.0105 },
+        ];
+        let full = select_recipe("q5_k", &present, base_kld, &measured, f64::MAX).unwrap();
+        // Same greedy order: a target right after the first step keeps exactly one step.
+        let after_first = full.base_bytes - full.steps[0].bytes_saved;
+        let r = select_recipe_for_size("q5_k", &present, base_kld, &measured, after_first).unwrap();
+        assert_eq!(r.steps.len(), 1);
+        assert_eq!(r.steps[0].class, full.steps[0].class);
+        assert!(r.predicted_bytes <= after_first);
+        // Already at or under the target: nothing lowered.
+        let none = select_recipe_for_size("q5_k", &present, base_kld, &measured, full.base_bytes).unwrap();
+        assert!(none.steps.is_empty());
+        // Below what the measured probes can reach: an error, not a silent miss.
+        assert!(select_recipe_for_size("q5_k", &present, base_kld, &measured, 1).is_err());
     }
 
     #[test]

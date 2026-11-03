@@ -113,7 +113,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
         budget_p99: Some(p99),
         resume,
         eval_corpus,
-        refine_boundaries: true,
+        refine_boundaries: true, target_bytes: None,
     })?;
     let plan_path = plan.write_plan()?;
     let plan_json = plan.plan_json();
