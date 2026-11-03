@@ -261,6 +261,7 @@ impl RecipePlan {
             "context": self.job.kld.context,
             "chunks": self.job.kld.chunks,
             "quantize_tool": plain(&self.job.quantize_tool),
+            "quant_buffer_policy": "adaptive 32/64/128 MiB from live free RAM; requires llama-quantize --max-buffer-size",
             "perplexity_tool": plain(&self.job.kld.tool),
             "imatrix": self.job.imatrix.as_ref().map(|p| plain(p)),
             "imatrix_auto_tool": self.job.imatrix_tool.as_ref().map(|p| plain(p)),
@@ -337,6 +338,9 @@ where
     let started = Instant::now();
     let mut q = prepare_gguf(&plan.job.source, &out_path, &plan.job.quantize_tool, main_precision_for(plan.job.base)?, plan.job.threads)?
         .with_tensor_type_file(&tt_path)?;
+    let slab = crate::resource::current_gguf_slab_mib();
+    q = q.with_max_buffer_mib(slab)?;
+    log(&format!("[ojon] adaptive CPU quantisation slab: {slab} MiB (the actual process may use more memory)"));
     if let Some(im) = &plan.job.imatrix {
         q = q.with_imatrix(im)?;
     }
@@ -795,6 +799,9 @@ where
     log(&format!("[ojon] applying recipe (base {base}) to {}", plain(&source)));
     let started = Instant::now();
     let mut q = prepare_gguf(&source, &out_path, quantize_tool, main_precision_for(base)?, threads)?.with_tensor_type_file(&tt_path)?;
+    let slab = crate::resource::current_gguf_slab_mib();
+    q = q.with_max_buffer_mib(slab)?;
+    log(&format!("[ojon] adaptive CPU quantisation slab: {slab} MiB (the actual process may use more memory)"));
     if let Some(im) = imatrix {
         q = q.with_imatrix(im)?;
     }
@@ -811,6 +818,7 @@ where
         "output_bytes": done.output_info.file_bytes,
         "size_ratio_vs_source": done.output_info.file_bytes as f64 / info.file_bytes.max(1) as f64,
         "quantize_seconds": started.elapsed().as_secs_f64(),
+        "quant_buffer_mib": slab,
         "verification": "none",
         "claim": "transferred recipe; not measured on this model unless verification is present"
     });

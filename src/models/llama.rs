@@ -339,12 +339,15 @@ where
         .output
         .parent()
         .ok_or_else(|| bad("missing output directory"))?;
-    let resources = assess_resources(
+    let mut resources = assess_resources(
         plan.source_info.file_bytes,
         parent,
         ResourceMode::Gguf,
         "cpu",
     )?;
+    if let Some(mib) = plan.max_buffer_mib {
+        resources.use_bounded_gguf_ram_policy(mib);
+    }
     resources.enforce(false)?;
     let staging = make_staging_directory(&plan.output)?;
     let stage_file = staging.0.join("quantized.gguf");

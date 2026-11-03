@@ -13,6 +13,22 @@ use std::process::Command;
 pub const GIB: u64 = 1024 * 1024 * 1024;
 const RAM_RESERVE_BYTES: u64 = 4 * GIB;
 const SCRATCH_RESERVE_BYTES: u64 = 2 * GIB;
+const MIB: u64 = 1024 * 1024;
+
+/// Bounded llama-quantize only: choose the tensor-row slab from *current*
+/// available host memory, rather than demanding a fixed fraction of all RAM.
+/// This does not predict whole-process peak RSS or override disk checks.
+pub fn adaptive_gguf_slab_mib(available_bytes: Option<u64>) -> u32 {
+    match available_bytes.map(|b| b / MIB) {
+        Some(mib) if mib >= 12 * 1024 => 128,
+        Some(mib) if mib >= 4 * 1024 => 64,
+        _ => 32,
+    }
+}
+
+pub fn current_gguf_slab_mib() -> u32 {
+    adaptive_gguf_slab_mib(available_ram())
+}
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(ErrorKind::InvalidInput, message.into())
@@ -83,6 +99,25 @@ pub struct ResourceAssessment {
     pub output_parent: String,
 }
 impl ResourceAssessment {
+    /// A small (<=2 GiB), explicitly slab-bounded GGUF conversion can stream
+    /// tensors without reserving 4 GiB of free RAM. Admit conservatively
+    /// according to source size + slab + 512 MiB, with a 1.5 GiB minimum.
+    /// Larger or unbounded conversions retain the original conservative gate.
+    pub fn use_bounded_gguf_ram_policy(&mut self, slab_mib: u32) {
+        if self.mode != ResourceMode::Gguf
+            || self.device != "cpu"
+            || self.source_bytes > 2 * GIB
+            || !(32..=128).contains(&slab_mib)
+        {
+            return;
+        }
+        let required = self.source_bytes
+            .saturating_add((slab_mib as u64 + 512) * MIB)
+            .clamp(1536 * MIB, RAM_RESERVE_BYTES);
+        self.ram_safety_budget_bytes = Some(required);
+        self.ram_safe = self.available_ram_bytes.map(|free| free >= required);
+    }
+
     pub fn status(&self) -> &'static str {
         if self.ram_safe == Some(false) || self.disk_safe == Some(false) {
             "budget_below_policy"
@@ -703,6 +738,38 @@ mod tests {
         assert_eq!(choose_load_mode(Some("none"), 51 * GB, Some(20 * GB)), None);
     }
 
+    #[test]
+    fn slab_policy_scales_with_free_ram_without_claiming_peak_rss() {
+        assert_eq!(adaptive_gguf_slab_mib(None), 32);
+        assert_eq!(adaptive_gguf_slab_mib(Some(2 * GIB)), 32);
+        assert_eq!(adaptive_gguf_slab_mib(Some(6 * GIB)), 64);
+        assert_eq!(adaptive_gguf_slab_mib(Some(16 * GIB)), 128);
+    }
+
+    #[test]
+    fn bounded_small_gguf_can_use_less_than_blanket_four_gib() {
+        let base = ResourceAssessment {
+            source_bytes: 1509347424,
+            mode: ResourceMode::Gguf,
+            device: "cpu".into(),
+            available_ram_bytes: Some(3 * GIB),
+            free_disk_bytes: Some(10 * GIB),
+            ram_safety_budget_bytes: Some(4 * GIB),
+            scratch_safety_budget_bytes: 2 * GIB,
+            gpu_devices: vec![],
+            ram_safe: Some(false),
+            disk_safe: Some(true),
+            device_measured: true,
+            output_parent: ".".into(),
+        };
+        let mut bounded = base.clone();
+        bounded.use_bounded_gguf_ram_policy(32);
+        assert!(bounded.ram_safety_budget_bytes.unwrap() < 3 * GIB);
+        assert_eq!(bounded.ram_safe, Some(true));
+        let mut large = ResourceAssessment { source_bytes: 4 * GIB, ..base };
+        large.use_bounded_gguf_ram_policy(32);
+        assert_eq!(large.ram_safe, Some(false));
+    }
     #[test]
     fn conservative_budget_is_not_fake_peak() {
         let base = 7 * GIB;

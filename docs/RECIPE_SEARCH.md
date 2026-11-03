@@ -16,7 +16,8 @@ calibration and KL-divergence evaluation. Opt in to `--ngl 99` or
 For an initial low-cost reproducibility check, use an original 0.6B–1B F16
 GGUF, a separate calibration text file and a *different* held-out evaluation
 text file. Ensure enough **free host RAM** (the shared-workstation CPU-job
-policy may require at least 8 GiB free) and disk capacity before starting.
+admission policy now distinguishes light, moderate and heavy jobs; do not
+assume every quantisation needs 8 GiB free) and disk capacity before starting.
 Never evict a model another agent is using.
 
 ```text
@@ -285,3 +286,65 @@ a same-byte-budget quality victory. The Flint MoE search is incomplete.
 file, and a passing plain recipe must never be silently replaced with a
 refined candidate that fails those same gates. This is tested in the
 2026-11-03 implementation update.
+
+## 12. CPU-only baseline and Ojon recipe comparison — 2026-11-03
+
+This is an **executed, preliminary matched-inference comparison**, not a
+benchmark leaderboard. We used the same Qwen3-0.6B F16 reference, the same
+held-out text, the same installed llama-perplexity (llama.cpp b11575), and
+zero GPU layers for all four inference loads. The evaluation was 8 chunks of
+512 tokens with batch 512 and two CPU threads. Outputs were loaded and
+evaluated for real; model quality beyond this corpus remains untested.
+
+| Artifact | Bytes | Mean KL vs F16 (standard error) | 99th-pct KL | PPL(Q) | Same top-token % |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Stock llama.cpp Q4_K_M (new bounded CPU build) | 484,220,000 | 0.108343 ± 0.002959 | 0.588381 | 34.9166 | 82.941 |
+| Stock Q5_K_M (previously converted) | 551,378,016 | 0.035708 ± 0.001185 | 0.206032 | 33.0673 | 91.029 |
+| Ojon KLD-guided mixed recipe (previously converted) | 503,468,576 | 0.034154 ± 0.001179 | 0.196654 | 32.2711 | 90.784 |
+
+The original F16 is 1,509,347,424 bytes. The evaluation tool's reference PPL
+was 31.7700 for all candidates. The separately saved original reference
+reported PPL 31.8639; use the **same candidate-side estimator** to compare
+rows. Ojon's recipe is **8.69% smaller than stock Q5** with marginally lower
+measured mean KL, but its same-top-token rate is slightly lower. The mean-KL
+difference (0.001554) is smaller than twice the combined standard error:
+**do not call this statistically established superiority**.
+
+Important confound: the Ojon recipe used a calibration importance matrix;
+the stock Q5 comparison was not built with that same matrix. Conversion
+builds/provenance also differ. We have therefore demonstrated the *existing
+Ojon workflow* can provide an attractive size/quality point, **not** that
+Ojon's search method outperforms a stock quantizer with equal calibration
+and target bytes. Final acceptance still requires held-out coding, reasoning
+and tool-call tests, identical calibration and larger samples.
+
+The fresh Q4 conversion ran CPU-side with `llama-quantize --max-buffer-size 32`,
+processed all 311 tensors in **22.392 seconds**, and was loaded by the KL
+evaluator. Measured peak process working set was approximately **1.6 GiB**;
+the lowest observed free system RAM was approximately **2.0 GiB**, without
+having to reserve 8 GiB. The *external test harness* stopped an earlier
+attempt when other workloads reduced free RAM below its guard; it did not
+evict or interrupt those workloads. This is **not** a claim that Ojon's
+in-process memory monitoring has been validated.
+
+SHA-256 (lowercase hex; use for verifying the exact test inputs/outputs):
+
+```text
+f16_source  ab9004daf660cd6a6ba1c07556e74fcceb2b756063ccce3f9c69d3a637b361cc
+stock_q4    28b1c721c1e476d3e41c629d5993c0aaeca0f3b747afdbab667f5a4bc8e37665
+stock_q5    35c54534401aff1fd9f12ff8ef804263780474d2d9a0ed5f3bf1253e411f2c5c
+ojon_recipe 6746856986b19a7624a1a7de63bdbe2b047758a0fbbd9a7cb5569a28f31d7fbd
+heldout     86e2e132492715d6bfb79fda94e9938a55445fd2e82eb36a397d95378b0f4f9d
+```
+
+The updated recipe quantizer asks the installed llama.cpp tool for an adaptive
+32/64/128 MiB tensor slab according to live free RAM. For small original
+GGUFs (up to 2 GiB), its separate RAM-admission calculation uses the source
+size plus bounded slab and headroom rather than a blanket 4/8 GiB reserve.
+It remains a conservative admission heuristic, **not a verified process
+peak or an automatic operating-system memory reclamation mechanism**.
+
+**Next controlled experiment:** regenerate both a stock quant and an Ojon
+mixed recipe using the exact same original, tokenizer, imatrix, quantizer
+build and calibration/held-out split; compare several equal-byte-budget
+variants and a coding/reasoning/tool suite before a product claim.
