@@ -348,6 +348,52 @@ fn kld_json(s: &KldStats) -> Value {
     json!({"mean": s.mean, "mean_uncertainty": s.mean_uncertainty, "median": s.median, "p99": s.p99, "max": s.max, "seconds": s.seconds})
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BudgetChecks {
+    mean_within: bool,
+    p99_within: Option<bool>,
+}
+
+impl BudgetChecks {
+    fn accepted(self) -> bool {
+        self.mean_within && self.p99_within.unwrap_or(true)
+    }
+}
+
+/// Always evaluate the checks against the candidate actually selected for
+/// publication. A boundary refinement must not leave stale receipt flags.
+fn check_quality_budgets(
+    base: &KldStats,
+    candidate: &KldStats,
+    budget_mean: f64,
+    budget_p99: Option<f64>,
+) -> BudgetChecks {
+    let mean_within = candidate.mean <= base.mean + budget_mean + 1e-9;
+    let p99_within = match (budget_p99, base.p99, candidate.p99) {
+        (Some(budget), Some(base_p99), Some(final_p99)) => {
+            Some(final_p99 <= base_p99 + budget + 1e-9)
+        }
+        (Some(_), _, _) => Some(false),
+        (None, _, _) => None,
+    };
+    BudgetChecks { mean_within, p99_within }
+}
+
+fn should_adopt_refinement(
+    plain: &KldStats,
+    plain_bytes: u64,
+    plain_accepted: bool,
+    refined: &KldStats,
+    refined_bytes: u64,
+    refined_accepted: bool,
+) -> bool {
+    adopt_boundary(
+        plain.mean, plain.mean_uncertainty.unwrap_or(0.0),
+        refined.mean, refined.mean_uncertainty.unwrap_or(0.0),
+        plain_bytes, refined_bytes,
+    ) && (!plain_accepted || refined_accepted)
+}
+
 pub const PROGRESS_FILE: &str = "recipe-progress.jsonl";
 
 /// Append-only ledger of finished steps, one JSON object per line, so a run
@@ -571,14 +617,10 @@ where
         recipe.steps.len(), recipe.predicted_kld_delta, 100.0 * recipe.predicted_bytes as f64 / recipe.base_bytes.max(1) as f64));
     let final_q = quantize_with(plan, "recipe", &recipe.levels, &mut log)?;
     let final_kld = measure_kld(&final_q.path, &dump, &plan.job.kld, &mut log)?;
-    let mean_within = final_kld.mean <= base_kld.mean + plan.job.budget_kld + 1e-9;
-    // Tail gate: only when both p99 values were reported and a p99 budget was set.
-    let p99_within = match (plan.job.budget_p99, base_kld.p99, final_kld.p99) {
-        (Some(budget), Some(base_p99), Some(final_p99)) => Some(final_p99 <= base_p99 + budget + 1e-9),
-        (Some(_), _, _) => Some(false), // asked for a tail gate but the tool did not report p99: fail closed
-        (None, _, _) => None,
-    };
-    let within = mean_within && p99_within.unwrap_or(true);
+    let mut checks = check_quality_budgets(
+        &base_kld, &final_kld, plan.job.budget_kld, plan.job.budget_p99,
+    );
+    let within = checks.accepted();
     log(&format!("[ojon] recipe: {:.2}% of source, mean KLD {:.6} (base {:.6}, budget +{:.6}){} -> {}",
         100.0 * final_q.bytes as f64 / plan.source_bytes as f64, final_kld.mean, base_kld.mean, plan.job.budget_kld,
         match (plan.job.budget_p99, final_kld.p99) {
@@ -602,8 +644,15 @@ where
                     .and_then(|q| measure_kld(&q.path, &dump, &plan.job.kld, &mut log).map(|k| (q, k)))
                 {
                     Ok((bq, bk)) => {
-                        let adopt = adopt_boundary(final_kld.mean, final_kld.mean_uncertainty.unwrap_or(0.0),
-                                                   bk.mean, bk.mean_uncertainty.unwrap_or(0.0), final_q.bytes, bq.bytes);
+                        let refined_checks = check_quality_budgets(
+                            &base_kld, &bk, plan.job.budget_kld, plan.job.budget_p99,
+                        );
+                        // Never replace a passing plain recipe with a refinement
+                        // that fails its tail or mean quality gate.
+                        let adopt = should_adopt_refinement(
+                            &final_kld, final_q.bytes, within,
+                            &bk, bq.bytes, refined_checks.accepted(),
+                        );
                         log(&format!("[ojon]   boundary file: mean KLD {:.6} vs {:.6}, {:.2}% vs {:.2}% of source -> {}",
                             bk.mean, final_kld.mean, 100.0 * bq.bytes as f64 / plan.source_bytes as f64,
                             100.0 * final_q.bytes as f64 / plan.source_bytes as f64, if adopt { "adopted" } else { "kept plain recipe" }));
@@ -613,13 +662,8 @@ where
                             let plain_path = dir.join("recipe-plain.gguf");
                             fs::rename(&final_q.path, &plain_path)?;
                             fs::rename(&bq.path, &final_q.path)?;
-                            let mean_ok = bk.mean <= base_kld.mean + plan.job.budget_kld + 1e-9;
-                            let p99_ok = match (plan.job.budget_p99, base_kld.p99, bk.p99) {
-                                (Some(b), Some(bp), Some(fp)) => fp <= bp + b + 1e-9,
-                                (Some(_), _, _) => false,
-                                (None, _, _) => true,
-                            };
-                            within = mean_ok && p99_ok;
+                            checks = refined_checks;
+                            within = checks.accepted();
                             final_q = Quantized { path: final_q.path.clone(), bytes: bq.bytes, seconds: bq.seconds };
                             final_kld = bk;
                             boundary_json["plain_recipe_kept_as"] = json!(plain(&plain_path));
@@ -645,9 +689,9 @@ where
                   "size_ratio_vs_source": final_q.bytes as f64 / plan.source_bytes as f64,
                   "size_ratio_vs_base": final_q.bytes as f64 / base.bytes.max(1) as f64,
                   "kld": kld_json(&final_kld), "kld_delta_vs_base": final_kld.mean - base_kld.mean,
-                  "mean_within_budget": mean_within,
+                  "mean_within_budget": checks.mean_within,
                   "p99_budget": plan.job.budget_p99,
-                  "p99_within_budget": p99_within,
+                  "p99_within_budget": checks.p99_within,
                   "measured_within_budget": within},
         "boundary_refinement": boundary_json,
         "base_advisory": base_advisory,
@@ -790,6 +834,66 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn measured(mean: f64, p99: Option<f64>) -> KldStats {
+        KldStats {
+            mean,
+            mean_uncertainty: Some(0.0001),
+            p99,
+            ..KldStats::default()
+        }
+    }
+
+    #[test]
+    fn boundary_refinement_cannot_replace_a_passing_recipe_with_a_tail_regression() {
+        let base = measured(0.020, Some(0.100));
+        let plain = measured(0.028, Some(0.140));
+        let refined_bad_tail = measured(0.023, Some(0.190));
+        let plain_checks = check_quality_budgets(&base, &plain, 0.010, Some(0.050));
+        let refined_checks = check_quality_budgets(&base, &refined_bad_tail, 0.010, Some(0.050));
+        assert_eq!(plain_checks, BudgetChecks { mean_within: true, p99_within: Some(true) });
+        assert_eq!(refined_checks, BudgetChecks { mean_within: true, p99_within: Some(false) });
+        assert!(plain_checks.accepted());
+        assert!(!refined_checks.accepted());
+        assert!(!should_adopt_refinement(
+            &plain, 1000, plain_checks.accepted(),
+            &refined_bad_tail, 1010, refined_checks.accepted(),
+        ));
+
+        let refined_good = measured(0.023, Some(0.120));
+        let good_checks = check_quality_budgets(&base, &refined_good, 0.010, Some(0.050));
+        assert!(good_checks.accepted());
+        assert!(should_adopt_refinement(
+            &plain, 1000, plain_checks.accepted(),
+            &refined_good, 1010, good_checks.accepted(),
+        ));
+    }
+
+    #[test]
+    fn selected_refinement_checks_are_computed_from_selected_kld() {
+        let base = measured(0.020, Some(0.100));
+        let plain = measured(0.032, Some(0.160));
+        let refined = measured(0.026, Some(0.125));
+        let plain_checks = check_quality_budgets(&base, &plain, 0.010, Some(0.050));
+        let refined_checks = check_quality_budgets(&base, &refined, 0.010, Some(0.050));
+        assert_eq!(plain_checks, BudgetChecks { mean_within: false, p99_within: Some(false) });
+        assert_eq!(refined_checks, BudgetChecks { mean_within: true, p99_within: Some(true) });
+        assert!(should_adopt_refinement(
+            &plain, 1000, plain_checks.accepted(), &refined, 1010, refined_checks.accepted(),
+        ));
+        assert!(refined_checks.accepted());
+
+        // A missing p99 must fail closed when the user requested a tail gate.
+        let missing = measured(0.021, None);
+        assert_eq!(
+            check_quality_budgets(&base, &missing, 0.010, Some(0.050)).p99_within,
+            Some(false),
+        );
+        assert_eq!(
+            check_quality_budgets(&base, &missing, 0.010, None).p99_within,
+            None,
+        );
+    }
 
     #[test]
     fn levels_from_receipt_accepts_recipe_or_full_receipt_and_rejects_junk() {

@@ -216,3 +216,46 @@ now reports. The two clear signals are the output head (do not lower it) and
 the dense FFN gate/up (free to lower). The expert classes, where 97% of the
 bytes are, had not been probed yet when the run stopped. Next run: 24 chunks
 and a 1 MiB+ corpus from `corpus-build`, then resume.
+
+## 11. Competition audit and next experiment — 2026-11-03
+
+**Current verdict: experimental measured-search capability, NOT a benchmarked
+leader in quality per byte.** The 0.6B worked example above is an actual
+reported mean-KL result, but only 0.9 percentage points of BF16-source size
+were saved relative to its all-Q5 imatrix base, while KL increased. It is not
+a same-byte-budget quality victory. The Flint MoE search is incomplete.
+
+| Reference | Demonstrated public method | Where Ojon currently stands |
+| --- | --- | --- |
+| [llama.cpp](https://github.com/ggml-org/llama.cpp/blob/master/tools/quantize/README.md) | Q/IQ GGUF types, importance matrices and tensor overrides | Ojon uses its installed quantizer; compare against the *same* version and imatrix |
+| [Unsloth Dynamic 2](https://www.unsloth.ai/blog/dynamic-v2) | Model-specific *per-layer* precision and large curated calibration sets; published vendor MMLU/KL comparisons | Ojon searches broad tensor classes and offers boundary-block refinement; per-block calibration and matched external scores remain open |
+| [Intel AutoRound](https://github.com/intel/auto-round) | Learned post-training rounding, AutoScheme mixed bits and GGUF export | Ojon has a local adapter, not a native competing rounding solver |
+| [ExLlamaV3 EXL3](https://github.com/turboderp-org/exllamav3) | Hessian-aware QTIP-derived quantisation, flexible BPW, separate low-bit inference runtime | Ojon has a local adapter; avoid confusing different engines with quantisation-only quality |
+| [Other quantisation methods](https://huggingface.co/docs/transformers/v5.12.0/quantization/selecting) | GPTQ, AWQ, HQQ and sub-4-bit formats have distinct trade-offs | External published accuracy is context, not an Ojon result or an apples-to-apples victory |
+
+### Required acceptance experiment
+
+1. Validate the Ojon quantisation command and chosen CUDA/Vulkan backend
+   against the selected `llama-quantize` executable before launching a costly
+   model. The FrogNano guided plan previously discovered Vulkan despite a
+   requested CUDA device (see `PRODUCT_DIFFERENTIATION.md`).
+2. Freeze one untouched BF16 source, exact upstream quantizer, calibration
+   corpus, *different* held-out corpus and task suite, and inference settings.
+   Start with 0.6B-1B for pipeline proof; scale to one 4B-8B only when
+   resources have been checked.
+3. Run **same model, same byte budget**: plain llama.cpp, llama.cpp + common
+   imatrix, Ojon class-search recipe, and Ojon adaptive output. Only then add
+   AutoRound GGUF/Unsloth when conversion is actually supported.
+4. Compare measured bytes/BPW, mean and 99th-percentile KL, held-out
+   perplexity, coding/reasoning/tool/multilingual accuracy, output flips,
+   real runtime load, tokens per second and peak RAM/VRAM. Record failures,
+   hashes, backend revisions, elapsed quantisation time and uncertainty.
+5. A result that fails its KL tail or capability tests remains experimental,
+   even if a lower-mean-KL boundary-refined file appears attractive. Public
+   claims need repeated independently reproducible measurements.
+
+**Engineering audit fix:** the selected boundary-refined file's receipt
+`mean_within_budget` and `p99_within_budget` must always describe that final
+file, and a passing plain recipe must never be silently replaced with a
+refined candidate that fails those same gates. This is tested in the
+2026-11-03 implementation update.

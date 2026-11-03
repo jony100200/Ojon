@@ -5,6 +5,37 @@ thresholds on the intended local hardware. It never treats a successful
 conversion, a valid GGUF header, or a zero-score evaluation reference as
 proof of retained capability.
 
+## Priority board — 2026-11-03
+
+**P0: prove how good Ojon's quantisation actually is.** Freeze original BF16
+model, calibration and distinct held-out tests. Compare stock llama.cpp
+Q4_K_M/Q3_K_M with and without the same imatrix against Ojon's KLD-guided
+mixed-precision recipe **at the same byte budget**, on the same backend.
+Record original and output hashes, exact builds, real PPL and KL mean/p99,
+task-level coding/reasoning/tool scores, speed, peak RAM/VRAM and uncertainty.
+Repeat with a different 4B-8B model before claiming general advantage.
+
+**Current evidence:** the recorded Qwen3-0.6B trial reduced file size from
+34.7% to 33.8% of BF16 while mean KLD increased from 0.0234 to 0.0326.
+That meets its local mean-KL budget but does **not** establish task-quality
+preservation or beat an equal-size stock quant. A Flint MoE probe stopped
+incomplete under host memory pressure. See `docs/RECIPE_SEARCH.md`.
+
+**Research comparison:** llama.cpp is our GGUF encoder, not a separate Ojon
+quality win. Unsloth Dynamic 2 uses per-layer selection, AutoRound optimises
+rounding and mixed-bit allocation, and EXL3 uses a distinct QTIP-derived format
+and runtime. Ojon currently provides externally measured class-level search
+and wrappers for some of those upstream engines; no head-to-head superiority
+has been established.
+
+**P1 after the same-budget benchmark:** refine block-group and MoE allocation
+with real sensitivity measurements, calibrate quality on held-out tasks, and
+reduce the number of full-model probes.
+
+**P2 deferred usability features:** Model Doctor, Hardware Fit Advisor,
+Quality Passport, export wizard, Model Vault, batch/resume and MoE Optimiser.
+Do not prioritise these over a verified quantisation win.
+
 ## Model source and reference
 
 - Use an original F16/BF16/F32 GGUF as the quantization source. Never
