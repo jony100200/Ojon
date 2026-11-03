@@ -4,7 +4,7 @@
 
 ## 1. What Ojon does
 
-Ojon is designed to be **one place to inspect, quantize, and test models** using existing engines. It does not train models (that is Bunon's job) or invent a new universal quantization format.
+Ojon is designed to be **one place to inspect, quantize, and test models** using existing engines. It does not train models or invent a new universal quantization format.
 
 Intended path: **Import → Inspect → Choose supported conversion → Preflight → Quantize → Test → Export**.
 
@@ -205,7 +205,7 @@ The Kathamo GUI exposes **Benchmark Output (512/128, 3 runs)** in its existing T
 
 If BF16 is too large for your RAM/VRAM, **skip the BF16 run**. Ojon will not invent performance for an unloaded checkpoint. Ojon also does **not** measure held-out task accuracy, tool calls, OCR, grounding, peak GPU memory, or TTFT with this adapter. Benchmark speed is only one axis; continue to validate inference via `smoke` and quality via task-specific tests. A comparison across mismatched GPUs or runtime builds is explicitly flagged as non-comparable.
 
-## Model discovery, fine-tuning and best-variant recommendation (early backend features)
+## Model discovery, adapter merging and best-variant recommendation (early backend features)
 
 Ojon aims to make one **local** workflow from existing public backends, not create another quantization or training algorithm. For new AI model families, Ojon should first identify the checkpoint and the target runtime, then connect only a compatible upstream tool. Classification is a suggestion, **not an automatic conversion permission**.
 
@@ -216,14 +216,7 @@ ojon probe /models/my-hf-model-folder --json
 ojon backends --json
 ```
 
-Fine-tuning, distillation and training-data curation are owned by [Bunon](https://github.com/jony100200/Bunon). Ojon forwards the legacy commands (`train-plan`, `train-run`, `learn-*`, `distill-plan`, `dataset-audit`, `retrieve`) unchanged to `bunon-learn` when Bunon is installed (`bunon-learn` on `PATH`, or `OJON_BUNON_BIN`). Without Bunon these commands exit with installation instructions; everything else in this guide keeps working.
-
-```bash
-ojon train-plan /data/train-lora.yaml --json        # runs bunon-learn train-plan
-ojon train-run /data/train-lora.yaml --confirm      # only after approving model, data and resources
-```
-
-Ojon keeps the post-training steps: `lora-merge-plan`/`lora-merge-run` merge a compatible adapter, then the normal quantise / evaluate / verify workflow applies. Bunon calls back into Ojon (`ojon task-eval-run`) to score a merged candidate on the frozen held-out suite. QLoRA is parameter-efficient fine-tuning, not a substitute for a tested deployable quantized model.
+Ojon does not collect training data, run fine-tuning jobs or provide distillation commands. If you already have a compatible adapter, use `lora-merge-plan`/`lora-merge-run` and follow the normal quantise / evaluate / verify workflow. Re-evaluate any changed model against a frozen held-out task suite before release.
 
 For supported GGUF LLMs, a quality-aware converter may use an **importance matrix** made from representative text with the official `llama-imatrix` binary:
 

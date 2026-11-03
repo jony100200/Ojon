@@ -4,8 +4,7 @@
 
 ## Product boundary
 
-- **Bunon:** model training, fine-tuning, data curation and behavioural model edits.
-- **Ojon:** independently verify model receipts, quantisation, MTP-component preservation and package a release only after quality gates pass.
+- **Ojon:** local model inspection, quantisation, supported experimental model editing, integrity checks and evidence-based packaging.
 - **Porikkha:** external/task-disjoint, independently reviewed capability and semantic-answer evaluation.
 - **Twarok and KS llama.cpp:** inference, speculative decoding and repeatable throughput tests.
 
@@ -45,13 +44,13 @@ The Ojon audit verifies that the Qwen/Ornith original JSON receipts have matchin
 
 ## Expanded test readiness
 
-Bunon's development-authored frozen English-quality suite currently contains 48 tasks across professional English, dialogue, dark fantasy, adult romance, long-form continuity and adult erotica (eight per group). An opt-in local runner was prepared for 40 non-erotica tasks, with per-task JSON receipts, source SHA-256 and restart-safe outputs.
+An internal development-authored English-quality suite currently contains 48 tasks across professional English, dialogue, dark fantasy, adult romance, long-form continuity and adult erotica (eight per group). An opt-in local runner was prepared for 40 non-erotica tasks, with per-task JSON receipts, source SHA-256 and restart-safe outputs.
 
-**The 40-task run was stopped before producing scored cases.** Competing local inference workloads drove free GPU memory below 1 GiB. The loaded model and other agents were not replaced or killed. There is **no extended baseline result** and no valid claim of improvement from this interrupted run. The remaining adult-erotica family requires explicit, independent age/consent and literary review. Development-authored holdouts must not be recycled into Bunon training material.
+**The 40-task run was stopped before producing scored cases.** Competing local inference workloads drove free GPU memory below 1 GiB. The loaded model and other agents were not replaced or killed. There is **no extended baseline result** and no valid claim of improvement from this interrupted run. The remaining adult-erotica family requires explicit, independent age/consent and literary review. Development-authored holdouts must remain separate from training data.
 
 ## Release acceptance milestones
 
 - Run baseline and candidate with exactly matched model runtime, precision, prompts, token budget, thinking setting and pinned external task dataset; attach runtime settings and executable-code test receipts.
 - Add source-disjoint independently authored holdouts and blind, semantic editorial scoring. Record directness, usefulness, factual errors, code execution, writing quality and safety-control retention separately.
-- Compare unedited model, community model and Bunon-edited model. Record KL/perplexity, context/vision, tokens per second and peak memory. Preserve and verify MTP/draft components independently in Ojon.
+- Compare original model, community variant and experimental candidate. Record KL/perplexity, context/vision, tokens per second and peak memory. Preserve and verify MTP/draft components independently.
 - Publish weights only after accuracy/quality retention, useful-answer improvements and packaging verification pass. A creator's claimed refusal count is not itself a release gate.

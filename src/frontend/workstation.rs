@@ -333,10 +333,6 @@ struct Workstation {
         serde_json::Value,
     )>,
     unc_auto_result: Option<serde_json::Value>,
-    learn_subtab: usize,
-    learn_train_quant: usize,
-    learn_train_rank: usize,
-    learn_last_action_msg: Option<String>,
     focus: Option<Focus>,
     model: Option<GgufSummary>,
     model_topology: Option<ModelTopology>,
@@ -510,10 +506,6 @@ impl Workstation {
             unc_auto_quantize:0,
             unc_auto_planned:None,
             unc_auto_result:None,
-            learn_subtab: 0,
-            learn_train_quant: 0,
-            learn_train_rank: 0,
-            learn_last_action_msg: None,
             focus: None,
             model: None,
             model_topology: None,
@@ -2236,10 +2228,6 @@ impl Workstation {
         let unc_auto_quantize = &mut self.unc_auto_quantize;
         let unc_auto_planned = self.unc_auto_planned.as_ref();
         let unc_auto_result = self.unc_auto_result.as_ref();
-        let learn_subtab = &mut self.learn_subtab;
-        let learn_train_quant = &mut self.learn_train_quant;
-        let _learn_train_rank = &mut self.learn_train_rank;
-        let learn_last_action_msg = &mut self.learn_last_action_msg;
         let model = if source_is_current {
             self.model.as_ref()
         } else {
@@ -2311,9 +2299,7 @@ impl Workstation {
         {
             // New Kathamo navigation; each destination is an existing working view.
             let rail = NavigationRail::new()
-                .with_selected(if *workspace_tab == 3 {
-                    "learn"
-                } else if *workspace_tab == 2 {
+                .with_selected(if *workspace_tab == 2 {
                     "uncensor"
                 } else if *workspace_tab == 1 {
                     "manual"
@@ -2348,11 +2334,6 @@ impl Workstation {
                     "manual",
                     StudioIcon::Settings,
                     "Manual Tools",
-                ))
-                .add_main(NavigationRailItem::new(
-                    "learn",
-                    StudioIcon::Sparkles,
-                    "Learn",
                 ));
             if let Some(destination) = rail.render(
                 &mut cmds,
@@ -2386,9 +2367,6 @@ impl Workstation {
                     }
                     "uncensor" => {
                         *workspace_tab = 2;
-                    }
-                    "learn" => {
-                        *workspace_tab = 3;
                     }
                     _ => {}
                 }
@@ -2682,7 +2660,7 @@ impl Workstation {
                         });
                     } else {
                         col.card(54.0, |bar|{
-                            bar.tabs(&["Optimize Model","Manual Tools","Uncensor Model","Fine-tune with Bunon"], workspace_tab);
+                            bar.tabs(&["Optimize Model","Manual Tools","Uncensor Model"], workspace_tab);
                         });
                         if *workspace_tab==0 {
                             col.glass_card(if *advanced_opt_expanded { 430.0 } else { 250.0 }, |card|{
@@ -3210,70 +3188,6 @@ impl Workstation {
                                     card.label(&line.chars().take(95).collect::<String>());
                                 }
                             });
-                        }else if *workspace_tab==3{
-                            col.glass_card(420.0, |card|{
-                                card.heading("02   FINE-TUNE WITH BUNON — TRAINING DATA & JOBS");
-                                let learn_tabs = ["Collector Status", "Dataset Curation", "Fine-tune Plan", "Packages"];
-                                card.tabs(&learn_tabs, learn_subtab);
-                                // Bunon owns collection, curation, distillation and fine-tuning.
-                                // Ojon only forwards; every number shown here comes from bunon-learn.
-                                match ojon_backend::bunon_bridge::bunon_learn_binary() {
-                                    Some(path) => { card.status_pill(&format!("Bunon connected: {}", path.display()), true); }
-                                    None => { card.status_pill("Bunon not installed: quantisation and editing still work; install bunon-learn to fine-tune", false); }
-                                }
-                                let data_dir = std::path::PathBuf::from("collector");
-                                let run = |cmd: &str, args: Vec<std::ffi::OsString>| -> Result<serde_json::Value, String> {
-                                    let out = ojon_backend::bunon_bridge::forward_capture(cmd, &args).map_err(|e| e.to_string())?;
-                                    serde_json::from_str(out.trim()).map_err(|e| format!("bunon-learn {cmd} returned non-JSON output: {e}"))
-                                };
-                                if *learn_subtab == 0 {
-                                    card.label("Bunon's collector records agent sessions with redaction and execution-verified labels.");
-                                    if card.button_secondary("Refresh Collector Status").clicked() {
-                                        *learn_last_action_msg = Some(match run("learn-collector-status", vec!["--data-dir".into(), data_dir.clone().into(), "--json".into()]) {
-                                            Ok(v) => format!("Collector {}: {} episodes ({} verified, {} failed, {} unverified).",
-                                                v["liveness"].as_str().unwrap_or("unknown"), v["total_episodes"], v["verified_success_count"], v["failed_retry_count"], v["unverified_count"]),
-                                            Err(e) => format!("Collector status unavailable: {e}"),
-                                        });
-                                    }
-                                } else if *learn_subtab == 1 {
-                                    card.label("Dual-buffer curation (static anchors + recency window) into SFT/DPO exports, run by Bunon.");
-                                    if card.button_secondary("Run Curation & Export").clicked() {
-                                        let episodes = data_dir.join("collected_episodes.jsonl");
-                                        let out_dir = data_dir.join("curated");
-                                        *learn_last_action_msg = Some(match run("learn-curate", vec![episodes.into(), out_dir.clone().into(), "--json".into()]) {
-                                            Ok(v) => format!("Curated: {} anchor, {} recent, {} DPO pairs to {}.", v["anchor_count"], v["recency_count"], v["dpo_pair_count"], out_dir.display()),
-                                            Err(e) => format!("Curation failed: {e}"),
-                                        });
-                                    }
-                                } else if *learn_subtab == 2 {
-                                    card.label("Bunon plans LoRA/QLoRA fine-tuning; Ojon then merges the adapter and optimises the result.");
-                                    card.dropdown("Adapter Base Precision", learn_train_quant, &[
-                                        "4-bit NF4 QLoRA (--quant 4) [Recommended]",
-                                        "8-bit LoRA base (--quant 8)",
-                                    ]);
-                                    if card.button_secondary("Generate Fine-tune Plan (no training)").clicked() {
-                                        let base = if source.trim().is_empty() { "base_model" } else { source.trim() };
-                                        let bits = if *learn_train_quant == 0 { "4" } else { "8" };
-                                        *learn_last_action_msg = Some(match run("learn-train-plan", vec![base.into(), data_dir.join("curated").into(), data_dir.join("train_out").into(), "--quant".into(), bits.into(), "--json".into()]) {
-                                            Ok(v) => format!("Plan (not run): {:?} on {} — LoRA r={} alpha={}, base {}-bit.",
-                                                v["hardware"]["tier"], v["hardware"]["device_name"].as_str().unwrap_or("unknown device"), v["lora_rank"], v["lora_alpha"], v["quantization_bit"]),
-                                            Err(e) => format!("Fine-tune plan failed: {e}"),
-                                        });
-                                    }
-                                } else {
-                                    card.label("Promotion is decided by Bunon's job verify using Ojon task-eval on the frozen held-out suite.");
-                                    if card.button_secondary("List Installed Packages").clicked() {
-                                        *learn_last_action_msg = Some(match run("learn-package-list", vec![data_dir.clone().into(), "--json".into()]) {
-                                            Ok(v) => format!("{} active packages under {}.", v.as_array().map_or(0, |a| a.len()), data_dir.display()),
-                                            Err(e) => format!("Package list unavailable: {e}"),
-                                        });
-                                    }
-                                }
-
-                                if let Some(msg) = learn_last_action_msg.as_deref() {
-                                    card.status_pill(msg, true);
-                                }
-                            });
                         }
                     }
                 },
@@ -3670,8 +3584,6 @@ mod tests {
         );
         hit(&mut ws, 202.0);
         assert_eq!(ws.workspace_tab, 1, "Manual Tools must remain accessible");
-        hit(&mut ws, 246.0);
-        assert_eq!(ws.workspace_tab, 3, "Learn should open the Fine-tune with Bunon view");
         hit(&mut ws, 26.0);
         assert_eq!(ws.workspace_tab, 0);
         assert_eq!(ws.optimize_settings_tab, 0);

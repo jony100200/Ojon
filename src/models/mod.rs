@@ -6,7 +6,6 @@ pub mod bahon_pack;
 pub mod hf;
 pub mod llama;
 pub mod mmproj;
-pub mod handoff;
 pub mod mtp;
 pub mod model_build;
 pub mod whisper;

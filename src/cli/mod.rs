@@ -24,15 +24,6 @@ pub fn run() -> io::Result<()> {
         None => return Err(common::invalid("command must be valid Unicode")),
     };
 
-    // Training data and training jobs moved to Bunon: forward the legacy commands.
-    if ojon_backend::bunon_bridge::is_forwarded(cmd) {
-        let status = ojon_backend::bunon_bridge::forward(cmd, args)?;
-        if status.success() {
-            return Ok(());
-        }
-        std::process::exit(status.code().unwrap_or(1));
-    }
-
     if auto::handle(cmd, &mut args)? {
         return Ok(());
     }

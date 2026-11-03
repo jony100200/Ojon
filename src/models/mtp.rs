@@ -1,8 +1,8 @@
 //! Multi-token-prediction (MTP / NextN) and speculative-draft compatibility.
 //!
-//! Ownership: Bunon trains or fine-tunes MTP heads and draft models; Ojon only
-//! DETECTS, PRESERVES and PACKAGES them; KS llama.cpp / Twarok executes and
-//! benchmarks speculative decoding. Ojon never creates MTP weights: a model
+//! Ojon detects, preserves and packages existing MTP heads and draft models;
+//! supported inference backends benchmark speculative decoding.
+//! Ojon never creates MTP weights: a model
 //! without trained MTP tensors is reported `absent`, and the runtime falls back
 //! to normal decoding.
 //!

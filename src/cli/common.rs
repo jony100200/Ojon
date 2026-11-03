@@ -37,7 +37,6 @@ Commands:
   ojon mtp-inspect <model.gguf|hf-folder> [--json]   Detect MTP/NextN heads (never invents them)
   ojon mtp-verify-preserved <source> <optimised> [--json]   FAIL if quantisation dropped MTP heads
   ojon draft-compat <target.gguf> <draft.gguf> [--json]   Speculative draft tokenizer identity
-  ojon handoff-verify <bunon-handoff.json> [--json]   Re-verify a Bunon model handoff (hashes, GGUF, MTP, draft)
   ojon recommend <quality-evidence.json> [--json]  Smallest verified model within tolerance
   ojon ara-fit <module-io-calibration.json> <new-lowrank-edit-recipe.json> --confirm [--json]
   ojon method-select <measured-quality-scores.json> [--json]
@@ -140,15 +139,6 @@ Commands:
   ojon plan      <input.gguf> <output.gguf> [options]
   ojon quantize  <input.gguf> <output.gguf> [options]
 
-Training data and training jobs (owned by Bunon; forwarded to `bunon-learn`):
-  ojon learn-collector-status|learn-collector-start|learn-harvest|learn-utility-models
-  ojon learn-dataset-list|learn-dataset-import|learn-curate|learn-daemon-run
-  ojon learn-train-plan|learn-train-run|learn-promote|learn-knowledge-add|learn-temporal-query
-  ojon learn-package-create|learn-package-install|learn-package-list|learn-package-rollback
-  ojon dataset-audit|distill-plan|retrieve|train-plan|train-run
-  These run only when Bunon is installed (`bunon-learn` on PATH or OJON_BUNON_BIN);
-  arguments are passed through unchanged. Run `bunon-learn --help` for details.
-
 Quantization options:
   --tool <path>          Installed llama-quantize executable (default: llama-quantize in PATH)
   --precision <type>     Q5_K_M (default), Q4_K_M, Q3_K_M, Q6_K,
@@ -172,7 +162,7 @@ Important:
   - Existing outputs are never overwritten; no backend is installed automatically.
   - 'smoke' optionally runs real llama-cli inference; exit status is NOT a quality assessment.
   - The native Kathamo interface is in the optional ojon-gui binary.
-  - Fine-tuning, distillation and dataset curation are Bunon's; Ojon merges compatible adapters and optimises the result.
+  - Ojon accepts compatible external models or adapters for merging and optimisation; it does not train models.
   - Recommendation reads independently measured task metrics. It does not fabricate quality.
   - Agent probe/plan commands are read-only. Quantization sweeps and training need explicit --confirm.
   - Sweep conversion DOES NOT evaluate quality; it writes real results for later baseline comparison.

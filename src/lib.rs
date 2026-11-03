@@ -10,7 +10,6 @@ pub mod workflows;
 
 // Root-level module re-exports for transparent backward compatibility
 // Core
-pub use self::core::bunon_bridge;
 pub use self::core::discovery;
 pub use self::core::jobs;
 pub use self::core::probe;
@@ -58,7 +57,6 @@ pub use self::models::gguf;
 pub use self::models::hf;
 pub use self::models::llama;
 pub use self::models::mmproj;
-pub use self::models::handoff;
 pub use self::models::mtp;
 pub use self::models::model_build;
 pub use self::models::whisper;

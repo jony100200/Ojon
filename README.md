@@ -63,10 +63,9 @@ For model conversion and quantisation, first check the available tools with `bac
 | Behaviour editing | **Experimental** | GGUF projection and activation-based research workflows, with explicit quality gates. |
 | Multimodal and specialist model checks | **Partial** | Image/video diffusion parity, OCR, embeddings, rerankers and Whisper WER on supported backends. |
 | MTP and speculative-draft inspection | **Available as preflight** | Detect/preserve MTP components and check draft tokenizer compatibility; not a speed guarantee. |
-| Model handoff from Bunon | **Available** | Verify hashes, GGUF metadata and relevant components of Bunon-produced artifacts. |
 | Kathamo desktop interface | **Pre-alpha** | Native desktop workflow interface; not yet a polished binary release. |
 
-**Training, dataset curation and distillation belong to [Bunon](https://github.com/jony100200/Bunon).** Legacy Ojon training commands forward to `bunon-learn` when installed. Ojon retains model merging, optimisation and verification. Behaviour-editing code remains partly in Ojon while the research ownership moves to Bunon.
+Ojon focuses on model inspection, optimisation, supported experimental behaviour editing and quality verification. It can merge compatible external adapters, but does not provide a model-training pipeline.
 
 ## Evidence, not hype
 
@@ -85,7 +84,7 @@ The latest recorded FrogNano behavioural-editing trial **did not improve measure
 ```mermaid
 flowchart LR
     A["Original model"] --> B["Ojon: inspect and optimise"]
-    C["Bunon: train / tune"] --> B
+    C["Compatible model or adapter"] --> B
     B --> D["Candidate model"]
     D --> E["Porikkha: independent evaluation"]
     E --> F{"Meets quality gates?"}
