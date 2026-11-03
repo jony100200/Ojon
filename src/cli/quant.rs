@@ -2200,7 +2200,10 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             )?;
             let mut corpus: Option<PathBuf> = None;
             let mut verify_budget: Option<f64> = None;
-            let (mut context, mut gpu_layers, mut chunks) = (512u32, 99u32, 40u32);
+            // Local-first: do not borrow another agent's GPU by default.
+            // CPU recipe application and optional KL checks; --ngl or
+            // --ngl auto must be explicitly requested for offloading.
+            let (mut context, mut gpu_layers, mut chunks) = (512u32, 0u32, 40u32);
             let mut device: Option<String> = None;
             let mut fit = false;
             let mut threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(4);
@@ -2360,7 +2363,9 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 BackendId::LlamaPerplexity,
                 "llama-perplexity",
             )?;
-            let (mut context, mut gpu_layers, mut chunks) = (512u32, 99u32, 40u32);
+            // CPU-only by default: never offload to a resident agent's GPU
+            // unless the operator explicitly selects --ngl or --ngl auto.
+            let (mut context, mut gpu_layers, mut chunks) = (512u32, 0u32, 40u32);
             let mut device: Option<String> = None;
             let mut fit = false;
             let mut threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(4);
@@ -2456,7 +2461,9 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 );
             }
             if !execute {
-                println!("next_step: ojon recipe-run <same arguments> --confirm");
+                // Planning writes recipe-plan.json. The runner must resume
+                // that directory rather than reject the existing plan.
+                println!("next_step: ojon recipe-run <same arguments> --resume --confirm");
                 return Ok(true);
             }
             if !confirm {
