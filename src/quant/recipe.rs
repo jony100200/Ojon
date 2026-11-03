@@ -51,11 +51,14 @@ pub enum TensorClass {
     ExpertDown,
     SharedExpert,
     Router,
+    AttnGate,
+    Ssm,
+    Mtp,
     Other,
 }
 
 impl TensorClass {
-    pub const ALL: [TensorClass; 11] = [
+    pub const ALL: [TensorClass; 14] = [
         TensorClass::TokenEmbd,
         TensorClass::Output,
         TensorClass::AttnQk,
@@ -66,13 +69,16 @@ impl TensorClass {
         TensorClass::ExpertDown,
         TensorClass::SharedExpert,
         TensorClass::Router,
+        TensorClass::AttnGate,
+        TensorClass::Ssm,
+        TensorClass::Mtp,
         TensorClass::Other,
     ];
 
     /// Classes whose precision the search may lower. Routers stay at the
     /// converter default (llama.cpp keeps them high precision on purpose) and
     /// `Other` is norms, biases and 1-D tensors that are never quantized.
-    pub const SEARCHED: [TensorClass; 9] = [
+    pub const SEARCHED: [TensorClass; 12] = [
         TensorClass::TokenEmbd,
         TensorClass::Output,
         TensorClass::AttnQk,
@@ -82,6 +88,11 @@ impl TensorClass {
         TensorClass::ExpertGateUp,
         TensorClass::ExpertDown,
         TensorClass::SharedExpert,
+        // qwen35-style hybrids: gated-DeltaNet projections, attention output
+        // gates and the MTP (next-token) head get their own measured precision.
+        TensorClass::AttnGate,
+        TensorClass::Ssm,
+        TensorClass::Mtp,
     ];
 
     pub fn name(self) -> &'static str {
@@ -96,6 +107,9 @@ impl TensorClass {
             TensorClass::ExpertDown => "expert_down",
             TensorClass::SharedExpert => "shared_expert",
             TensorClass::Router => "router",
+            TensorClass::AttnGate => "attn_gate",
+            TensorClass::Ssm => "ssm",
+            TensorClass::Mtp => "mtp",
             TensorClass::Other => "other",
         }
     }
@@ -119,6 +133,11 @@ impl TensorClass {
             TensorClass::ExpertDown => r"\.ffn_down_exps\.weight$",
             TensorClass::SharedExpert => r"_shexp\.weight$",
             TensorClass::Router => r"\.ffn_gate_inp\.weight$",
+            TensorClass::AttnGate => r"\.attn_gate\.weight$",
+            // Only the gated-DeltaNet matmuls; ssm_conv1d/ssm_a/ssm_dt/ssm_norm stay F32.
+            TensorClass::Ssm => r"\.ssm_(out|alpha|beta)\.weight$",
+            // The MTP head's only matmul; its norms are 1-D.
+            TensorClass::Mtp => r"\.nextn\.eh_proj\.weight$",
             TensorClass::Other => r"$^",
         }
     }
@@ -135,6 +154,16 @@ impl TensorClass {
     pub fn of_name(name: &str) -> TensorClass {
         let n = name.to_ascii_lowercase();
         let base = n.strip_suffix(".weight").unwrap_or(n.as_str());
+        // MTP head first: `blk.N.nextn.*` must never fall into another class.
+        if base.contains(".nextn.") {
+            return TensorClass::Mtp;
+        }
+        if base.ends_with(".attn_gate") {
+            return TensorClass::AttnGate;
+        }
+        if base.ends_with(".ssm_out") || base.ends_with(".ssm_alpha") || base.ends_with(".ssm_beta") {
+            return TensorClass::Ssm;
+        }
         if base == "token_embd" {
             return TensorClass::TokenEmbd;
         }
@@ -177,8 +206,15 @@ impl TensorClass {
     /// them so a later measured override is auditable.
     pub fn floor(self) -> &'static str {
         match self {
-            TensorClass::TokenEmbd | TensorClass::Output | TensorClass::SharedExpert => "q4_k",
+            // The MTP head drafts tokens for speculative decoding; a degraded head
+            // costs speed that a size win must not hide.
+            TensorClass::TokenEmbd | TensorClass::Output | TensorClass::SharedExpert | TensorClass::Mtp => {
+                "q4_k"
+            }
             TensorClass::AttnVo => "q3_k",
+            // Unsloth UD-Q4_K_XL of Qwen3.8-27B keeps ssm_out/alpha/beta at Q8_0:
+            // a conservative floor until our own per-tensor KLD says otherwise.
+            TensorClass::Ssm => "q5_k",
             _ => "iq2_s",
         }
     }
@@ -542,6 +578,30 @@ mod tests {
         assert_eq!(TensorClass::of_name("blk.3.ffn_up_shexp.weight"), TensorClass::SharedExpert);
         assert_eq!(TensorClass::of_name("blk.3.ffn_up.weight"), TensorClass::FfnGateUp);
         assert_eq!(TensorClass::of_name("blk.3.ffn_gate_up_exps.weight"), TensorClass::ExpertGateUp);
+    }
+
+    #[test]
+    fn qwen35_hybrid_and_mtp_tensors_get_their_own_classes() {
+        // Names read from Unsloth's Qwen3.8-27B UD-Q4_K_XL GGUF (2026-11-03).
+        assert_eq!(TensorClass::of_name("blk.3.attn_gate.weight"), TensorClass::AttnGate);
+        for name in ["blk.0.ssm_out.weight", "blk.0.ssm_alpha.weight", "blk.0.ssm_beta.weight"] {
+            assert_eq!(TensorClass::of_name(name), TensorClass::Ssm, "{name}");
+        }
+        // conv1d / a / dt / norm stay out of the searched DeltaNet class.
+        for name in ["blk.0.ssm_conv1d.weight", "blk.0.ssm_a", "blk.0.ssm_dt.bias", "blk.0.ssm_norm.weight"] {
+            assert_eq!(TensorClass::of_name(name), TensorClass::Other, "{name}");
+        }
+        assert_eq!(TensorClass::of_name("blk.64.nextn.eh_proj.weight"), TensorClass::Mtp);
+        // The MTP layer's own attention still classifies as MTP, never as AttnQk.
+        assert_eq!(TensorClass::of_name("blk.64.nextn.shared_head_head.weight"), TensorClass::Mtp);
+        assert_eq!(TensorClass::of_name("blk.5.attn_q.weight"), TensorClass::AttnQk);
+        assert_eq!(TensorClass::of_name("blk.5.attn_qkv.weight"), TensorClass::AttnQk);
+        for class in [TensorClass::AttnGate, TensorClass::Ssm, TensorClass::Mtp] {
+            assert_eq!(TensorClass::parse(class.name()), Some(class));
+            assert!(TensorClass::SEARCHED.contains(&class));
+        }
+        assert_eq!(TensorClass::Ssm.floor(), "q5_k");
+        assert_eq!(TensorClass::Mtp.floor(), "q4_k");
     }
 
     #[test]
