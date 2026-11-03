@@ -12,6 +12,7 @@ pub mod ppl;
 pub mod quant_compare;
 pub mod quant_parity;
 pub mod gguf_diff;
+pub mod gguf_splice;
 pub mod recipe;
 pub mod recipe_run;
 pub mod sweep;

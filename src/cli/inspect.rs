@@ -9,6 +9,36 @@ use std::str::FromStr;
 
 pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result<bool> {
     match cmd {
+        "gguf-splice" => {
+            // gguf-splice <base.gguf> <donor.gguf> <new.gguf> --class attn_gate,ssm,...
+            let base = PathBuf::from(next_argument(&mut args, "base GGUF")?);
+            let donor = PathBuf::from(next_argument(&mut args, "donor GGUF")?);
+            let out = PathBuf::from(next_argument(&mut args, "new output GGUF")?);
+            if args.next().as_deref() != Some(std::ffi::OsStr::new("--class")) {
+                return Err(invalid("gguf-splice needs --class <name[,name...]>"));
+            }
+            let list = next_argument(&mut args, "class list")?;
+            let mut classes = Vec::new();
+            for name in list.to_string_lossy().split(',') {
+                classes.push(
+                    ojon_backend::quant::recipe::TensorClass::parse(name.trim())
+                        .ok_or_else(|| invalid(format!("unknown tensor class '{name}'")))?,
+                );
+            }
+            if args.next().is_some() {
+                return Err(invalid("gguf-splice takes no further options"));
+            }
+            let report = ojon_backend::quant::gguf_splice::splice(&base, &donor, |t| {
+                t.shape.len() >= 2 && classes.contains(&ojon_backend::quant::recipe::TensorClass::of_name(&t.name))
+            }, &out)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "output": out.display().to_string(), "tensors": report.tensors,
+                    "from_donor": report.from_donor, "bytes": report.bytes}))?
+            );
+            Ok(true)
+        }
         "gguf-diff" => {
             // gguf-diff <a.gguf> <b.gguf> [--json]: per-tensor ggml types and bytes per class.
             let a = PathBuf::from(next_argument(&mut args, "first GGUF")?);
