@@ -1,120 +1,126 @@
+<div align="center">
+
 # Ojon (ওজন)
 
-### Smaller AI models. More freedom. The quality you need.
+**Smaller local AI models. More freedom. Measured quality.**
 
-**Your AI models should fit your hardware — not the other way around.**
+A local-first Rust workstation for **model quantisation, behavioural editing experiments and honest before/after evaluation**.
 
-Large models demand more storage, memory and expensive hardware. Ojon is a free, open-source workstation from **[Kalponic Studio](https://github.com/jony100200)** built to help you make AI models smaller, test what you actually lose, and get more out of the computer you already own.
+[![Windows Rust Checks](https://github.com/jony100200/Ojon/actions/workflows/rust-check.yml/badge.svg)](https://github.com/jony100200/Ojon/actions/workflows/rust-check.yml)
+[![Development stage](https://img.shields.io/badge/status-pre--alpha-blueviolet)](https://github.com/jony100200/Ojon#project-status)
+[![Rust](https://img.shields.io/badge/core-Rust-1f2937?logo=rust)](Cargo.toml)
+[![MIT](https://img.shields.io/badge/license-MIT-64748b)](LICENSE)
 
-Instead of juggling a dozen separate utilities, **Ojon aims to bring model inspection, quantisation, hardware-fit optimisation, behaviour editing, evaluation and verified release into one straightforward desktop app.** Fine-tuning and distillation are done by its companion project [Bunon](https://github.com/jony100200/Bunon); Ojon then merges, optimises and verifies the result.
+[Quick start](#quick-start) · [Features](#what-ojon-can-do) · [Benchmarks](#evidence-not-hype) · [Documentation](#documentation) · [Contribute](CONTRIBUTING.md)
 
-**[Explore the features](#what-ojon-is-for) · [Get started](#get-started) · [Help build Ojon](#help-build-ojon)**
+</div>
 
-> **Current status: pre-alpha.** Ojon's desktop app, command-line tools and several working model inspection, conversion and testing workflows are available as source. Universal model support, automatic uncensoring, and one-click fine-tuning/distillation are **goals in development**, not completed features. Results depend on the model, installed tools and target hardware.
+---
 
-## Why use Ojon?
+## Your model. Your hardware. Your trade-offs.
 
-- **Run more AI on your own machine.** Smaller models can mean less RAM, VRAM and disk usage.
-- **Keep the intelligence that matters.** Compare outputs and performance instead of assuming a tiny model is still good.
-- **Stop hopping between tools.** One home for compatible model conversion, evaluation and optimisation workflows.
-- **Choose what matters to you.** Prioritise the smallest file, practical speed or the best measured balance.
-- **Work locally.** Use your own models, computer and supported backends without a mandatory cloud account.
-- **See the evidence.** Understand the size, speed and quality trade-offs before keeping a result.
+Large models consume memory. Small models can lose accuracy. Behaviour edits can remove unnecessary refusals *and* damage useful abilities.
 
-## What Ojon is for
+**Ojon helps you measure the trade-off instead of guessing.** Inspect a local model, plan a compatible workflow, build variants with supported backends, and keep only results that pass your chosen checks.
 
-| Feature | What it means for you | Progress |
-| --- | --- | --- |
-| **Optimise Model** | Find a smaller version that still performs well on the tasks you care about. | Available workflows; expanding |
-| **One-Command Quant** | `auto-quant`: pick smallest / balanced / safest, press, get the smallest measured recipe plus a receipt. | Available |
-| **Measured Mixed Precision** | Find how low each tensor class can go within a KL-divergence budget, per model, and build the smallest recipe that stays inside it ([method](docs/RECIPE_SEARCH.md)). | Available (`recipe-plan` / `recipe-run` / `recipe-apply`) |
-| **OCR Parity Gate** | Character error rate of an original VLM and its quants on pages with known text through llama-mtmd-cli; candidate-minus-original delta gated. | Available (`ocr-parity`) |
-| **KLD Scale for Any Quant** | Save the original's logits once, then score any GGUF (an online quant, your own recipe) against them on the same held-out text: bytes, mean/p99/max KLD. | Available (`kld-reference`, `kld-eval`) |
-| **LoRA-then-Quant** | Merge a GGUF or PEFT LoRA adapter into the F16 original (`llama-export-lora`), gate it on the held-out task suite, then quantize the improved original. | Available (`lora-merge`) |
-| **Diffusion Precision Sweep** | Convert an image or video denoiser to every GGUF format, measure each against the reference on a fixed seed, keep the smallest that passes. | Available (`diffusion-sweep`) |
-| **Image Parity Gate** | Compare a diffusion GGUF quant against its reference on a fixed-seed ComfyUI workflow: PSNR and pixel differences, pass/fail, receipt. | Available (`diffusion-parity`) |
-| **Embedding Parity Gate** | Compare an embedding or reranker GGUF quant against its reference on your own texts: per-text cosine, neighbour overlap, Recall@k / NDCG@10, pass/fail, receipt. | Available (`embed-parity-plan` / `embed-parity-run`) |
-| **Speech Quant + WER Gate** | Quantize a whisper.cpp model with its own `whisper-quantize` (q8_0 / q5_0 / q4_0) and gate each candidate on word error rate against the original on your own clips. | Available (`whisper-quant-plan` / `whisper-quant-run` / `whisper-parity-plan` / `whisper-parity-run`) |
-| **Calibration Corpus** | Turn your own chats, docs and code into a clean, deduplicated calibration file with a size report. | Available (`corpus-build`) |
-| **Compare Before & After** | Check size, model behaviour and performance rather than guessing. | Available workflows; expanding |
-| **Behaviour Quality Audit** | Check held-out legitimate-request handling, capability retention, confidence bounds and behavioural controls; optionally SHA-256 verify the actual original, candidate and evaluation files. | Available (read-only CLI; external scoring and runtime evidence required) |
-| **Task Receipt Audit** | Recheck every model result against the stored original and candidate scores; reject missing tasks, mismatched categories, fabricated aggregates and measured capability regressions. | Available (`task-receipt-audit`; read-only, source receipt required) |
-| **Model Editing Coverage** | Inspect real GGUF matrices to show supported structural targets and unsupported model paths before attempting an edit. | Available (read-only CLI preflight) |
-| **Bahon Q8 Pack Inspection** | Independently verify the Bahon v1 packed-model manifest, SHA-256, Q8 G64 scales and F32 tensors using `ojon bahon-pack-verify MODEL_DIR --json`. No re-quantisation or inference is performed. | Experimental read-only interoperability gate |
-| **Uncensor Model** | Explore reduced refusal behaviour while testing whether useful abilities are preserved. | Experimental; automation in development |
-| **Fine-tune with Bunon** | Optional hand-off: Bunon trains LoRA/QLoRA adapters, distils or recovers quality; Ojon merges and re-optimises. | Optional, requires Bunon |
-| **Desktop Workstation** | Inspect models and manage supported workflows through a native graphical interface. | Pre-alpha |
-| **Local-first & Open Source** | Bring your own supported tools and models, with no required hosted account. | Available |
-
-### One place for different kinds of AI
-
-Ojon's long-term goal is to support **all major AI model families**, using the right tools for each rather than pretending one converter works for everything.
-
-| Models | Examples |
+| **Optimise & quantise** | **Edit behaviour & verify** |
 | --- | --- |
-| **Language (LLM)** | Chat, coding, reasoning and assistants |
-| **Vision-language (VLM)** | Models that understand both images and text |
-| **Image** | Image generation and editing |
-| **Video** | Video generation and editing |
-| **Audio** | Speech recognition, voice, sound and music |
-| **Utility** | OCR, embeddings, rerankers, detection, segmentation and other specialist AI |
+| Find GGUF precision options, plan mixed-precision recipes and evaluate quality against the original. | Experiment with reduced over-refusal on supported models, then check coding, reasoning and legitimate-answer retention. |
+| **Goal:** a smaller model that fits your target machine. | **Goal:** more useful freedom without unmeasured capability loss. |
+| [Recipe search](docs/RECIPE_SEARCH.md) · [Quality strategy](QUALITY_STRATEGY.md) | [Behaviour audit](docs/BEHAVIOUR_QA.md) · [Research limitations](docs/HERETIC_2_RESEARCH.md) |
 
-**Support varies by model and backend.** Today, the most mature workflows centre on language models and GGUF. Image, video, audio and specialist-model support are being developed and validated incrementally.
+> **Pre-alpha:** The Rust CLI and Kathamo desktop source are available. Some workflows run with external tools; other model families and automatic editing remain experimental. **There is no downloadable stable release yet.** A successful conversion or an “uncensored” model name is not proof of quality.
 
-## How it should work
+## Quick start
 
-1. **Choose a model.** Ojon identifies what it is and checks compatible tools.
-2. **Choose your goal.** Make it smaller; optionally edit refusal behaviour, or hand off to Bunon to fine-tune or distil.
-3. **Find the right approach.** Ojon compares suitable methods for your model and hardware.
-4. **Test the results.** Check whether it loads, how much memory it uses, how fast it runs and how well it performs.
-5. **Keep the best version.** Export the smallest candidate that passes your chosen tests — or get an honest report if none does.
-
-*This is the intended end-to-end experience. Some stages currently require manual setup or separate backends.*
-
-## Small doesn't have to mean blindly worse
-
-A successful conversion is not proof that a model is still useful. Ojon is being built around **measured quality**, not just impressive compression numbers.
-
-The target is the **smallest practical, runnable model within your chosen quality limits**. No tool can promise identical quality at every possible file size, so Ojon should say clearly when a result has not been verified.
-
-## Get started
-
-Ojon is currently source-first. You'll need [Rust](https://www.rust-lang.org/tools/install) and the compatible model tools for the operation you want to run.
+You need a working [Rust toolchain](https://rustup.rs/) and, depending on the workflow, an installed compatible model backend.
 
 ```bash
 git clone https://github.com/jony100200/Ojon.git
 cd Ojon
 
-# Launch the desktop workstation
-cargo run --locked --features gui --bin ojon-gui
-
-# See the locally available model backends
+# See installed backends and their capabilities.
 cargo run --locked --bin ojon -- backends
+
+# Inspect a local GGUF without running inference.
+cargo run --locked --bin ojon -- inspect path/to/model.gguf
+
+# Open the optional Kathamo desktop workstation.
+cargo run --locked --features gui --bin ojon-gui
 ```
 
-Agent-session collection, dataset curation, distillation datasets and LoRA/QLoRA training jobs moved to [Bunon](https://github.com/jony100200/Bunon) on 2026-11-02. The legacy `ojon learn-*`, `train-plan`, `train-run`, `distill-plan`, `dataset-audit` and `retrieve` commands still work: Ojon forwards them unchanged to Bunon's `bunon-learn` when it is installed (on `PATH` or via `OJON_BUNON_BIN`), and otherwise exits with a message explaining how to install it. Collected data, receipts and schema names are unchanged.
+For model conversion and quantisation, first check the available tools with `backends`. Supported device IDs and formats depend on your installed versions. Ojon does **not** silently download models or promise every model family will work.
 
-Read the [User Guide](USER_GUIDE.md) for setup and supported workflows. For video quantisation, follow the [MiniMax H3 W4A4/NVFP4 guide](docs/MINIMAX_H3.md), which distinguishes packed W4A4 components from ComfyUI-compatible NVFP4 safetensors. The measured mixed-precision method is in [Recipe Search](docs/RECIPE_SEARCH.md).
+[Full user guide](USER_GUIDE.md) · [Command reference](USER_GUIDE.md) · [Report an issue](https://github.com/jony100200/Ojon/issues/new/choose)
 
-## Where we're heading
+## What Ojon can do
 
-Our priorities are simple: **finish reliable model optimisation and meaningful before/after comparisons; make model editing practical; extend verified support to image, video, audio and utility models; and hand off fine-tuning and distillation to Bunon through a stable, optional interface.**
+| Capability | Status | What it provides |
+| --- | --- | --- |
+| GGUF inspection and backend discovery | **Available** | Identify models, installed backends and basic compatibility without loading weights. |
+| Quantisation and optimisation workflows | **Available; backend-dependent** | `auto-quant`, precision sweeps, importance-aware and measured mixed-precision recipes. |
+| Quality and hardware evidence | **Available; evidence-dependent** | Compare task results, perplexity/KL, output size, peak memory and throughput when measured. |
+| Behaviour editing | **Experimental** | GGUF projection and activation-based research workflows, with explicit quality gates. |
+| Multimodal and specialist model checks | **Partial** | Image/video diffusion parity, OCR, embeddings, rerankers and Whisper WER on supported backends. |
+| MTP and speculative-draft inspection | **Available as preflight** | Detect/preserve MTP components and check draft tokenizer compatibility; not a speed guarantee. |
+| Model handoff from Bunon | **Available** | Verify hashes, GGUF metadata and relevant components of Bunon-produced artifacts. |
+| Kathamo desktop interface | **Pre-alpha** | Native desktop workflow interface; not yet a polished binary release. |
 
-Every new model family must produce files that **actually work in their intended applications**, not just smaller files on disk.
+**Training, dataset curation and distillation belong to [Bunon](https://github.com/jony100200/Bunon).** Legacy Ojon training commands forward to `bunon-learn` when installed. Ojon retains model merging, optimisation and verification. Behaviour-editing code remains partly in Ojon while the research ownership moves to Bunon.
 
-## Help build Ojon
+## Evidence, not hype
 
-Ojon is an early open-source project. If you want AI tools that are easier to use and better suited to everyday hardware, you can help by:
+Our standard is simple: **compare the original, a community alternative and the Ojon candidate using matched prompts, settings and verified output files.**
 
-- **Starring this repository** to support its development.
-- Trying a supported model and sharing real-world results.
-- Reporting bugs, missing model support or confusing workflows.
-- Contributing fixes, tests, backend integrations or interface improvements.
+A serious result records model/source hashes, task-level failures, quality retention, quantisation settings, real runtime load, memory and speed. Screening-only evidence is labelled as screening-only, not as a release certificate.
 
-**[Star Ojon on GitHub](https://github.com/jony100200/Ojon)** and follow its progress.
+The latest recorded FrogNano behavioural-editing trial **did not improve measured over-refusal** and was rejected. We publish that limitation rather than claim a win.
+
+- [Community Model Challenge — scope and limitations](docs/COMMUNITY_MODEL_CHALLENGE.md)
+- [FrogNano two-sided editing trial — rejected result](docs/FROGNANO_TWO_SIDED_ACTIVATION_TEST_2026_11_02.md)
+- [Quality acceptance rules](QUALITY_STRATEGY.md)
+
+## How the projects fit together
+
+```mermaid
+flowchart LR
+    A["Original model"] --> B["Ojon: inspect and optimise"]
+    C["Bunon: train / tune"] --> B
+    B --> D["Candidate model"]
+    D --> E["Porikkha: independent evaluation"]
+    E --> F{"Meets quality gates?"}
+    F -->|Yes| G["Package verified release"]
+    F -->|No| H["Keep original / revise recipe"]
+```
+
+Ojon can run its own screening and quality checks; **independent** benchmark verification is Porikkha's responsibility. Twarok and compatible inference backends handle runtime execution, where supported.
+
+## Project status
+
+Ojon is actively developed as an **open-source pre-alpha** project. No universal support, fully automatic uncensoring result or performance superiority is claimed. We prioritise:
+
+1. Repeatable quantisation results with measured quality per GB.
+2. Reliable before/after behaviour evaluation and safe rollback.
+3. Better first-run experience, architecture coverage and tested desktop binaries.
+4. Publishable reports, model cards and reproducible releases.
+
+**Want to help?** Try a documented workflow, file a reproducible [bug report](https://github.com/jony100200/Ojon/issues/new/choose), suggest a model/backend, or contribute a fix. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Documentation
+
+| Start here | Technical details |
+| --- | --- |
+| [User guide](USER_GUIDE.md) | [Recipe search](docs/RECIPE_SEARCH.md) |
+| [Quality strategy](QUALITY_STRATEGY.md) | [Behaviour evaluation](docs/BEHAVIOUR_QA.md) |
+| [Community challenge](docs/COMMUNITY_MODEL_CHALLENGE.md) | [Product differentiation](docs/PRODUCT_DIFFERENTIATION.md) |
+| [Contributing](CONTRIBUTING.md) | [Security reporting](SECURITY.md) |
 
 ---
 
+<div align="center">
+
 **Less memory. More models. Measured results.**
 
-Made by **Kalponic Studio**.
+Developed by [Kalponic Studio](https://github.com/jony100200) · [Issues](https://github.com/jony100200/Ojon/issues) · [GitHub Actions](https://github.com/jony100200/Ojon/actions)
+
+</div>

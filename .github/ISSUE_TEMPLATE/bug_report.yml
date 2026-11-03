@@ -1,0 +1,44 @@
+name: Bug report
+description: Report a reproducible problem with Ojon
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include private model files, local usernames, tokens or sensitive log contents."
+  - type: textarea
+    id: issue
+    attributes:
+      label: What went wrong?
+      description: Describe the actual behaviour and the expected result.
+      placeholder: "The backend probe reports ...; I expected ..."
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the Ojon command or workflow, with sensitive paths replaced.
+      placeholder: "1. Run ...\n2. Select ...\n3. Observe ..."
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: Ojon version or commit
+      placeholder: "Commit SHA or source checkout date"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system, hardware and backend versions
+      placeholder: "Windows 11 / CUDA / llama.cpp version"
+    validations:
+      required: false
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitised logs and test evidence
+      description: Share only information needed to reproduce; explain if a real model was not run.
+    validations:
+      required: false

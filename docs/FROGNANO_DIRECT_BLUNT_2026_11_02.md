@@ -41,7 +41,7 @@ The Ojon paired-screen-audit report now includes paired-tone statistics for neut
 
 ## Evidence provenance
 
-Local working folder: E:\LMStudio\eval-reports\frognano-2026-11-02\direct_blunt
+Local working folder: <private-evaluation-vault>/frognano-2026-11-02/direct_blunt
 
 | File | SHA-256 |
 | --- | --- |

@@ -27,7 +27,7 @@ The previous 18 legitimate prompts produced no refusal from the original FrogNan
 
 ## Local evidence provenance
 
-Folder: E:/LMStudio/eval-reports/frognano-2026-11-02/orbench/
+Folder: <private-evaluation-vault>/frognano-2026-11-02/orbench/
 
 | File | SHA-256 |
 | --- | --- |

@@ -61,7 +61,7 @@ These are empirical distribution-level results on **four short chunks**. They sh
 
 ## Reproducible local evidence (E drive only)
 
-Folder: `E:\LMStudio\eval-reports\frognano-2026-11-02\two_sided_v3`
+Folder: `<private-evaluation-vault>/frognano-2026-11-02/two_sided_v3`
 
 | File | SHA-256 |
 | --- | --- |

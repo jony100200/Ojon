@@ -7,7 +7,7 @@
 Run:
 
 ```powershell
-cargo run --bin ojon -- model-edit-coverage "E:\LMStudio\models\KS-FrogNano\FrogNano-4B-BF16.gguf" --json
+cargo run --bin ojon -- model-edit-coverage "path/to/FrogNano-4B-BF16.gguf" --json
 ```
 
 This uses Ojon's existing bounded GGUF descriptor reader without loading tensor payloads. It reports the architecture string, dtype and single-file eligibility, eligible named float projections, per-layer indicators of conventional attention, linear pathways and experts, and layers with no eligible target. The report intentionally does not claim that a hybrid linear-attention path, vision encoder, router, routed experts, or MTP can be modified. Do not treat number of editable matrices as a success metric.
@@ -110,7 +110,7 @@ gate. Use both measurements, not one in place of the other.
 For hybrid GGUFs, optionally pass the original Hugging Face configuration:
 
 ```powershell
-cargo run --bin ojon -- model-edit-coverage "E:\LMStudio\models\KS-FrogNano\FrogNano-4B-BF16.gguf" --hf-config "E:\LMStudio\models\microsoft\FrogNano-4B-2609\config.json" --json
+cargo run --bin ojon -- model-edit-coverage "path/to/FrogNano-4B-BF16.gguf" --hf-config "path/to/FrogNano-4B/config.json" --json
 ```
 
 This separates declared language layers from extra tensor block indices,

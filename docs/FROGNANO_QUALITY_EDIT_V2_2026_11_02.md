@@ -45,7 +45,7 @@ There were zero changed detector decisions on the 48-case hard screen. Two direc
 
 ## Reproducible local evidence
 
-Folder: E:/LMStudio/eval-reports/frognano-2026-11-02/quality_edit_v2/
+Folder: <private-evaluation-vault>/frognano-2026-11-02/quality_edit_v2/
 
 | File | SHA-256 |
 | --- | --- |

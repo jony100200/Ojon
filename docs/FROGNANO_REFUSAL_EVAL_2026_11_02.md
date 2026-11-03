@@ -19,7 +19,7 @@ All scores use Ojon's bounded phrase matcher, NOT an independent semantic refusa
 
 ## Local evidence (raw output is not committed)
 
-Folder: E:\LMStudio\eval-reports\frognano-2026-11-02\
+Folder: <private-evaluation-vault>/frognano-2026-11-02/
 
 - Original model: FrogNano-4B-Q4_K_M-original.gguf, SHA-256 0cb5b755f5bd982ad09410d3544df094d0c89d13770476dd229053c21b3a2bb8.
 - Edited model: FrogNano-4B-Q4_K_M-uncensored.gguf, SHA-256 5e75e8bb5037fc957baba59362ad2022dbe511cb8962269ff36f4ab667bb9439.

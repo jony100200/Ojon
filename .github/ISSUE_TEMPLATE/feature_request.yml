@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest a new model workflow, compatibility improvement or usability feature
+title: "[Feature] "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      placeholder: "As a user trying to ... I cannot ..."
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Proposed behaviour
+      description: Explain what the feature should do, not just the technology behind it.
+    validations:
+      required: true
+  - type: input
+    id: model_family
+    attributes:
+      label: Relevant model family and backend (if any)
+      placeholder: "GGUF / Whisper / ComfyUI / other"
+  - type: textarea
+    id: checks
+    attributes:
+      label: How could the result be verified?
+      description: Suggest the smallest real test demonstrating that the feature works.
+    validations:
+      required: false

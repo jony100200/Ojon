@@ -34,7 +34,7 @@ Links are enough for reproducible reference; do **not** check multi-megabyte PDF
 
 ## FrogNano / Qwen3.5 hybrid architecture
 
-Local `E:\LMStudio\models\microsoft\FrogNano-4B-2609\config.json` reports 32 language layers and `full_attention_interval=4`. Full attention occurs at zero-based layers 3, 7, 11, 15, 19, 23, 27, 31. The remaining 24 use linear attention. This is **local config evidence only**.
+Local `<local-models>/FrogNano-4B/config.json` reports 32 language layers and `full_attention_interval=4`. Full attention occurs at zero-based layers 3, 7, 11, 15, 19, 23, 27, 31. The remaining 24 use linear attention. This is **local config evidence only**.
 
 - The current GGUF directional editor supports `blk.N.attn_output.weight` and `blk.N.ffn_down.weight` (plus the explicitly supported shared-expert down target); this is **not** general DeltaNet or vision tensor editing.
 - The auto-sweep currently picks conventional `attn_output` blocks. It must never imply that the unedited 24 linear-attention pathways have been covered.
