@@ -173,25 +173,90 @@ impl ResourceAssessment {
 
 /// llama.cpp `--load-mode` for a tool that reads `model` (all shards). Dense models touch
 /// every weight on every pass; when the model is larger than available RAM, mmap makes
-/// Windows page it through the page file. DirectIO (`dio`) streams the non-resident
-/// weights from the SSD instead, and batch jobs (imatrix, KLD, recipe probes) amortise
-/// each read over a whole batch of tokens. `OJON_LOAD_MODE=auto|dio|mmap|none` overrides.
+/// Windows page it through the page file. DirectIO (`dio`) reads from the SSD directly
+/// and measured 2.4x faster per pass on a 51 GB BF16 (24 s vs 58 s), BUT it holds the
+/// whole model as private memory (55 GB commit vs 36 GB with mmap). So `auto` picks dio
+/// only when the model plus a safety margin fits in the free commit; otherwise it keeps
+/// llama.cpp's default. `OJON_LOAD_MODE=auto|dio|mmap|none` overrides.
 pub fn llama_load_mode(model: &Path) -> Option<&'static str> {
     let bytes = crate::models::gguf::shard_paths(model)
         .ok()
         .map(|paths| paths.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum::<u64>())
         .or_else(|| std::fs::metadata(model).ok().map(|m| m.len()))
         .unwrap_or(0);
-    choose_load_mode(std::env::var("OJON_LOAD_MODE").ok().as_deref(), bytes, available_ram())
+    choose_load_mode(
+        std::env::var("OJON_LOAD_MODE").ok().as_deref(),
+        bytes,
+        available_ram(),
+        available_commit(),
+    )
 }
 
-fn choose_load_mode(requested: Option<&str>, model_bytes: u64, available: Option<u64>) -> Option<&'static str> {
+/// Commit kept free for the rest of the machine (agents, builds) while a dio job runs.
+const DIO_COMMIT_MARGIN: u64 = 12 << 30;
+
+fn choose_load_mode(
+    requested: Option<&str>,
+    model_bytes: u64,
+    available_ram: Option<u64>,
+    available_commit: Option<u64>,
+) -> Option<&'static str> {
     match requested.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
         Some("dio") => Some("dio"),
         Some("mmap") => Some("mmap"),
         Some("none") | Some("off") => None,
-        _ => available.filter(|&a| model_bytes > a).map(|_| "dio"),
+        _ => {
+            let larger_than_ram = available_ram.is_some_and(|a| model_bytes > a);
+            let commit_ok = available_commit
+                .is_some_and(|c| model_bytes.saturating_add(DIO_COMMIT_MARGIN) <= c);
+            (larger_than_ram && commit_ok).then_some("dio")
+        }
     }
+}
+
+#[cfg(windows)]
+fn available_commit() -> Option<u64> {
+    #[repr(C)]
+    struct Status {
+        size: u32,
+        load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page: u64,
+        avail_page: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_extended: u64,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GlobalMemoryStatusEx(status: *mut Status) -> i32;
+    }
+    // SAFETY: zeroed C-compatible struct with the documented length set.
+    let mut status: Status = unsafe { std::mem::zeroed() };
+    status.size = std::mem::size_of::<Status>() as u32;
+    let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
+    (ok != 0).then_some(status.avail_page)
+}
+
+#[cfg(target_os = "linux")]
+fn available_commit() -> Option<u64> {
+    let data = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let field = |name: &str| -> Option<u64> {
+        data.lines()
+            .find_map(|l| l.strip_prefix(name))?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()?
+            .checked_mul(1024)
+    };
+    Some(field("MemAvailable:")? + field("SwapFree:").unwrap_or(0))
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn available_commit() -> Option<u64> {
+    None
 }
 
 #[cfg(windows)]
@@ -725,17 +790,22 @@ mod tests {
     #[test]
     fn models_larger_than_ram_stream_from_ssd_with_directio() {
         const GB: u64 = 1 << 30;
-        // Qwen3.8-27B BF16 (~51 GB) on a 32 GB desktop with ~20 GB free.
-        assert_eq!(choose_load_mode(None, 51 * GB, Some(20 * GB)), Some("dio"));
-        assert_eq!(choose_load_mode(Some("auto"), 51 * GB, Some(20 * GB)), Some("dio"));
-        // Fits in RAM: leave llama.cpp's default (mmap) alone.
-        assert_eq!(choose_load_mode(None, 16 * GB, Some(20 * GB)), None);
-        // Unknown RAM: no guess.
-        assert_eq!(choose_load_mode(None, 51 * GB, None), None);
+        // Qwen3.8-27B BF16 (~51 GB) on a 32 GB desktop with ~20 GB RAM free.
+        // Plenty of free commit (page file): DirectIO.
+        assert_eq!(choose_load_mode(None, 51 * GB, Some(20 * GB), Some(80 * GB)), Some("dio"));
+        assert_eq!(choose_load_mode(Some("auto"), 51 * GB, Some(20 * GB), Some(80 * GB)), Some("dio"));
+        // dio would commit the whole model: with only 55 GB of commit free (2026-11-03
+        // run reached 83% commit), keep llama.cpp's default instead.
+        assert_eq!(choose_load_mode(None, 51 * GB, Some(20 * GB), Some(55 * GB)), None);
+        // Fits in RAM: leave the default (mmap) alone.
+        assert_eq!(choose_load_mode(None, 16 * GB, Some(20 * GB), Some(80 * GB)), None);
+        // Unknown RAM or commit: no guess.
+        assert_eq!(choose_load_mode(None, 51 * GB, None, Some(80 * GB)), None);
+        assert_eq!(choose_load_mode(None, 51 * GB, Some(20 * GB), None), None);
         // Explicit overrides win either way.
-        assert_eq!(choose_load_mode(Some(" DIO "), GB, Some(20 * GB)), Some("dio"));
-        assert_eq!(choose_load_mode(Some("mmap"), 51 * GB, Some(20 * GB)), Some("mmap"));
-        assert_eq!(choose_load_mode(Some("none"), 51 * GB, Some(20 * GB)), None);
+        assert_eq!(choose_load_mode(Some(" DIO "), GB, Some(20 * GB), None), Some("dio"));
+        assert_eq!(choose_load_mode(Some("mmap"), 51 * GB, Some(20 * GB), Some(80 * GB)), Some("mmap"));
+        assert_eq!(choose_load_mode(Some("none"), 51 * GB, Some(20 * GB), Some(80 * GB)), None);
     }
 
     #[test]
