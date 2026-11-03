@@ -9,6 +9,43 @@ use std::str::FromStr;
 
 pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result<bool> {
     match cmd {
+        "gguf-diff" => {
+            // gguf-diff <a.gguf> <b.gguf> [--json]: per-tensor ggml types and bytes per class.
+            let a = PathBuf::from(next_argument(&mut args, "first GGUF")?);
+            let b = PathBuf::from(next_argument(&mut args, "second GGUF")?);
+            let json = match args.next() {
+                None => false,
+                Some(flag) if flag == "--json" && args.next().is_none() => true,
+                Some(_) => return Err(invalid("gguf-diff accepts only optional --json")),
+            };
+            let (_, a_tensors) = ojon_backend::models::gguf::inspect_sharded_gguf(&a)?;
+            let (_, b_tensors) = ojon_backend::models::gguf::inspect_sharded_gguf(&b)?;
+            let rows = ojon_backend::quant::gguf_diff::diff_tensors(&a_tensors, &b_tensors);
+            let summary = ojon_backend::quant::gguf_diff::class_summary(&rows);
+            if json {
+                let tensors: Vec<_> = rows
+                    .iter()
+                    .map(|r| serde_json::json!({"name": r.name, "class": r.class,
+                        "a_type": r.a_type, "b_type": r.b_type, "a_bytes": r.a_bytes, "b_bytes": r.b_bytes}))
+                    .collect();
+                let classes: Vec<_> = summary
+                    .iter()
+                    .map(|(c, ab, bb, changed)| serde_json::json!({"class": c, "a_bytes": ab, "b_bytes": bb, "changed": changed}))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "a": a.display().to_string(), "b": b.display().to_string(),
+                    "classes": classes, "tensors": tensors}))?);
+            } else {
+                println!("A: {}\nB: {}", a.display(), b.display());
+                println!("{:<16} {:>12} {:>12} {:>8}", "class", "A MiB", "B MiB", "changed");
+                for (class, ab, bb, changed) in &summary {
+                    println!("{:<16} {:>12.1} {:>12.1} {:>8}", class, *ab as f64 / 1048576.0, *bb as f64 / 1048576.0, changed);
+                }
+                let (ta, tb): (u64, u64) = summary.iter().fold((0, 0), |s, r| (s.0 + r.1, s.1 + r.2));
+                println!("{:<16} {:>12.1} {:>12.1}", "total", ta as f64 / 1048576.0, tb as f64 / 1048576.0);
+            }
+            Ok(true)
+        }
         "community-challenge-audit" => {
             let mut paths = Vec::new();
             for arg in args.by_ref() {
