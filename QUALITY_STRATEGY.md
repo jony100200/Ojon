@@ -19,7 +19,14 @@ Repeat with a different 4B-8B model before claiming general advantage.
 34.7% to 33.8% of BF16 while mean KLD increased from 0.0234 to 0.0326.
 That meets its local mean-KL budget but does **not** establish task-quality
 preservation or beat an equal-size stock quant. A Flint MoE probe stopped
-incomplete under host memory pressure. See `docs/RECIPE_SEARCH.md`.
+incomplete under host memory pressure. A newer **CPU-only** comparison of
+stock Q4 (484 MB), stock Q5 (551 MB) and Ojon's existing mixed recipe
+(503 MB) measured mean KL against the same FP16 source at 0.108343,
+0.035708 and 0.034154 respectively. Ojon's recipe was 8.69% smaller
+than the stock Q5 file, but used an importance matrix that stock Q5 did
+not; the small KL difference is within measurement uncertainty. This is
+encouraging workflow evidence, **not a matched-calibration superiority
+claim**. See `docs/RECIPE_SEARCH.md` for hashes and full limitations.
 
 **Research comparison:** llama.cpp is our GGUF encoder, not a separate Ojon
 quality win. Unsloth Dynamic 2 uses per-layer selection, AutoRound optimises
