@@ -107,11 +107,14 @@ pub struct KldStats {
 /// `Maximum KLD:   1.5`, `Median  KLD:   0.01`.
 pub fn parse_kld_line(line: &str) -> Option<(&'static str, f64, Option<f64>)> {
     let line = line.trim();
-    if line.starts_with("Same top p:") {
-        let rest = line.strip_prefix("Same top p:").unwrap().trim();
-        let mut parts = rest.split('±');
-        let value = parts.next()?.trim().trim_end_matches('%').trim().parse::<f64>().ok()?;
-        let unc = parts.next().and_then(|u| u.trim().trim_end_matches('%').trim().parse::<f64>().ok());
+    // Real lines carry Ojon's "[stdout] " prefix, and on Windows the UTF-8 '±' often
+    // arrives mis-decoded (e.g. "┬▒"), so read numbers by whitespace tokens, not by '±'.
+    if let Some((_, rest)) = line.split_once("Same top p:") {
+        let mut numbers = rest
+            .split_whitespace()
+            .filter_map(|t| t.trim_end_matches('%').parse::<f64>().ok());
+        let value = numbers.next()?;
+        let unc = numbers.next();
         if !value.is_finite() || !(0.0..=100.0).contains(&value) {
             return None;
         }
@@ -219,6 +222,15 @@ mod tests {
         assert_eq!(parse_kld_line("Same top p:  88.5 %"), Some(("same_top_p", 88.5, None)));
         assert_eq!(parse_kld_line("Same top p: garbage"), None);
         assert_eq!(parse_kld_line("Same top p: 140.0 %"), None);
+        // Exact lines from the Qwen3.8-27B run on Windows: log prefix + mis-decoded '±'.
+        assert_eq!(
+            parse_kld_line("[stdout] Same top p: 96.225 \u{252c}\u{2592} 0.189 %"),
+            Some(("same_top_p", 96.225, Some(0.189)))
+        );
+        assert_eq!(
+            parse_kld_line("[stdout] Same top p: 90.284 ± 0.293 %"),
+            Some(("same_top_p", 90.284, Some(0.293)))
+        );
     }
 
     #[test]
