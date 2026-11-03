@@ -95,6 +95,7 @@ pub struct KldStats {
     pub median: Option<f64>,
     pub p99: Option<f64>,
     pub max: Option<f64>,
+    pub same_top_p: Option<f64>,
     pub seconds: f64,
 }
 
@@ -103,6 +104,16 @@ pub struct KldStats {
 /// `Maximum KLD:   1.5`, `Median  KLD:   0.01`.
 pub fn parse_kld_line(line: &str) -> Option<(&'static str, f64, Option<f64>)> {
     let line = line.trim();
+    if line.starts_with("Same top p:") {
+        let rest = line.strip_prefix("Same top p:").unwrap().trim();
+        let mut parts = rest.split('±');
+        let value = parts.next()?.trim().trim_end_matches('%').trim().parse::<f64>().ok()?;
+        let unc = parts.next().and_then(|u| u.trim().trim_end_matches('%').trim().parse::<f64>().ok());
+        if !value.is_finite() || !(0.0..=100.0).contains(&value) {
+            return None;
+        }
+        return Some(("same_top_p", value, unc));
+    }
     let (label, rest) = line.split_once("KLD:")?;
     // Ojon's log streamer prefixes lines with "[stdout] " / "[stderr] "; the tool
     // itself may prefix a timestamp. Only the last word before "KLD:" matters.
@@ -133,6 +144,7 @@ fn absorb(stats: &mut KldStats, line: &str) {
             "median" => stats.median = Some(value),
             "max" => stats.max = Some(value),
             "p99" => stats.p99 = Some(value),
+            "same_top_p" => stats.same_top_p = Some(value),
             _ => {}
         }
     }
@@ -199,8 +211,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_same_top_p() {
+        assert_eq!(parse_kld_line("Same top p: 95.123 ± 0.123 %"), Some(("same_top_p", 95.123, Some(0.123))));
+        assert_eq!(parse_kld_line("Same top p:  88.5 %"), Some(("same_top_p", 88.5, None)));
+        assert_eq!(parse_kld_line("Same top p: garbage"), None);
+        assert_eq!(parse_kld_line("Same top p: 140.0 %"), None);
+    }
+
+    #[test]
     fn parses_upstream_summary_lines() {
-        assert_eq!(parse_kld_line("Mean    KLD:   0.012345 ±   0.000123"), Some(("mean", 0.012345, Some(0.000123))));
+        assert_eq!(parse_kld_line("Mean   KLD:   0.012345 ±   0.000123"), Some(("mean", 0.012345, Some(0.000123))));
         assert_eq!(parse_kld_line("Maximum KLD:   1.500000"), Some(("max", 1.5, None)));
         assert_eq!(parse_kld_line("99.0%   KLD:   0.100000"), Some(("p99", 0.1, None)));
         assert_eq!(parse_kld_line("Median  KLD:   0.010000"), Some(("median", 0.01, None)));

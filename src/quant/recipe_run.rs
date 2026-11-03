@@ -345,7 +345,7 @@ where
 }
 
 fn kld_json(s: &KldStats) -> Value {
-    json!({"mean": s.mean, "mean_uncertainty": s.mean_uncertainty, "median": s.median, "p99": s.p99, "max": s.max, "seconds": s.seconds})
+    json!({"mean": s.mean, "mean_uncertainty": s.mean_uncertainty, "median": s.median, "p99": s.p99, "max": s.max, "same_top_p": s.same_top_p, "seconds": s.seconds})
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -411,6 +411,7 @@ fn kld_from_json(v: &Value) -> Option<KldStats> {
         median: v.get("median").and_then(Value::as_f64),
         p99: v.get("p99").and_then(Value::as_f64),
         max: v.get("max").and_then(Value::as_f64),
+        same_top_p: v.get("same_top_p").and_then(Value::as_f64),
         seconds: v.get("seconds").and_then(Value::as_f64).unwrap_or(0.0),
     })
 }

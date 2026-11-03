@@ -232,7 +232,7 @@ pub fn tool_command(tool: &Path) -> Command {
 /// Lines longer than MAX_LINE_BYTES are split into fragments to bound memory.
 /// Total display output is limited; conversion continues even after that limit.
 /// The default bound is 4 hours; users may explicitly configure a longer
-/// legitimate conversion via OJON_JOB_TIMEOUT_SECONDS (5..=86400).
+/// legitimate conversion via OJON_JOB_TIMEOUT_SECONDS (5..=604800, i.e. up to 7 days).
 /// This is a local process limit, not a model performance estimate.
 pub fn run_with_log<F>(cmd: &mut Command, emit: F) -> io::Result<()>
 where
@@ -254,25 +254,35 @@ where
     run_streaming(cmd, Some(file), job_timeout()?, emit)
 }
 
+const MIN_JOB_TIMEOUT_SECS: u64 = 5;
+const MAX_JOB_TIMEOUT_SECS: u64 = 604800;
+
+fn parse_job_timeout(raw: Option<&str>) -> io::Result<Duration> {
+    let raw = match raw {
+        Some(r) => r,
+        None => return Ok(Duration::from_secs(4 * 3600)),
+    };
+    let seconds = raw.parse::<u64>().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    if (MIN_JOB_TIMEOUT_SECS..=MAX_JOB_TIMEOUT_SECS).contains(&seconds) {
+        Ok(Duration::from_secs(seconds))
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("OJON_JOB_TIMEOUT_SECONDS must be {MIN_JOB_TIMEOUT_SECS}..={MAX_JOB_TIMEOUT_SECS}"),
+        ))
+    }
+}
+
 /// The subprocess bound used by `run_with_log`: 4 hours unless
-/// OJON_JOB_TIMEOUT_SECONDS (5..=86400) says otherwise.
+/// OJON_JOB_TIMEOUT_SECONDS (5..=604800) says otherwise.
 fn job_timeout() -> io::Result<Duration> {
     match std::env::var("OJON_JOB_TIMEOUT_SECONDS") {
-        Ok(raw) => Ok(Duration::from_secs(
-            raw.parse::<u64>()
-                .ok()
-                .filter(|seconds| (5..=86400).contains(seconds))
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "OJON_JOB_TIMEOUT_SECONDS must be 5..=86400",
-                    )
-                })?,
-        )),
-        Err(std::env::VarError::NotPresent) => Ok(Duration::from_secs(4 * 3600)),
+        Ok(raw) => parse_job_timeout(Some(&raw)),
+        Err(std::env::VarError::NotPresent) => parse_job_timeout(None),
         Err(e) => Err(io::Error::new(io::ErrorKind::InvalidInput, e)),
     }
 }
+
 /// Bound even silent subprocesses. Timeout kills and reaps the selected
 /// direct child, closes the receiver and never claims successful output.
 pub fn run_with_log_timeout<F>(cmd: &mut Command, timeout: Duration, emit: F) -> io::Result<()>
@@ -631,6 +641,16 @@ pub fn finish_job_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn job_timeout_defaults_to_four_hours_and_allows_up_to_seven_days() {
+        assert_eq!(parse_job_timeout(None).unwrap(), Duration::from_secs(4 * 3600));
+        assert_eq!(parse_job_timeout(Some("604800")).unwrap(), Duration::from_secs(604800));
+        assert!(parse_job_timeout(Some("604801")).is_err());
+        assert!(parse_job_timeout(Some("4")).is_err());
+        assert!(parse_job_timeout(Some("abc")).is_err());
+    }
+
     #[test]
     fn stalled_external_process_is_terminated() {
         let mut command = if cfg!(windows) {

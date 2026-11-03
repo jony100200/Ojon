@@ -171,7 +171,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 }
                 rows.push(json!({
                     "path": plain(c), "bytes": summary.file_bytes, "file_type": summary.file_type, "percent_of_original": pct,
-                    "kld": {"mean": stats.mean, "mean_uncertainty": stats.mean_uncertainty, "median": stats.median, "p99": stats.p99, "max": stats.max, "seconds": stats.seconds},
+                    "kld": {"mean": stats.mean, "mean_uncertainty": stats.mean_uncertainty, "median": stats.median, "p99": stats.p99, "max": stats.max, "same_top_p": stats.same_top_p, "seconds": stats.seconds},
                 }));
             }
             let receipt = json!({
