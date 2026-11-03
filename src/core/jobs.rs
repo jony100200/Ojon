@@ -262,7 +262,8 @@ fn parse_job_timeout(raw: Option<&str>) -> io::Result<Duration> {
         Some(r) => r,
         None => return Ok(Duration::from_secs(4 * 3600)),
     };
-    let seconds = raw.parse::<u64>().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    // Trim: cmd.exe `set X=172800 && ...` stores "172800 " (found on the 27B run).
+    let seconds = raw.trim().parse::<u64>().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     if (MIN_JOB_TIMEOUT_SECS..=MAX_JOB_TIMEOUT_SECS).contains(&seconds) {
         Ok(Duration::from_secs(seconds))
     } else {
@@ -649,6 +650,7 @@ mod tests {
         assert!(parse_job_timeout(Some("604801")).is_err());
         assert!(parse_job_timeout(Some("4")).is_err());
         assert!(parse_job_timeout(Some("abc")).is_err());
+        assert_eq!(parse_job_timeout(Some("172800 ")).unwrap(), Duration::from_secs(172800));
     }
 
     #[test]

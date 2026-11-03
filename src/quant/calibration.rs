@@ -188,6 +188,9 @@ pub fn run_imatrix<F: FnMut(&str)>(plan: &ImatrixPlan, mut log: F) -> io::Result
     if let Some(d) = &plan.device {
         cmd.arg("-dev").arg(d);
     }
+    if let Some(mode) = crate::resource::llama_load_mode(&plan.model) {
+        cmd.arg("--load-mode").arg(mode);
+    }
     cmd.current_dir(&stage.0);
     log("[ojon] generating calibrated importance matrix with installed public llama-imatrix");
     run_with_log(&mut cmd, |line| log(line))?;

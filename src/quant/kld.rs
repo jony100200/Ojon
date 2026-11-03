@@ -84,6 +84,9 @@ impl KldSettings {
         if let Some(d) = &self.device {
             cmd.arg("-dev").arg(d);
         }
+        if let Some(mode) = crate::resource::llama_load_mode(model) {
+            cmd.arg("--load-mode").arg(mode);
+        }
     }
 }
 

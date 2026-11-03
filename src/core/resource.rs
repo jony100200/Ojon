@@ -136,6 +136,29 @@ impl ResourceAssessment {
     }
 }
 
+/// llama.cpp `--load-mode` for a tool that reads `model` (all shards). Dense models touch
+/// every weight on every pass; when the model is larger than available RAM, mmap makes
+/// Windows page it through the page file. DirectIO (`dio`) streams the non-resident
+/// weights from the SSD instead, and batch jobs (imatrix, KLD, recipe probes) amortise
+/// each read over a whole batch of tokens. `OJON_LOAD_MODE=auto|dio|mmap|none` overrides.
+pub fn llama_load_mode(model: &Path) -> Option<&'static str> {
+    let bytes = crate::models::gguf::shard_paths(model)
+        .ok()
+        .map(|paths| paths.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum::<u64>())
+        .or_else(|| std::fs::metadata(model).ok().map(|m| m.len()))
+        .unwrap_or(0);
+    choose_load_mode(std::env::var("OJON_LOAD_MODE").ok().as_deref(), bytes, available_ram())
+}
+
+fn choose_load_mode(requested: Option<&str>, model_bytes: u64, available: Option<u64>) -> Option<&'static str> {
+    match requested.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("dio") => Some("dio"),
+        Some("mmap") => Some("mmap"),
+        Some("none") | Some("off") => None,
+        _ => available.filter(|&a| model_bytes > a).map(|_| "dio"),
+    }
+}
+
 #[cfg(windows)]
 fn available_ram() -> Option<u64> {
     #[repr(C)]
@@ -663,6 +686,23 @@ pub fn resource_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn models_larger_than_ram_stream_from_ssd_with_directio() {
+        const GB: u64 = 1 << 30;
+        // Qwen3.8-27B BF16 (~51 GB) on a 32 GB desktop with ~20 GB free.
+        assert_eq!(choose_load_mode(None, 51 * GB, Some(20 * GB)), Some("dio"));
+        assert_eq!(choose_load_mode(Some("auto"), 51 * GB, Some(20 * GB)), Some("dio"));
+        // Fits in RAM: leave llama.cpp's default (mmap) alone.
+        assert_eq!(choose_load_mode(None, 16 * GB, Some(20 * GB)), None);
+        // Unknown RAM: no guess.
+        assert_eq!(choose_load_mode(None, 51 * GB, None), None);
+        // Explicit overrides win either way.
+        assert_eq!(choose_load_mode(Some(" DIO "), GB, Some(20 * GB)), Some("dio"));
+        assert_eq!(choose_load_mode(Some("mmap"), 51 * GB, Some(20 * GB)), Some("mmap"));
+        assert_eq!(choose_load_mode(Some("none"), 51 * GB, Some(20 * GB)), None);
+    }
+
     #[test]
     fn conservative_budget_is_not_fake_peak() {
         let base = 7 * GIB;
