@@ -348,6 +348,54 @@ where
     Ok(Quantized { path: done.output, bytes: done.output_info.file_bytes, seconds: started.elapsed().as_secs_f64() })
 }
 
+/// Build the probe "base + `class` at `level`" by splicing (see the probe loop).
+#[allow(clippy::too_many_arguments)]
+fn splice_probe<F>(
+    plan: &RecipePlan,
+    base_path: &Path,
+    all_base: &BTreeMap<TensorClass, &'static str>,
+    class: TensorClass,
+    level: &'static str,
+    stem: &str,
+    level_quants: &mut BTreeMap<&'static str, PathBuf>,
+    log: &mut F,
+) -> io::Result<Quantized>
+where
+    F: FnMut(&str),
+{
+    if !level_quants.contains_key(level) {
+        // Every class the plan probes at this level, set to it, in one quantization.
+        let mut levels = all_base.clone();
+        for p in plan.probes.iter().filter(|p| p.level == level) {
+            levels.insert(p.class, level);
+        }
+        let level_stem = format!("level-{level}");
+        let existing = plan.job.output_dir.join(format!("{level_stem}.gguf"));
+        let path = if plan.job.resume && existing.exists() && crate::models::gguf::inspect_gguf(&existing).is_ok() {
+            log(&format!("[ojon] resume: reusing level quant {}", plain(&existing)));
+            existing
+        } else {
+            if existing.exists() {
+                fs::remove_file(&existing)?;
+            }
+            log(&format!("[ojon] level quant: every probed class at {level} (spliced into each probe)"));
+            quantize_with(plan, &level_stem, &levels, log)?.path
+        };
+        level_quants.insert(level, path);
+    }
+    let out = plan.job.output_dir.join(format!("{stem}.gguf"));
+    if out.exists() {
+        fs::remove_file(&out)?;
+    }
+    let started = Instant::now();
+    let report = crate::quant::gguf_splice::splice(base_path, &level_quants[level], |t| {
+        t.shape.len() >= 2 && TensorClass::of_name(&t.name) == class
+    }, &out)?;
+    log(&format!("[ojon]   spliced {} {} tensors from the {level} quant in {:.0} s",
+        report.from_donor, class.name(), started.elapsed().as_secs_f64()));
+    Ok(Quantized { path: out, bytes: report.bytes, seconds: started.elapsed().as_secs_f64() })
+}
+
 fn kld_json(s: &KldStats) -> Value {
     json!({"mean": s.mean, "mean_uncertainty": s.mean_uncertainty, "median": s.median, "p99": s.p99, "max": s.max, "same_top_p": s.same_top_p, "seconds": s.seconds})
 }
@@ -581,6 +629,14 @@ where
 
     let mut rows = Vec::new();
     let mut measured = Vec::new();
+    // Probe by splicing: one quantization per level (every class probed at that level
+    // set to it), then each probe copies just its class out of that level quant onto
+    // the base quant. llama-quantize quantizes each tensor independently under a
+    // tensor-type file, so the bytes equal a full requantization; it replaces one
+    // ~15 min 27B requantization per probe with one per level. OJON_SPLICE_PROBES=0
+    // restores the per-probe requantization.
+    let splice_probes = std::env::var("OJON_SPLICE_PROBES").map_or(true, |v| v.trim() != "0");
+    let mut level_quants: BTreeMap<&'static str, PathBuf> = BTreeMap::new();
     for (i, probe) in plan.probes.iter().enumerate() {
         let mut levels = all_base.clone();
         levels.insert(probe.class, probe.level);
@@ -593,7 +649,12 @@ where
             continue;
         }
         log(&format!("[ojon] probe {}/{}: {} at {}", i + 1, plan.probes.len(), probe.class.name(), probe.level));
-        let outcome = quantize_with(plan, &stem, &levels, &mut log).and_then(|q| {
+        let built = if splice_probes {
+            splice_probe(plan, &base.path, &all_base, probe.class, probe.level, &stem, &mut level_quants, &mut log)
+        } else {
+            quantize_with(plan, &stem, &levels, &mut log)
+        };
+        let outcome = built.and_then(|q| {
             let k = measure_kld(&q.path, &dump, &plan.job.kld, &mut log)?;
             Ok((q, k))
         });
@@ -614,6 +675,12 @@ where
                 rows.push(json!({"class": probe.class.name(), "level": probe.level, "status": "failed", "error": e.to_string()}));
                 let _ = fs::remove_file(dir.join(format!("{stem}.gguf")));
             }
+        }
+    }
+
+    if !plan.job.keep_probes {
+        for path in level_quants.values() {
+            let _ = fs::remove_file(path);
         }
     }
 
