@@ -82,6 +82,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
     let mut eval_corpus: Option<PathBuf> = None;
     let mut device: Option<String> = None;
     let mut chunks = 24u32;
+    let mut target_bytes: Option<u64> = None;
     let mut threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(4);
     let (mut confirm, mut resume, mut json, mut force_search) = (false, false, false, false);
     let text = |v: OsString, what: &str| -> io::Result<String> {
@@ -99,6 +100,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             Some("--resume") => resume = true,
             Some("--json") => json = true,
             Some("--search") => force_search = true,
+            Some("--target-bytes") => target_bytes = Some(text(next_argument(&mut args, "target file size in bytes")?, "target-bytes")?.parse().map_err(|_| invalid("target-bytes must be a whole number of bytes"))?),
             _ => return Err(invalid(format!("unknown auto-quant option: {}", option.to_string_lossy()))),
         }
     }
@@ -114,7 +116,8 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
     // apply its stored recipe, one quantization, instead of a new probe search.
     let library = ojon_backend::quant::recipe_library::library_dir()?;
     let signature = ojon_backend::quant::recipe_library::model_signature(&source).ok();
-    if let (Some(sig), false) = (&signature, force_search) {
+    // A size target needs its own search: the stored family recipe is for the preset budget.
+    if let (Some(sig), false) = (&signature, force_search || target_bytes.is_some()) {
         if let Some(entry) = ojon_backend::quant::recipe_library::lookup(&library, sig, preset.name())? {
             println!("auto-quant: known family {sig} ({}): applying the stored measured recipe, no probe search", preset.name());
             println!("  recipe: {}", plain(&entry.receipt));
@@ -154,7 +157,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
         budget_p99: Some(p99),
         resume,
         eval_corpus,
-        refine_boundaries: true, target_bytes: None,
+        refine_boundaries: true, target_bytes,
     })?;
     let plan_path = plan.write_plan()?;
     let plan_json = plan.plan_json();
@@ -179,7 +182,8 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
     let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(&receipt_path)?)?;
     // Remember the measured recipe for this family, so the next fine-tune/edit of the
     // same base needs one quantization instead of a search. Only within-budget results.
-    if let (Some(sig), true) = (&signature, receipt["final"]["measured_within_budget"].as_bool().unwrap_or(false)) {
+    // Size-targeted recipes are not the family default, so they are not stored.
+    if let (Some(sig), true, None) = (&signature, receipt["final"]["measured_within_budget"].as_bool().unwrap_or(false), plan.job.target_bytes) {
         let imatrix = plan.job.imatrix.clone().or_else(|| {
             std::fs::read_dir(&plan.job.output_dir).ok()?.flatten().map(|e| e.path())
                 .find(|p| p.to_string_lossy().ends_with("imatrix.gguf"))
