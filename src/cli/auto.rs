@@ -61,6 +61,17 @@ impl Preset {
 }
 
 pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result<bool> {
+    if cmd == "recipe-library" {
+        // recipe-library list: every stored family recipe (signature/preset).
+        let lib = ojon_backend::quant::recipe_library::library_dir()?;
+        println!("library: {}", plain(&lib));
+        for fam in std::fs::read_dir(&lib).into_iter().flatten().flatten() {
+            for preset in std::fs::read_dir(fam.path()).into_iter().flatten().flatten() {
+                println!("  {} / {}", fam.file_name().to_string_lossy(), preset.file_name().to_string_lossy());
+            }
+        }
+        return Ok(true);
+    }
     if cmd != "auto-quant" {
         return Ok(false);
     }
@@ -72,7 +83,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
     let mut device: Option<String> = None;
     let mut chunks = 24u32;
     let mut threads = std::thread::available_parallelism().map(|v| v.get()).unwrap_or(4);
-    let (mut confirm, mut resume, mut json) = (false, false, false);
+    let (mut confirm, mut resume, mut json, mut force_search) = (false, false, false, false);
     let text = |v: OsString, what: &str| -> io::Result<String> {
         v.to_str().map(str::to_owned).ok_or_else(|| invalid(format!("{what} requires UTF-8")))
     };
@@ -87,6 +98,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             Some("--confirm") => confirm = true,
             Some("--resume") => resume = true,
             Some("--json") => json = true,
+            Some("--search") => force_search = true,
             _ => return Err(invalid(format!("unknown auto-quant option: {}", option.to_string_lossy()))),
         }
     }
@@ -97,6 +109,31 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
     let quantize_tool = resolve_backend_command(BackendId::LlamaQuantize, "llama-quantize")?;
     let perplexity_tool = resolve_backend_command(BackendId::LlamaPerplexity, "llama-perplexity")?;
     let imatrix_tool = resolve_backend_command(BackendId::LlamaImatrix, "llama-imatrix")?;
+
+    // Known family (same architecture and tensor shapes as a model already measured):
+    // apply its stored recipe, one quantization, instead of a new probe search.
+    let library = ojon_backend::quant::recipe_library::library_dir()?;
+    let signature = ojon_backend::quant::recipe_library::model_signature(&source).ok();
+    if let (Some(sig), false) = (&signature, force_search) {
+        if let Some(entry) = ojon_backend::quant::recipe_library::lookup(&library, sig, preset.name())? {
+            println!("auto-quant: known family {sig} ({}): applying the stored measured recipe, no probe search", preset.name());
+            println!("  recipe: {}", plain(&entry.receipt));
+            if !confirm {
+                println!("next_step: add --confirm (one quantization; --search forces a fresh search)");
+                return Ok(true);
+            }
+            std::fs::create_dir_all(&output_dir)?;
+            let verify_settings = eval_corpus.clone().map(|c| KldSettings {
+                tool: perplexity_tool.clone(), corpus: c, gpu_layers: 99, fit: true, context: 512, chunks, device: device.clone(),
+            });
+            let verify = verify_settings.as_ref().map(|s| (s, budget));
+            let out = ojon_backend::recipe_run::apply_recipe(
+                &source, &output_dir, &entry.receipt, &quantize_tool, entry.imatrix.as_deref(), threads, verify, |line| eprintln!("{line}"),
+            )?;
+            println!("receipt: {}", plain(&out));
+            return Ok(true);
+        }
+    }
 
     let plan = prepare_recipe(RecipeJob {
         source,
@@ -136,6 +173,19 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
     }
     let receipt_path = run_recipe(&plan, |line| eprintln!("{line}"))?;
     let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(&receipt_path)?)?;
+    // Remember the measured recipe for this family, so the next fine-tune/edit of the
+    // same base needs one quantization instead of a search. Only within-budget results.
+    if let (Some(sig), true) = (&signature, receipt["final"]["measured_within_budget"].as_bool().unwrap_or(false)) {
+        let imatrix = plan.job.imatrix.clone().or_else(|| {
+            std::fs::read_dir(&plan.job.output_dir).ok()?.flatten().map(|e| e.path())
+                .find(|p| p.to_string_lossy().ends_with("imatrix.gguf"))
+        });
+        let name = plan.job.source.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match ojon_backend::quant::recipe_library::store(&library, sig, preset.name(), &receipt_path, imatrix.as_deref(), &name) {
+            Ok(dir) => println!("library: stored this family's recipe at {}", plain(&dir)),
+            Err(e) => println!("library: not stored ({e})"),
+        }
+    }
     let f = &receipt["final"];
     println!("receipt: {}", plain(&receipt_path));
     println!(
