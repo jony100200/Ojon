@@ -158,6 +158,31 @@ pub fn split_corpus(text: &str) -> (String, String) {
     (text[..c].to_string(), text[c..].to_string())
 }
 
+/// Seed `out` from a finished recipe folder `previous`: copy the plan and the probe
+/// ledger, and hard-link (copy when linking fails) the reference logits, imatrix, base
+/// and level quants. Existing files in `out` are kept. Returns how many files were placed.
+pub fn seed_from(previous: &Path, out: &Path) -> io::Result<usize> {
+    fs::create_dir_all(out)?;
+    let mut placed = 0;
+    for entry in fs::read_dir(previous)? {
+        let path = entry?.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let copy = name == "recipe-plan.json" || name == "recipe-progress.jsonl";
+        let link = name == "reference.logits"
+            || name.ends_with("imatrix.gguf")
+            || (name.starts_with("base-") || name.starts_with("level-")) && name.ends_with(".gguf");
+        let dest = out.join(name);
+        if !(copy || link) || dest.exists() || !path.is_file() {
+            continue;
+        }
+        if copy || fs::hard_link(&path, &dest).is_err() {
+            fs::copy(&path, &dest)?;
+        }
+        placed += 1;
+    }
+    Ok(placed)
+}
+
 pub fn prepare_recipe(job: RecipeJob) -> io::Result<RecipePlan> {
     prepare_recipe_inner(job, false)
 }
@@ -1226,6 +1251,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seed_from_reuses_measurements_and_skips_finals() {
+        let root = std::env::temp_dir().join(format!("ojon-seed-{}", std::process::id()));
+        let (prev, out) = (root.join("prev"), root.join("out"));
+        fs::create_dir_all(&prev).unwrap();
+        for f in ["recipe-plan.json", "recipe-progress.jsonl", "reference.logits", "ojon.imatrix.gguf", "base-q5_k.gguf", "level-q4_k.gguf", "recipe.gguf", "recipe-receipt.json"] {
+            fs::write(prev.join(f), f).unwrap();
+        }
+        assert_eq!(seed_from(&prev, &out).unwrap(), 6);
+        assert!(out.join("level-q4_k.gguf").exists() && out.join("recipe-plan.json").exists());
+        assert!(!out.join("recipe.gguf").exists() && !out.join("recipe-receipt.json").exists());
+        assert_eq!(seed_from(&prev, &out).unwrap(), 0);
+        let _ = fs::remove_dir_all(&root);
+    }
 
     fn measured(mean: f64, p99: Option<f64>) -> KldStats {
         KldStats {
