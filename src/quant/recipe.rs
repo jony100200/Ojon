@@ -457,9 +457,14 @@ pub fn render_recipe(recipe: &Recipe, base: &str) -> String {
 /// block indices, or None when the model is too shallow for the split to mean
 /// anything.
 pub fn boundary_blocks(tensors: &[GgufTensor]) -> Option<(Vec<u32>, Vec<u32>)> {
+    let mtp: std::collections::HashSet<u32> = tensors.iter()
+        .filter(|t| t.name.contains(".nextn."))
+        .filter_map(|t| t.name.strip_prefix("blk.").and_then(|r| r.split('.').next()).and_then(|n| n.parse::<u32>().ok()))
+        .collect();
     let n_layer = tensors
         .iter()
         .filter_map(|t| t.name.strip_prefix("blk.").and_then(|r| r.split('.').next()).and_then(|n| n.parse::<u32>().ok()))
+        .filter(|n| !mtp.contains(n))
         .max()
         .map(|m| m + 1)?;
     if n_layer < 6 {
@@ -742,7 +747,12 @@ mod tests {
         deep.push(t("blk.7.ffn_down.weight", &[64, 64]));
         let (head, tail) = boundary_blocks(&deep).unwrap();
         assert_eq!((head, tail), (vec![0, 1], vec![6, 7]));
-        let p = block_pattern(TensorClass::AttnVo, &[0, 1]).unwrap();
+        // An MTP block (blk.N.nextn.*) is not a layer: the tail stays on the real last layers.
+        let mut mtp = deep.clone();
+        mtp.push(t("blk.8.nextn.eh_proj.weight", &[64, 64]));
+        mtp.push(t("blk.8.attn_q.weight", &[64, 64]));
+        assert_eq!(boundary_blocks(&mtp).unwrap().1, vec![6, 7]);
+        let p =block_pattern(TensorClass::AttnVo, &[0, 1]).unwrap();
         assert!(p.starts_with("^blk") && p.contains("(0|1)") && p.ends_with("attn_(v|output)\\.weight$"), "{p}");
         let f = block_pattern(TensorClass::FfnDown, &[6, 7]).unwrap();
         assert!(f.contains("(6|7)") && f.ends_with("ffn_down\\.weight$"), "{f}");
