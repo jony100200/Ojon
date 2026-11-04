@@ -53,6 +53,17 @@ For model conversion and quantisation, first check the available tools with `bac
 
 [Full user guide](USER_GUIDE.md) · [Command reference](USER_GUIDE.md) · [Report an issue](https://github.com/jony100200/Ojon/issues/new/choose)
 
+## Quick start: one command
+
+```
+ojon auto-quant original-BF16.gguf out/ --preset balanced --corpus cal.txt --eval-corpus heldout.txt --confirm
+```
+
+- First model of a family: Ojon measures how low each tensor class can go (KL divergence against the original on held-out text) and keeps the smallest recipe within the preset's budget.
+- Every later model of the same family (same architecture and tensor shapes, e.g. a fine-tune): the stored recipe is applied in one quantization. Measured on Qwen3.5-0.8B: 16 minutes for the first search, 57 seconds after, identical result (KLD 0.024005 both times).
+- `--target-bytes N` asks for a file of a given size instead; Ojon reports when that size costs more quality than the budget allows.
+- `ojon recipe-library list` shows the stored recipes; `ojon group-refine` re-searches a finished recipe per layer group.
+
 ## What Ojon can do
 
 | Capability | Status | What it provides |
