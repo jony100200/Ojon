@@ -420,11 +420,22 @@ pub fn is_integrated_gpu_name(name: &str) -> bool {
 
 pub fn discover_runtime_gpu_devices() -> Vec<RuntimeGpuDevice> {
     let mut out = Vec::new();
+    // Every llama.cpp tool answers --list-devices. Try them in turn: a single stale
+    // binary (e.g. an old llama-cli next to rebuilt DLLs, which segfaults) must not
+    // leave the GUI on "CPU Safe Mode" while working GPUs are present.
+    use crate::discovery::BackendId;
     let candidates = [
-        crate::discovery::discovered_path(crate::discovery::BackendId::LlamaCli),
-        crate::discovery::discovered_path(crate::discovery::BackendId::IntelSyclCli),
-    ];
+        BackendId::LlamaCli,
+        BackendId::LlamaServer,
+        BackendId::LlamaBench,
+        BackendId::LlamaPerplexity,
+        BackendId::IntelSyclCli,
+    ]
+    .map(crate::discovery::discovered_path);
     for path in candidates.into_iter().flatten() {
+        if !out.is_empty() && !path.to_string_lossy().to_ascii_lowercase().contains("sycl") {
+            continue; // devices already listed; only a SYCL build adds new ones
+        }
         if let Ok(output) = Command::new(&path).arg("--list-devices").output() {
             if output.status.success() {
                 if let Ok(text) = String::from_utf8(output.stdout) {

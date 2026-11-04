@@ -23,7 +23,7 @@ use ojon_backend::{
 };
 use ojon_backend::{load_settings, save_settings, LocalSettings};
 use ojon_backend::{
-    plan_optimize_workflow, run_optimize_workflow, OptimizeGoal, OptimizeWorkflowRequest,
+    plan_optimize_workflow, OptimizeGoal, OptimizeWorkflowRequest,
 };
 use ojon_backend::{prepare_bench, resource_plan, run_bench, ResourceMode};
 use std::collections::VecDeque;
@@ -1207,7 +1207,8 @@ impl Workstation {
         std::thread::spawn(move || {
             let logs = tx.clone();
             let jid = job_id.clone();
-            let result = run_optimize_workflow(&request, &tools, true, |line| {
+            let _ = &tools; // backends are resolved by the ojon CLI itself
+            let result = run_auto_quant_cli(&request, move |line| {
                 if line.contains("imatrix") || line.contains("Calibrat") {
                     let _ = logs.send(WorkerEvent::Stage("Calibrating importance matrix".into()));
                     let _ = update_job_stage(&jid, "Calibrating importance matrix");
@@ -2441,11 +2442,14 @@ impl Workstation {
                     .or_else(|| detected_gpus.first())
                 {
                     let free_gib = gpu.free_vram_bytes as f64 / 1_073_741_824.0;
+                    let discrete = detected_gpus.iter().filter(|g| !g.is_integrated).count();
+                    let short = gpu.name.replace("NVIDIA ", "").replace("GeForce ", "").replace("Intel(R) ", "");
                     (
-                        gpu.runtime_id.as_str(),
+                        if discrete > 1 { "GPUs Ready" } else { gpu.runtime_id.as_str() },
                         format!(
-                            "{} ({:.1} GiB free)",
-                            gpu.name.chars().take(22).collect::<String>(),
+                            "{}{} {:.1} GiB free",
+                            short.chars().take(16).collect::<String>(),
+                            if discrete > 1 { format!(" +{}", discrete - 1) } else { String::new() },
                             free_gib
                         ),
                     )
@@ -2664,7 +2668,7 @@ impl Workstation {
                         });
                         if *workspace_tab==0 {
                             col.glass_card(if *advanced_opt_expanded { 430.0 } else { 250.0 }, |card|{
-                                card.heading("02   OPTIMISE MODEL (UNIFIED PRECISION OPTIMIZER)");
+                                card.heading("02   OPTIMISE MODEL (MEASURED KLD-GATED RECIPE)");
                                 card.label("1. Choose your objective  ->  2. Click Optimise Model (auto hardware & calibration).");
                                 card.dropdown("Optimization Objective", opt_goal, &[
                                     "Balanced  —  Best quality-to-size & decode speed",
@@ -2673,10 +2677,10 @@ impl Workstation {
                                     "Maximum Quality  —  Highest retention (Q6_K / Q5_K_M spine)",
                                 ]);
                                 let rec_strategy = match *opt_goal {
-                                    1 => "Recommended: Auto-Imatrix + Aggressive K-Quant search (Q3_K_M / Q4_K_M) with Spine Protection",
-                                    2 => "Recommended: Auto-Imatrix + High-Throughput K-Quant search + llama-bench verification",
-                                    3 => "Recommended: Auto-Imatrix + RCO / Role-Aware Q6_K / Q5_K_M preservation",
-                                    _ => "Recommended: Auto-Imatrix + Role-Aware Q4_K_M / Q5_K_M search with Spine Protection",
+                                    1 => "Measured search (preset smallest): q4_k base, floor iq2_s, mean KLD budget +0.02 vs the original",
+                                    2 => "Measured search (preset balanced): smaller files decode faster; no separate speed preset yet",
+                                    3 => "Measured search (preset safest): q6_k base, floor q4_k, mean KLD budget +0.005",
+                                    _ => "Measured search (preset balanced): q5_k base, floor iq3_s, mean KLD budget +0.01; known model families reuse their stored recipe",
                                 };
                                 card.label(rec_strategy);
                                 card.horizontal(36.0, |actions| {
@@ -2834,6 +2838,7 @@ impl Workstation {
                                     if let Some(result)=opt_result{
                                         let passed=result["status"].as_str()==Some("PROVISIONAL_CANDIDATE_FOUND");
                                         card.status_pill(if passed{"ACCEPTED: Candidate passed all quality & size gates"}
+                                            else if result["status"]=="APPLIED_QUALITY_NOT_MEASURED"{"APPLIED: quality not measured (add a held-out text)"}
                                             else{"REJECTED: No candidate passed selected gates"},passed);
                                         let selected=&result["provisional_candidate"];
                                         let candidate=selected.as_str()
@@ -3392,9 +3397,16 @@ impl ApplicationHandler for DesktopApp {
         if self.window.is_some() {
             return;
         }
+        // Fit the work area: a fixed 960 px tall window ran under the taskbar on 1080p.
+        let (mut width, mut height) = (1500.0f64, 960.0f64);
+        if let Some(m) = loop_.primary_monitor() {
+            let screen = m.size().to_logical::<f64>(m.scale_factor());
+            width = width.min(screen.width * 0.94);
+            height = height.min(screen.height * 0.86);
+        }
         let attrs = WindowAttributes::default()
             .with_title("Ojon (ওজন)  |  Kalponic Studio")
-            .with_inner_size(LogicalSize::new(1500.0, 960.0))
+            .with_inner_size(LogicalSize::new(width, height))
             .with_min_inner_size(LogicalSize::new(1080.0, 720.0))
             .with_visible(false);
         match loop_.create_window(attrs) {
@@ -3415,6 +3427,10 @@ impl ApplicationHandler for DesktopApp {
                 if !self.ui.source.is_empty() {
                     self.ui.start_inspect();
                 }
+                // Windows never sends RedrawRequested to a hidden window, and the
+                // window only becomes visible after its first presented frame, so
+                // draw that frame directly (it was stuck invisible before).
+                self.draw(&win);
                 win.request_redraw();
             }
             Err(e) => eprintln!("Unable to open Ojon window: {e}"),
@@ -3500,9 +3516,172 @@ pub(super) fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `ojon auto-quant` preset for a GUI objective. There is no speed-only preset, so
+/// "Fastest" uses balanced (the measured recipe is also the faster file at equal quality).
+fn auto_quant_preset(goal: &ojon_backend::optimize_workflow::OptimizeGoal) -> &'static str {
+    use ojon_backend::optimize_workflow::OptimizeGoal as G;
+    match goal {
+        G::Smallest => "smallest",
+        G::MaximumQuality => "safest",
+        G::Balanced | G::Fastest => "balanced",
+    }
+}
+
+/// Runs the same measured KLD-gated search as `ojon auto-quant` (one engine for CLI and
+/// GUI): the `ojon` executable next to this GUI, log streamed line by line, cancellable,
+/// and its receipt mapped onto the fields the results panel shows.
+fn run_auto_quant_cli(
+    request: &OptimizeWorkflowRequest,
+    log: impl Fn(&str) + Send + Sync + 'static,
+) -> Result<serde_json::Value, String> {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    let exe_name = if cfg!(windows) { "ojon.exe" } else { "ojon" };
+    let cli = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(exe_name)))
+        .filter(|p| p.is_file())
+        .ok_or("the ojon command-line tool was not found next to ojon-gui; build it with `cargo build --release --bin ojon`")?;
+    let preset = auto_quant_preset(&request.goal);
+    // Always a dedicated folder: receipts, logs and probe files must not land loose
+    // next to the user's original model.
+    let stem = request.model.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "model".into());
+    let base = request.output_dir.clone().unwrap_or_else(|| request.model.parent().unwrap_or(Path::new(".")).to_path_buf());
+    let out = base.join(format!("{stem}-ojon-{preset}"));
+    let mut cmd = Command::new(&cli);
+    cmd.arg("auto-quant").arg(&request.model).arg(&out).args(["--preset", preset]);
+    if let Some(device) = request.runtime_device.as_deref().filter(|d| !d.is_empty()) {
+        cmd.args(["--device", device]);
+    }
+    // Quality must be measured: use the user's held-out text, else Ojon's bundled one.
+    let bundled = ["data/calibration.txt"].iter().map(PathBuf::from)
+        .chain(cli.parent().map(|d| d.join("data").join("calibration.txt")))
+        // llama-perplexity needs at least ~2 x ctx tokens per chunk; the 5 KB starter
+        // text is too short and fails, so it only counts when it is a real held-out set.
+        .find(|p| std::fs::metadata(p).is_ok_and(|m| m.len() >= 64 * 1024));
+    if let Some(corpus) = request.ppl_corpus.clone().or(bundled) {
+        cmd.arg("--eval-corpus").arg(corpus);
+    }
+    cmd.args(["--resume", "--confirm"]).stdout(Stdio::piped()).stderr(Stdio::piped());
+    log(&format!("[ojon-gui] auto-quant {} -> {} (preset {preset})", request.model.display(), out.display()));
+    let mut child = cmd.spawn().map_err(|e| format!("could not start {}: {e}", cli.display()))?;
+    let (stdout, stderr) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
+    let log = Arc::new(log);
+    let err_log = log.clone();
+    let err_thread = std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            err_log(&line);
+        }
+    });
+    let receipt = Arc::new(std::sync::Mutex::new(None::<PathBuf>));
+    let out_receipt = receipt.clone();
+    let out_log = log.clone();
+    let out_thread = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if let Some(path) = line.strip_prefix("receipt: ") {
+                *out_receipt.lock().unwrap() = Some(PathBuf::from(path.trim()));
+            }
+            out_log(&line);
+        }
+    });
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
+        if is_job_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("cancelled by user".into());
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    };
+    let _ = (err_thread.join(), out_thread.join());
+    if !status.success() {
+        return Err(format!("auto-quant exited with {status}; see the live log"));
+    }
+    let path = receipt.lock().unwrap().clone().ok_or("auto-quant finished without a receipt")?;
+    let text = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let r: serde_json::Value = serde_json::from_slice(&text).map_err(|e| e.to_string())?;
+    Ok(auto_quant_result(&r, &path))
+}
+
+/// Receipt (`recipe-receipt.json` or a library apply receipt) -> results-panel value.
+fn auto_quant_result(r: &serde_json::Value, receipt: &Path) -> serde_json::Value {
+    // Full search writes `final`; a stored-recipe (library) apply writes
+    // `output`/`output_bytes`/`verification` (verification only with a held-out text).
+    let f = &r["final"];
+    let applied = f.is_null();
+    let check = if applied { &r["verification"] } else { f };
+    let within = check["measured_within_budget"].as_bool().unwrap_or(false);
+    let path = if applied { r["output"].as_str() } else { f["path"].as_str() }.unwrap_or("");
+    let bytes = (if applied { r["output_bytes"].as_u64() } else { f["bytes"].as_u64() })
+        .or_else(|| std::fs::metadata(path).ok().map(|m| m.len()));
+    let ratio = if applied { r["size_ratio_vs_source"].as_f64() } else { f["size_ratio_vs_source"].as_f64() };
+    let kld = check["kld"]["mean"].as_f64();
+    let top1 = check["kld"]["same_top_p"].as_f64();
+    let name = format!(
+        "Ojon recipe (mean KLD {}{})",
+        kld.map(|v| format!("{v:.4}")).unwrap_or_else(|| "unmeasured".into()),
+        top1.map(|v| format!(", same top token {v:.1}%")).unwrap_or_default()
+    );
+    let status = if kld.is_none() {
+        "APPLIED_QUALITY_NOT_MEASURED"
+    } else if within {
+        "PROVISIONAL_CANDIDATE_FOUND"
+    } else {
+        "NO_CANDIDATE_PASSED"
+    };
+    serde_json::json!({
+        "status": status,
+        "provisional_candidate": {"path": path},
+        "selected_candidate_topology": bytes.map(|b| serde_json::json!({
+            "file_bytes": b,
+            // Sources are F16/BF16 (16 bits per weight), so bpw = 16 x size ratio.
+            "effective_bpw": ratio.map(|v| v * 16.0).unwrap_or(0.0)
+        })),
+        "evidence": {"results": [{
+            "name": name,
+            "status": if kld.is_none() { "quality not measured" } else if within { "within KLD budget" } else { "over KLD budget" },
+            "savings_pct": ratio.map(|v| (1.0 - v) * 100.0),
+        }]},
+        "selected_candidate_runtime_load": {"status": "not tested"},
+        "auto_quant_receipt": receipt.display().to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_quant_receipt_maps_to_results_panel() {
+        let r = serde_json::json!({"final": {"path": "x/recipe.gguf", "bytes": 16_326_548_512u64,
+            "size_ratio_vs_source": 0.2987, "measured_within_budget": true,
+            "kld": {"mean": 0.0107, "same_top_p": 94.82}}});
+        let v = auto_quant_result(&r, Path::new("x/recipe-receipt.json"));
+        assert_eq!(v["status"], "PROVISIONAL_CANDIDATE_FOUND");
+        assert_eq!(v["provisional_candidate"]["path"], "x/recipe.gguf");
+        assert_eq!(v["selected_candidate_topology"]["file_bytes"], 16_326_548_512u64);
+        let row = &v["evidence"]["results"][0];
+        assert!(row["name"].as_str().unwrap().contains("0.0107") && row["name"].as_str().unwrap().contains("94.8%"));
+        assert!((row["savings_pct"].as_f64().unwrap() - 70.13).abs() < 0.01);
+        let over = auto_quant_result(&serde_json::json!({"final": {"measured_within_budget": false,
+            "kld": {"mean": 0.0598}}}), Path::new("r"));
+        assert_eq!(over["status"], "NO_CANDIDATE_PASSED");
+        // Applied without a held-out text: not a rejection, just unmeasured.
+        let unmeasured = auto_quant_result(&serde_json::json!({"output": "u.gguf", "size_ratio_vs_source": 0.3368}), Path::new("r"));
+        assert_eq!(unmeasured["status"], "APPLIED_QUALITY_NOT_MEASURED");
+        assert!((unmeasured["selected_candidate_topology"]["effective_bpw"].as_f64().unwrap_or(0.0) - 5.39).abs() < 0.01
+            || unmeasured["selected_candidate_topology"].is_null());
+        // Library apply receipt (real layout from the 0.8B run).
+        let lib = serde_json::json!({"output": "t/recipe-applied.gguf", "output_bytes": 524_548_960u64,
+            "size_ratio_vs_source": 0.3368, "verification": {"measured_within_budget": true,
+            "kld": {"mean": 0.024005, "same_top_p": 91.879}}});
+        let v = auto_quant_result(&lib, Path::new("t/recipe-applied-receipt.json"));
+        assert_eq!(v["status"], "PROVISIONAL_CANDIDATE_FOUND");
+        assert_eq!(v["provisional_candidate"]["path"], "t/recipe-applied.gguf");
+        assert!(v["evidence"]["results"][0]["name"].as_str().unwrap().contains("0.0240"));
+    }
 
     #[test]
     fn live_log_does_not_finish_running_conversion() {
