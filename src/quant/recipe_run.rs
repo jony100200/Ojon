@@ -996,6 +996,15 @@ where
             _ => String::new(),
         },
         if within { "within budget" } else { "OVER budget; not accepted" }));
+    if !within {
+        if let Some(target) = plan.job.target_bytes {
+            let added = final_kld.mean - base_kld.mean;
+            log(&format!(
+                "[ojon] advisory: the size target ({target} bytes) forced this recipe {:.1}x over the KLD budget (+{:.6} vs +{:.6}); raise --target-bytes, or drop it to get the smallest recipe within budget",
+                added / plan.job.budget_kld, added, plan.job.budget_kld
+            ));
+        }
+    }
 
     // Boundary refinement: one more quantization, adopted only on measurement.
     let mut final_q = final_q;
