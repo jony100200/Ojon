@@ -671,6 +671,9 @@ where
     // restores the per-probe requantization.
     let splice_probes = std::env::var("OJON_SPLICE_PROBES").map_or(true, |v| v.trim() != "0");
     let mut level_quants: BTreeMap<&'static str, PathBuf> = BTreeMap::new();
+    // OJON_MEASURED_ONLY=1 with --resume: no new probes; the recipe is chosen from the
+    // probes already in the ledger (unmeasured levels are simply never lowered to).
+    let measured_only = plan.job.resume && std::env::var("OJON_MEASURED_ONLY").is_ok_and(|v| v.trim() == "1");
     for (i, probe) in plan.probes.iter().enumerate() {
         let mut levels = all_base.clone();
         levels.insert(probe.class, probe.level);
@@ -680,6 +683,11 @@ where
             rows.push(json!({"class": probe.class.name(), "level": probe.level, "status": "measured", "resumed": true, "bytes": bytes,
                              "kld": kld_json(k), "kld_delta_vs_base": k.mean - base_kld.mean}));
             measured.push(Measured { class: probe.class, level: probe.level, mean_kld: k.mean });
+            continue;
+        }
+        if measured_only {
+            // Cut a long search short: select from what is already measured.
+            log(&format!("[ojon] probe {}/{}: {} at {} (skipped: OJON_MEASURED_ONLY)", i + 1, plan.probes.len(), probe.class.name(), probe.level));
             continue;
         }
         log(&format!("[ojon] probe {}/{}: {} at {}", i + 1, plan.probes.len(), probe.class.name(), probe.level));
