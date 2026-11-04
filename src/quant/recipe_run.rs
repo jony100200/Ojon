@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Instant;
 
-use crate::gguf::{inspect_gguf, inspect_gguf_tensors, inspect_sharded_gguf};
+use crate::gguf::{inspect_gguf, inspect_gguf_tensors, inspect_sharded_gguf, GgufTensor};
 use crate::llama::{prepare_gguf, quantize_gguf_with_log, Precision};
 use crate::quant::kld::{measure_kld, save_reference_logits, KldSettings, KldStats};
 use crate::quant::recipe::{
@@ -159,6 +159,16 @@ pub fn split_corpus(text: &str) -> (String, String) {
 }
 
 pub fn prepare_recipe(job: RecipeJob) -> io::Result<RecipePlan> {
+    prepare_recipe_inner(job, false)
+}
+
+/// For `group-refine`, which runs in a FINISHED class-search directory (it reuses
+/// that search's reference, base quant and probes, and writes group-* files only).
+pub fn prepare_refine(job: RecipeJob) -> io::Result<RecipePlan> {
+    prepare_recipe_inner(RecipeJob { resume: true, ..job }, true)
+}
+
+fn prepare_recipe_inner(job: RecipeJob, allow_finished: bool) -> io::Result<RecipePlan> {
     if job.threads == 0 {
         return Err(invalid("threads must be positive"));
     }
@@ -188,7 +198,7 @@ pub fn prepare_recipe(job: RecipeJob) -> io::Result<RecipePlan> {
     }
     let output_dir = job.output_dir.canonicalize()?;
     for name in ["recipe-receipt.json", "recipe.gguf"] {
-        if output_dir.join(name).exists() {
+        if !allow_finished && output_dir.join(name).exists() {
             return Err(invalid(format!("{name} already exists in the output directory; this search is finished, use a new directory")));
         }
     }
@@ -535,6 +545,239 @@ fn load_progress(dir: &Path) -> io::Result<Progress> {
         return Ok(Progress::default());
     }
     parse_progress(&fs::read_to_string(path)?)
+}
+
+fn block_of(name: &str) -> Option<u32> {
+    name.strip_prefix("blk.")?.split('.').next()?.parse().ok()
+}
+
+/// Contiguous layer groups over `n_layer` transformer blocks: group g covers
+/// [g*n/G, (g+1)*n/G). Returns the group of `block`.
+fn group_of(block: u32, n_layer: u32, groups: u32) -> u32 {
+    ((u64::from(block) * u64::from(groups)) / u64::from(n_layer.max(1))).min(u64::from(groups - 1)) as u32
+}
+
+/// Per-layer-group allocation, the step after the per-class search. Runs in the class
+/// search's output directory (reference logits, base quant, imatrix and class probes
+/// present) and reuses its level quants. Each (class, layer group) is probed by
+/// splicing just its tensors from a level quant; levels are then chosen per unit by
+/// bytes saved per unit of KLD until `target_bytes` (file bytes), the file is
+/// assembled by splicing several level quants and measured.
+///
+/// Units are measured one at a time against the base, so the selection assumes their
+/// KLD effects add up; the final measurement of the assembled file is what counts.
+pub fn run_group_refine<F>(plan: &RecipePlan, groups: u32, target_bytes: u64, mut log: F) -> io::Result<PathBuf>
+where
+    F: FnMut(&str),
+{
+    if !(2..=16).contains(&groups) {
+        return Err(invalid("groups must be 2..=16"));
+    }
+    let dir = plan.job.output_dir.clone();
+    let base_level = ladder_name(plan.job.base)?;
+    let base_path = dir.join(format!("base-{base_level}.gguf"));
+    let dump = dir.join("reference.logits");
+    let progress = load_progress(&dir)?;
+    let (Some((_, base_kld)), true, true) = (&progress.base, base_path.is_file(), dump.is_file()) else {
+        return Err(invalid("group refinement needs a finished class search in this directory (base quant, reference.logits, progress)"));
+    };
+    let mut plan_used = plan.clone();
+    plan_used.job.kld.corpus = match &plan.job.eval_corpus {
+        Some(ec) => ec.clone(),
+        None => dir.join("corpus-eval.txt"),
+    };
+    if plan_used.job.imatrix.is_none() {
+        let auto = dir.join("calibration.imatrix.gguf");
+        plan_used.job.imatrix = auto.is_file().then_some(auto);
+    }
+    let plan = &plan_used;
+
+    let base_tensors = inspect_gguf_tensors(&base_path)?;
+    let base_file_bytes = fs::metadata(&base_path)?.len();
+    let mtp_blocks: Vec<u32> = base_tensors.iter().filter(|t| t.name.contains(".nextn.")).filter_map(|t| block_of(&t.name)).collect();
+    let n_layer = base_tensors.iter().filter_map(|t| block_of(&t.name)).filter(|b| !mtp_blocks.contains(b)).max().map_or(0, |m| m + 1);
+    if n_layer < groups {
+        return Err(invalid("model has fewer blocks than groups"));
+    }
+    // unit key: (class, group); classes without blocks (token_embd, output) are one unit.
+    let unit_of = |t: &GgufTensor| -> Option<(TensorClass, u32)> {
+        if t.shape.len() < 2 {
+            return None;
+        }
+        let class = TensorClass::of(t);
+        if !TensorClass::SEARCHED.contains(&class) {
+            return None;
+        }
+        match block_of(&t.name) {
+            Some(b) if mtp_blocks.contains(&b) => None, // MTP block stays pinned at base
+            Some(b) => Some((class, group_of(b, n_layer, groups))),
+            None => Some((class, 0)),
+        }
+    };
+
+    // Levels each class was measured at in the class search, highest precision first.
+    let mut class_levels: BTreeMap<TensorClass, Vec<&'static str>> = BTreeMap::new();
+    for (class, level) in progress.probes.keys() {
+        class_levels.entry(*class).or_default().push(level);
+    }
+    for v in class_levels.values_mut() {
+        v.sort_by_key(|l| std::cmp::Reverse(ladder_index(l).unwrap_or(0)));
+    }
+    let mut needed: Vec<&'static str> = class_levels.values().flatten().copied().collect();
+    needed.sort_by_key(|l| std::cmp::Reverse(ladder_index(l).unwrap_or(0)));
+    needed.dedup();
+
+    // Level quants: every class measured at L set to L (reused when present).
+    let mut level_paths: BTreeMap<&'static str, PathBuf> = BTreeMap::new();
+    for level in &needed {
+        let path = dir.join(format!("level-{level}.gguf"));
+        if !(path.is_file() && inspect_gguf(&path).is_ok()) {
+            let mut levels: BTreeMap<TensorClass, &'static str> = plan.present.keys().map(|c| (*c, base_level)).collect();
+            for (class, ls) in &class_levels {
+                if ls.contains(level) {
+                    levels.insert(*class, level);
+                }
+            }
+            log(&format!("[ojon] group refine: building level quant {level}"));
+            if path.exists() {
+                fs::remove_file(&path)?;
+            }
+            quantize_with(plan, &format!("level-{level}"), &levels, &mut log)?;
+        }
+        level_paths.insert(level, path);
+    }
+
+    // Exact byte cost of every unit at every level, from the real tensor types.
+    let mut unit_bytes: BTreeMap<((TensorClass, u32), &'static str), u64> = BTreeMap::new();
+    for t in &base_tensors {
+        if let Some(u) = unit_of(t) {
+            *unit_bytes.entry((u, base_level)).or_insert(0) += crate::quant::gguf_diff::tensor_bytes(t).unwrap_or(0);
+        }
+    }
+    for (level, path) in &level_paths {
+        for t in inspect_gguf_tensors(path)? {
+            if let Some(u) = unit_of(&t) {
+                if class_levels.get(&u.0).is_some_and(|ls| ls.contains(level)) {
+                    *unit_bytes.entry((u, level)).or_insert(0) += crate::quant::gguf_diff::tensor_bytes(&t).unwrap_or(0);
+                }
+            }
+        }
+    }
+    let units: Vec<(TensorClass, u32)> = {
+        let mut u: Vec<_> = unit_bytes.keys().map(|(u, _)| *u).collect();
+        u.sort();
+        u.dedup();
+        u
+    };
+
+    // Probe every (unit, level); resumable through group-progress.jsonl.
+    let gp_path = dir.join("group-progress.jsonl");
+    let mut measured: BTreeMap<((TensorClass, u32), &'static str), f64> = BTreeMap::new();
+    if let Ok(text) = fs::read_to_string(&gp_path) {
+        for line in text.lines() {
+            let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+            let (Some(c), Some(g), Some(l), Some(k)) = (
+                v["class"].as_str().and_then(TensorClass::parse),
+                v["group"].as_u64(),
+                v["level"].as_str().and_then(|l| ladder_index(l).map(|i| LADDER[i].0)),
+                v["kld_mean"].as_f64(),
+            ) else { continue };
+            measured.insert(((c, g as u32), l), k);
+        }
+    }
+    let total = units.iter().map(|u| class_levels.get(&u.0).map_or(0, Vec::len)).sum::<usize>();
+    let mut done = 0;
+    for unit in &units {
+        for level in class_levels.get(&unit.0).cloned().unwrap_or_default() {
+            done += 1;
+            if measured.contains_key(&(*unit, level)) {
+                continue;
+            }
+            let probe = dir.join(format!("gprobe-{}-g{}-{level}.gguf", unit.0.name(), unit.1));
+            if probe.exists() {
+                fs::remove_file(&probe)?;
+            }
+            log(&format!("[ojon] group probe {done}/{total}: {} group {} at {level}", unit.0.name(), unit.1));
+            let u = *unit;
+            crate::quant::gguf_splice::splice(&base_path, &level_paths[level], |t| unit_of(t) == Some(u), &probe)?;
+            let k = measure_kld(&probe, &dump, &plan.job.kld, &mut log);
+            let _ = fs::remove_file(&probe);
+            let k = k?;
+            log(&format!("[ojon]   mean KLD {:.6} (delta {:+.6})", k.mean, k.mean - base_kld.mean));
+            let mut f = fs::OpenOptions::new().create(true).append(true).open(&gp_path)?;
+            writeln!(f, "{}", json!({"class": unit.0.name(), "group": unit.1, "level": level, "kld_mean": k.mean}))?;
+            measured.insert((*unit, level), k.mean);
+        }
+    }
+
+    // Greedy per unit: each step lowers one unit to its next measured level, best bytes
+    // saved per KLD added first, until the predicted file fits the target.
+    let delta = |u: (TensorClass, u32), l: &'static str| -> f64 {
+        if l == base_level { 0.0 } else { (measured[&(u, l)] - base_kld.mean).max(0.0) }
+    };
+    let mut current: BTreeMap<(TensorClass, u32), &'static str> = units.iter().map(|u| (*u, base_level)).collect();
+    let mut predicted_bytes = base_file_bytes;
+    let mut predicted_kld = base_kld.mean;
+    while predicted_bytes > target_bytes {
+        let mut best: Option<(f64, (TensorClass, u32), &'static str, u64, f64)> = None;
+        for u in &units {
+            let cur = current[u];
+            let ladder = class_levels.get(&u.0).cloned().unwrap_or_default();
+            let next = ladder.iter().copied().find(|l| ladder_index(l) < ladder_index(cur) && measured.contains_key(&(*u, *l)));
+            let Some(next) = next else { continue };
+            let (Some(b_cur), Some(b_next)) = (unit_bytes.get(&(*u, cur)), unit_bytes.get(&(*u, next))) else { continue };
+            let saved = b_cur.saturating_sub(*b_next);
+            if saved == 0 {
+                continue;
+            }
+            let added = (delta(*u, next) - delta(*u, cur)).max(0.0);
+            let score = if added <= 0.0 { f64::INFINITY } else { saved as f64 / added };
+            if best.as_ref().is_none_or(|b| score > b.0) {
+                best = Some((score, *u, next, saved, added));
+            }
+        }
+        let Some((_, u, next, saved, added)) = best else {
+            return Err(invalid(format!("measured group probes cannot reach {target_bytes} bytes (smallest {predicted_bytes})")));
+        };
+        current.insert(u, next);
+        predicted_bytes -= saved;
+        predicted_kld += added;
+    }
+
+    // Assemble from the level quants and measure the real file.
+    let used: Vec<&'static str> = {
+        let mut v: Vec<_> = current.values().copied().filter(|l| *l != base_level).collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let donors: Vec<&Path> = used.iter().map(|l| level_paths[l].as_path()).collect();
+    let out = dir.join("group-recipe.gguf");
+    if out.exists() {
+        fs::remove_file(&out)?;
+    }
+    crate::quant::gguf_splice::splice_many(&base_path, &donors, |t| {
+        let u = unit_of(t)?;
+        let level = current.get(&u)?;
+        used.iter().position(|l| l == level)
+    }, &out)?;
+    let final_bytes = fs::metadata(&out)?.len();
+    let final_kld = measure_kld(&out, &dump, &plan.job.kld, &mut log)?;
+    log(&format!("[ojon] group recipe: {final_bytes} bytes, mean KLD {:.6} (predicted {:.6}; base {:.6})", final_kld.mean, predicted_kld, base_kld.mean));
+    let receipt = json!({
+        "schema": "ojon.group_recipe.v1",
+        "groups": groups,
+        "n_layer": n_layer,
+        "target_bytes": target_bytes,
+        "base": {"level": base_level, "bytes": base_file_bytes, "kld": kld_json(base_kld)},
+        "units": current.iter().map(|((c, g), l)| json!({"class": c.name(), "group": g, "level": l})).collect::<Vec<_>>(),
+        "predicted": {"bytes": predicted_bytes, "kld_mean": predicted_kld},
+        "final": {"path": plain(&out), "bytes": final_bytes, "kld": kld_json(&final_kld)},
+        "claim": "none; unit effects were measured one at a time and assumed additive; the final row is the measurement",
+    });
+    let receipt_path = dir.join("group-receipt.json");
+    fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt)?)?;
+    Ok(receipt_path)
 }
 
 fn append_progress(dir: &Path, entry: &Value) -> io::Result<()> {
@@ -915,7 +1158,18 @@ where
         }
     }
     let tt_path = output_dir.join("recipe-applied.tensor-types.txt");
-    fs::write(&tt_path, render_full(&applied))?;
+    // Replay what the measured run adopted beyond the class levels: the MTP-block pin
+    // and, when the boundary refinement won, its first/last-block pins (they must come
+    // first: llama-quantize applies the first matching pattern).
+    let mut prefix = mtp_block_pin(&source, base)?;
+    let br = &doc["boundary_refinement"];
+    if br["adopted"].as_bool() == Some(true) {
+        let blocks: Vec<u32> = br["blocks"].as_array().into_iter().flatten().filter_map(|b| b.as_u64().map(|b| b as u32)).collect();
+        let lowered = Recipe { levels: applied.clone(), predicted_kld_delta: 0.0, predicted_bytes: 0, base_bytes: 0, steps: Vec::new() };
+        prefix.push_str(&render_boundary_lines(&lowered, base, &blocks));
+        log(&format!("[ojon] replaying adopted boundary refinement: blocks {blocks:?} kept at {base}"));
+    }
+    fs::write(&tt_path, format!("{prefix}{}", render_full(&applied)))?;
     log(&format!("[ojon] applying recipe (base {base}) to {}", plain(&source)));
     let started = Instant::now();
     let mut q = prepare_gguf(&source, &out_path, quantize_tool, main_precision_for(base)?, threads)?.with_tensor_type_file(&tt_path)?;
@@ -1125,6 +1379,20 @@ mod tests {
     fn plain_strips_only_the_windows_verbatim_prefix() {
         assert_eq!(plain(Path::new(r"\\?\C:\m\x.gguf")), r"C:\m\x.gguf");
         assert_eq!(plain(Path::new("/srv/models/x.gguf")), "/srv/models/x.gguf");
+    }
+
+    #[test]
+    fn layer_groups_are_contiguous_and_cover_every_block() {
+        // 24 blocks, 4 groups -> 0..6, 6..12, 12..18, 18..24
+        assert_eq!((0..24).map(|b| group_of(b, 24, 4)).collect::<Vec<_>>(),
+            [vec![0; 6], vec![1; 6], vec![2; 6], vec![3; 6]].concat());
+        // uneven: 10 blocks, 4 groups, still 4 non-empty groups in order
+        let g: Vec<u32> = (0..10).map(|b| group_of(b, 10, 4)).collect();
+        assert_eq!(g.first(), Some(&0));
+        assert_eq!(g.last(), Some(&3));
+        assert!(g.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(block_of("blk.17.ffn_down.weight"), Some(17));
+        assert_eq!(block_of("token_embd.weight"), None);
     }
 
     #[test]

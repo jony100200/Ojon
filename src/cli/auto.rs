@@ -126,7 +126,11 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let verify_settings = eval_corpus.clone().map(|c| KldSettings {
                 tool: perplexity_tool.clone(), corpus: c, gpu_layers: 99, fit: true, context: 512, chunks, device: device.clone(),
             });
-            let verify = verify_settings.as_ref().map(|s| (s, budget));
+            // Gate: this model's KLD may exceed the stored family result by at most the
+            // preset's budget (an absolute gate = stored final mean + budget).
+            let stored: serde_json::Value = serde_json::from_slice(&std::fs::read(&entry.receipt)?)?;
+            let stored_final = stored["final"]["kld"]["mean"].as_f64().unwrap_or(0.0);
+            let verify = verify_settings.as_ref().map(|s| (s, stored_final + budget));
             let out = ojon_backend::recipe_run::apply_recipe(
                 &source, &output_dir, &entry.receipt, &quantize_tool, entry.imatrix.as_deref(), threads, verify, |line| eprintln!("{line}"),
             )?;

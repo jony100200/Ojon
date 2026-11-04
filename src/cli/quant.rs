@@ -2341,10 +2341,10 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             }
             Ok(true)
         }
-        "recipe-plan" | "recipe-run" => {
+        "recipe-plan" | "recipe-run" | "group-refine" => {
             // KLD-gated mixed-precision recipe search: measure how low each tensor
             // class can go before the output distribution moves past a budget.
-            let execute = cmd == "recipe-run";
+            let execute = cmd == "recipe-run" || cmd == "group-refine";
             let source = PathBuf::from(next_argument(&mut args, "original F16/BF16 GGUF model")?);
             let output_dir = PathBuf::from(next_argument(&mut args, "empty output directory")?);
             let mut corpus: Option<PathBuf> = None;
@@ -2372,6 +2372,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let (mut keep_probes, mut confirm, mut json, mut resume) = (false, false, false, false);
             let mut refine_boundaries = true;
             let mut target_bytes: Option<u64> = None;
+            let mut groups = 4u32;
             let text = |v: std::ffi::OsString, what: &str| -> io::Result<String> {
                 v.to_str().map(str::to_owned).ok_or_else(|| invalid(format!("{what} requires UTF-8")))
             };
@@ -2417,6 +2418,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     Some("--keep-probes") => keep_probes = true,
                     Some("--resume") if execute => resume = true,
                     Some("--no-boundary-refine") => refine_boundaries = false,
+                    Some("--groups") => groups = text(next_argument(&mut args, "layer groups")?, "groups")?.parse().map_err(|_| invalid("groups must be a number"))?,
                     Some("--target-bytes") => target_bytes = Some(text(next_argument(&mut args, "target file size in bytes")?, "target-bytes")?.parse().map_err(|_| invalid("target-bytes must be a whole number of bytes"))?),
                     Some("--json") => json = true,
                     Some("--confirm") if execute => confirm = true,
@@ -2430,7 +2432,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let floor = ojon_backend::recipe::ladder_index(&floor)
                 .map(|i| ojon_backend::recipe::LADDER[i].0)
                 .ok_or_else(|| invalid(format!("unknown floor level '{floor}'")))?;
-            let plan = ojon_backend::recipe_run::prepare_recipe(ojon_backend::recipe_run::RecipeJob {
+            let job = ojon_backend::recipe_run::RecipeJob {
                 source,
                 output_dir,
                 base,
@@ -2447,7 +2449,19 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                 eval_corpus,
                 refine_boundaries,
                 target_bytes,
-            })?;
+            };
+            if cmd == "group-refine" {
+                // Per-layer-group allocation after a finished class search in the same directory.
+                if !confirm {
+                    return Err(invalid("group-refine quantizes level files and probes; add --confirm to execute"));
+                }
+                let plan = ojon_backend::recipe_run::prepare_refine(job)?;
+                let target = target_bytes.ok_or_else(|| invalid("group-refine needs --target-bytes <file bytes>"))?;
+                let receipt = ojon_backend::recipe_run::run_group_refine(&plan, groups, target, |line| eprintln!("{line}"))?;
+                println!("receipt: {}", receipt.display());
+                return Ok(true);
+            }
+            let plan = ojon_backend::recipe_run::prepare_recipe(job)?;
             let plan_path = plan.write_plan()?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&plan.plan_json())?);

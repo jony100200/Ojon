@@ -86,28 +86,43 @@ fn info_start(file: &mut File, tensors: &[GgufTensor], data_offset: u64, alignme
 }
 
 pub fn splice(base: &Path, donor: &Path, take: impl Fn(&GgufTensor) -> bool, out: &Path) -> io::Result<SpliceReport> {
+    splice_many(base, &[donor], |t| take(t).then_some(0), out)
+}
+
+/// Like [`splice`] with several donors: `pick` returns the donor index for a tensor,
+/// or None to keep the base tensor. Assembles a mixed-precision file from several
+/// full quantizations of the same original (one per level) without requantizing.
+pub fn splice_many(base: &Path, donors: &[&Path], pick: impl Fn(&GgufTensor) -> Option<usize>, out: &Path) -> io::Result<SpliceReport> {
     if out.exists() {
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, "splice output already exists"));
     }
     let (mut b, base_list, data_offset, alignment) = open(base)?;
-    let (mut d, _, _, _) = open(donor)?;
+    let mut ds = Vec::with_capacity(donors.len());
+    for donor in donors {
+        ds.push(open(donor)?.0);
+    }
     let align = u64::from(alignment);
     let meta_end = info_start(&mut b.file, &base_list, data_offset, alignment)?;
 
     // Plan: per tensor (in base order) pick a source, its type and payload size.
+    // Source 0 = base, i + 1 = donors[i].
     let mut plan = Vec::with_capacity(base_list.len());
     let mut from_donor = 0;
     for t in &base_list {
-        if take(t) {
-            let (off, len, dt) = d.tensors.get(&t.name).ok_or_else(|| invalid(format!("donor lacks tensor {}", t.name)))?;
-            if dt.shape != t.shape {
-                return Err(invalid(format!("shape differs for {}", t.name)));
+        match pick(t) {
+            Some(i) => {
+                let d = ds.get(i).ok_or_else(|| invalid(format!("no donor #{i}")))?;
+                let (off, len, dt) = d.tensors.get(&t.name).ok_or_else(|| invalid(format!("donor lacks tensor {}", t.name)))?;
+                if dt.shape != t.shape {
+                    return Err(invalid(format!("shape differs for {}", t.name)));
+                }
+                from_donor += 1;
+                plan.push((t.clone(), dt.storage_type, i + 1, *off, *len));
             }
-            from_donor += 1;
-            plan.push((t.clone(), dt.storage_type, true, *off, *len));
-        } else {
-            let (off, len, _) = b.tensors[&t.name].clone();
-            plan.push((t.clone(), t.storage_type, false, off, len));
+            None => {
+                let (off, len, _) = b.tensors[&t.name].clone();
+                plan.push((t.clone(), t.storage_type, 0, off, len));
+            }
         }
     }
     if from_donor == 0 {
@@ -140,8 +155,8 @@ pub fn splice(base: &Path, donor: &Path, take: impl Fn(&GgufTensor) -> bool, out
         pos += 1;
     }
     // Payloads.
-    for ((_, _, donor_side, off, len), rel) in plan.iter().zip(&offsets) {
-        let src = if *donor_side { &mut d } else { &mut b };
+    for ((_, _, source, off, len), rel) in plan.iter().zip(&offsets) {
+        let src = if *source == 0 { &mut b } else { &mut ds[*source - 1] };
         src.file.seek(SeekFrom::Start(src.data_offset + off))?;
         let copied = io::copy(&mut (&src.file).take(*len), &mut w)?;
         if copied != *len {
@@ -231,6 +246,22 @@ mod tests {
         // Metadata kept from base; never overwrite an existing output.
         assert_eq!(inspect_gguf(&out).unwrap().architecture.as_deref(), Some("qwen35"));
         assert!(splice(&base, &donor, |_| true, &out).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn splice_many_takes_each_tensor_from_its_chosen_donor() {
+        let dir = std::env::temp_dir().join(format!("ojon-splice-many-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (base, d1, d2, out) = (dir.join("b.gguf"), dir.join("d1.gguf"), dir.join("d2.gguf"), dir.join("o.gguf"));
+        write(&base, &[("a.weight", 8, 0, 0xA0), ("b.weight", 8, 0, 0xB0), ("c.weight", 8, 0, 0xC0)]);
+        write(&d1, &[("a.weight", 8, 1, 0xA1), ("b.weight", 8, 1, 0xB1), ("c.weight", 8, 1, 0xC1)]);
+        write(&d2, &[("a.weight", 8, 1, 0xA2), ("b.weight", 8, 1, 0xB2), ("c.weight", 8, 1, 0xC2)]);
+        let r = splice_many(&base, &[&d1, &d2], |t| match t.name.as_str() { "a.weight" => Some(0), "c.weight" => Some(1), _ => None }, &out).unwrap();
+        assert_eq!(r.from_donor, 2);
+        assert_eq!(payload(&out, "a.weight"), (1, vec![0xA1; 16]));
+        assert_eq!(payload(&out, "b.weight"), (0, vec![0xB0; 32]));
+        assert_eq!(payload(&out, "c.weight"), (1, vec![0xC2; 16]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
