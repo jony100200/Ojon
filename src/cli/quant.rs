@@ -2372,6 +2372,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let (mut keep_probes, mut confirm, mut json, mut resume) = (false, false, false, false);
             let mut refine_boundaries = true;
             let mut target_bytes: Option<u64> = None;
+            let mut reuse: Option<PathBuf> = None;
             let mut groups = 4u32;
             let text = |v: std::ffi::OsString, what: &str| -> io::Result<String> {
                 v.to_str().map(str::to_owned).ok_or_else(|| invalid(format!("{what} requires UTF-8")))
@@ -2419,6 +2420,7 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
                     Some("--resume") if execute => resume = true,
                     Some("--no-boundary-refine") => refine_boundaries = false,
                     Some("--groups") => groups = text(next_argument(&mut args, "layer groups")?, "groups")?.parse().map_err(|_| invalid("groups must be a number"))?,
+                    Some("--reuse") if execute => reuse = Some(PathBuf::from(next_argument(&mut args, "finished recipe folder to reuse")?)),
                     Some("--target-bytes") => target_bytes = Some(text(next_argument(&mut args, "target file size in bytes")?, "target-bytes")?.parse().map_err(|_| invalid("target-bytes must be a whole number of bytes"))?),
                     Some("--json") => json = true,
                     Some("--confirm") if execute => confirm = true,
@@ -2432,6 +2434,11 @@ pub fn handle(cmd: &str, mut args: impl Iterator<Item = OsString>) -> io::Result
             let floor = ojon_backend::recipe::ladder_index(&floor)
                 .map(|i| ojon_backend::recipe::LADDER[i].0)
                 .ok_or_else(|| invalid(format!("unknown floor level '{floor}'")))?;
+            if let Some(previous) = &reuse {
+                let placed = ojon_backend::recipe_run::seed_from(previous, &output_dir)?;
+                eprintln!("[ojon] reuse: seeded {placed} measured files from {} (no re-measuring)", previous.display());
+                resume = true;
+            }
             let job = ojon_backend::recipe_run::RecipeJob {
                 source,
                 output_dir,
