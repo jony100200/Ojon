@@ -118,6 +118,8 @@ Ojon is actively developed as an **open-source pre-alpha** project. No universal
 
 ## Documentation
 
+For a status-first guide to current instructions versus historical research, see the [documentation map](docs/README.md).
+
 | Start here | Technical details |
 | --- | --- |
 | [User guide](USER_GUIDE.md) | [Recipe search](docs/RECIPE_SEARCH.md) |
