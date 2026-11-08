@@ -2,13 +2,9 @@
 
 **Quantize models. Uncensor models. Run AI locally.**
 
-[![Windows Rust Checks](https://github.com/jony100200/Ojon/actions/workflows/rust-check.yml/badge.svg)](https://github.com/jony100200/Ojon/actions/workflows/rust-check.yml)
-[![Rust](https://img.shields.io/badge/Built_with-Rust-202020?style=flat-square&logo=rust&logoColor=white)](Cargo.toml)
-[![GGUF](https://img.shields.io/badge/Model_format-GGUF-4C51BF?style=flat-square)](USER_GUIDE.md)
-[![Native GUI](https://img.shields.io/badge/Native_GUI-Kathamo-2563EB?style=flat-square)](https://github.com/jony100200/Kathamo)
-[![MIT](https://img.shields.io/badge/License-MIT-0D8065?style=flat-square)](LICENSE)
-[Quick start](#build-and-start) · [Quantize](#quantize) · [Uncensor](#uncensor) · [Desktop GUI](#desktop-application) · [User guide](USER_GUIDE.md)
+[![Windows Rust Checks](https://github.com/jony100200/Ojon/actions/workflows/rust-check.yml/badge.svg)](https://github.com/jony100200/Ojon/actions/workflows/rust-check.yml) [![Rust](https://img.shields.io/badge/Built_with-Rust-202020?style=flat-square&logo=rust&logoColor=white)](Cargo.toml) [![GGUF](https://img.shields.io/badge/Model_format-GGUF-4C51BF?style=flat-square)](USER_GUIDE.md) [![Native GUI](https://img.shields.io/badge/Native_GUI-Kathamo-2563EB?style=flat-square)](https://github.com/jony100200/Kathamo) [![MIT](https://img.shields.io/badge/License-MIT-0D8065?style=flat-square)](LICENSE)
 
+[Quick start](#build-and-start) · [Quantize](#quantize) · [Uncensor](#uncensor) · [Desktop GUI](#desktop-application) · [User guide](USER_GUIDE.md)
 
 Ojon is a Rust-based local model workstation focused on two jobs:
 
