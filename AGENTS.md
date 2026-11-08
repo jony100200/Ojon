@@ -1,18 +1,26 @@
-# Ojon
+# Ojon — engineering rules
 
-Agent contract for this repository.
+These rules apply equally to every contributor and coding agent. This is the **single shared project instruction file**; do not add provider-specific instruction documents.
 
-## Shared agent rules (all agents: Claude, GPT/Codex, AGY, Grok, humans)
+## Product priorities
 
-The owner set these rules once. They apply in every Kalponic repository.
+**1. Quantize models.** Make language, image, video and other supported AI models smaller and practical on local hardware, with measured quality. Improve the existing conversion, mixed-precision search, backend compatibility, and output validation. Several language-model and video workflows have already been executed; image-model quantization still requires demonstrated results.
 
-1. **No AI attribution anywhere.** No `Co-Authored-By:`, `Claude-Session:`, "Generated with …" or similar trailers in commits, PRs, issues or code comments. The owner is the author. Credit for outside work goes only in `ACKNOWLEDGMENTS.md`.
-2. **Stage explicit paths.** Never `git add .`, `git add -A` or a whole folder. Never commit secrets, local config or build output.
-3. **One writer per checkout.** Never overwrite or commit another agent's uncommitted work. On a shared checkout, work in your own worktree. Fetch and rebase right before every push. No force pushes.
-4. **Direct commits to `main` are fine** when the checkout is safe and tests pass. Ask first only before destructive or hard-to-undo steps.
-5. **No machine-local details in shared output.** No absolute paths, host names, IPs, ports, user names or keys in code, docs or tests. Load them from config, env or discovery.
-6. **Never install boot, auto-start or scheduled services.** Give the owner the start command instead.
-7. **Models: poke before inference.** Check that the exact model is loaded before calling it. Never silently load, unload or swap a model, or touch a model another session is using.
-8. **Evidence over claims.** Never report a test, benchmark, model readiness or release that was not actually run. Report failures with their output.
-9. **Tests live where the repo says.** Pothik's tests live in `Pothik-Tests`. Cross-project suites live in `MasterTests`.
-10. **Plain English** in docs, commits and reports. Keep them short.
+**2. Uncensor models.** Make unwanted refusals editable through Ojon's existing weight-editing and automatic search workflows. Keep useful reasoning, coding and instruction-following abilities. Treat an edit as successful only when real before/after model runs demonstrate the intended change. Fix ineffective methods instead of claiming the entire product does not work.
+
+Prioritize these two jobs. UI, packaging and utilities serve them; don't add unrelated frameworks, agent systems or speculative features.
+
+## Execution rules
+
+1. **Build and test before writing about building.** Inspect existing implementation, reuse working backends, make the smallest necessary code change, and run relevant checks.
+2. **No unsolicited documents.** Do not create new Markdown files, policy pages, research reports, handoffs, status ledgers, roadmaps or redundant README files. Use existing guides only when a real command or feature changes, or when the owner explicitly requests documentation.
+3. **Public presentation is for users.** Lead with what Ojon does and how to run it. No generic fear-based warnings, repeated disclaimers or blanket statements that the product is unusable. Describe specific supported formats and blockers precisely.
+4. **Evidence over claims.** A source-code build, an edited model file, a runtime load, a successful quantization and a quality improvement are different results. Report what was actually measured; never fabricate success or dismiss verified work.
+5. **Respect existing work.** One writer per checkout; use separate worktrees when needed. Never overwrite another agent's changes. Stage only intended paths, synchronize before pushing, and do not force-push.
+6. **Respect running systems.** Check which models and workers are active before testing. Do not evict resident models, start persistent services, or modify other sessions' jobs without approval.
+7. **Keep shared outputs portable.** No machine-specific paths, IP addresses, secrets, model weights or private datasets in public commits.
+8. **Verification.** Run relevant Rust/Python tests and actual model runs when the task requires them. Say plainly when the hardware or checkpoint was not available. Use established test locations.
+9. **Documentation gate.** Run `python scripts/check_public_docs.py` before public-doc changes. Do not expand its file allowlist without the owner's specific instruction.
+10. **Finish with results.** Report changed code, exact tests performed, measured outcome and remaining engineering blocker. No ceremonial reports or extra documents.
+
+Changes to public documentation without an explicit owner request require approval before pushing; ordinary tested code changes may go to `main` when the checkout is safe.

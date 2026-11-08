@@ -2,24 +2,32 @@
 
 # Ojon (ওজন)
 
-**Make local AI models smaller. Measure what matters.**
+**Quantize models. Uncensor models. Run AI locally.**
 
-A Rust-based model optimization workstation for quantization, mixed-precision search, and quality evaluation.
+A Rust workstation for smaller local AI models and user-controlled model behavior.
 
 [![Build](https://github.com/jony100200/Ojon/actions/workflows/rust-check.yml/badge.svg)](https://github.com/jony100200/Ojon/actions/workflows/rust-check.yml)
 [![Rust](https://img.shields.io/badge/built_with-Rust-222222?logo=rust)](Cargo.toml)
 
-[Get started](#get-started) · [Features](#features) · [Documentation](#documentation) · [Contribute](CONTRIBUTING.md)
+[Get started](#get-started) · [Two core features](#two-core-features) · [Documentation](#documentation) · [Contribute](CONTRIBUTING.md)
 
 </div>
 
-## What is Ojon?
+## Two core features
 
-Ojon helps developers optimize local AI models for the hardware they actually have. Instead of selecting a quantization format by guesswork, it can search mixed-precision recipes and compare the resulting models against a measured quality budget.
+### 1. Quantize models
 
-The goal is straightforward: **the smallest useful model, not just the smallest file.**
+Compress language models and supported video and other model formats for practical use on local hardware. Ojon inspects models, searches mixed-precision recipes, and compares file size against measurable quality changes. Real work has included Qwen and FrogNano model quantization and video-model conversion. Image-model quantization remains a development target.
 
-## Features
+**Goal: the smallest useful model, not merely the smallest file.**
+
+### 2. Uncensor models
+
+Ojon includes weight-editing, activation-direction analysis, automatic candidate search, and original-versus-edited evaluations. These workflows are designed to reduce unwanted refusals while preserving useful model capabilities.
+
+**Goal: more user control over model behavior without unnecessary intelligence loss.** The editing engine is implemented; an effective result must still be measured per model.
+
+## Supporting features
 
 | | Capability |
 | --- | --- |
@@ -27,7 +35,7 @@ The goal is straightforward: **the smallest useful model, not just the smallest 
 | **Quantization** | Convert and quantize supported models through compatible local tools. |
 | **Automatic optimization** | Search for mixed-precision recipes and reuse results on compatible model families. |
 | **Quality evaluation** | Compare output distributions, task results, file sizes, and runtime performance. |
-| **Model editing** | Experiment with model behavior changes and evaluate the result against a baseline. |
+| **Model editing** | Automatically search and evaluate eligible refusal-reduction edits. |
 | **Desktop interface** | Native GUI built with [Kathamo](https://github.com/jony100200/Kathamo). |
 
 Ojon integrates existing conversion and inference backends rather than replacing them. Backend and model-format support depends on the selected workflow.
@@ -62,6 +70,20 @@ cargo run --release --locked --bin ojon -- auto-quant model-f16.gguf output/ --p
 ```
 
 Available presets: `smallest`, `balanced`, and `safest`. Use `--target-bytes N` to search toward a specific file-size target or `--resume` to continue an interrupted search. Run `cargo run --release --locked --bin ojon -- --help` for more commands.
+
+### Uncensor a model
+
+Start from an original F16/BF16/F32 GGUF and an existing output folder. Ojon uses compatible local `llama-cli` and `llama-cvector-generator` tools.
+
+```bash
+# Preview candidate edits.
+cargo run --release --locked --bin ojon -- uncensor-auto-plan model-f16.gguf output/
+
+# Run candidate editing and evaluation.
+cargo run --release --locked --bin ojon -- uncensor-auto-run model-f16.gguf output/ --confirm
+```
+
+Candidate results record measured refusal behavior and quality checks; an improvement is never assumed.
 
 ### Desktop application
 
