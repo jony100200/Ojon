@@ -13,6 +13,19 @@ Ojon is a Rust-based local model workstation focused on two jobs:
 
 Both are implemented workflows; compatibility and measured results depend on the model and selected backend.
 
+## Models and formats
+
+Ojon has processed real model weights in local conversion workflows:
+
+| Model type | Example | Result |
+| --- | --- | --- |
+| **Language models** | Qwen3-0.6B; FrogNano 4B | Measured GGUF quantization runs (mixed Q4/Q5 and Q4_K_M) |
+| **Image models** | P-H3 Image | BF16 to Q4_K GGUF: 40.47 GB to 11.62 GB; structural conversion validated |
+| **Video models** | MiniMax H3 | W4A4/NVFP4 conversion and video-test commands available; model-specific Ojon conversion verification is still required |
+| **Vision-language models** | Multimodal GGUF and vision projector | Conversion and parity-test commands available; specific end-to-end models must be verified |
+
+See the [model compatibility examples](USER_GUIDE.md#model-compatibility-examples) for concrete results and commands. A converted model is not automatically a tested inference or quality-preserved model.
+
 ## Build and start
 
 Install [Rust/Cargo](https://rustup.rs/) and clone the repository:
