@@ -92,3 +92,23 @@ ROADMAP*.md
 # Local-only trainer (owner: stays offline, not for the public repo)
 scripts/ojon_local_trainer.py
 scripts/ojon-local-trainer.cmd
+
+# Private agent instructions and development output (never published)
+/AGENTS.md
+/CLAUDE.md
+/CODEX.md
+/GEMINI.md
+/.agents/
+/.claude/
+/.codex/
+/_local/
+/_private/
+/development/
+/research/
+/experiments/
+/session-logs/
+/benchmarks/
+*.jsonl
+*.sqlite
+*.sqlite3
+*.db

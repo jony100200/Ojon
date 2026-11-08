@@ -65,7 +65,7 @@ To control the mixed-precision search directly, use the recipe tools:
 cargo run --release --locked --bin ojon -- recipe-plan model-f16.gguf output/ --corpus calibration.txt --eval-corpus heldout.txt --base q5_k --floor q4_k --budget 0.01
 ```
 
-Review the plan before running `recipe-run` with the same settings, `--resume` and `--confirm`. See [recipe search](docs/RECIPE_SEARCH.md) for calibration, KL divergence and result interpretation.
+Review the plan before running `recipe-run` with the same settings, `--resume` and `--confirm`. Use separate calibration and evaluation corpora; compare the model's actual quality and size against the source.
 
 To list saved recipes:
 
@@ -82,7 +82,7 @@ cargo run --release --locked --bin ojon -- resource-plan path/to/model path/to/o
 
 Ojon can inspect resources and gather quality/runtime receipts using supported backends. Model-file inspection, successful conversion, runtime loading and actual task-quality preservation are separate checks.
 
-For evaluation criteria, see [Quality strategy](QUALITY_STRATEGY.md).
+Compare size, loadability, accuracy on held-out tasks and generation speed against the original model before accepting an output.
 
 ## Desktop UI
 
@@ -107,4 +107,4 @@ cargo test --locked --lib --bin ojon
 cargo check --locked --features gui --bin ojon-gui
 ```
 
-See [Contributing](CONTRIBUTING.md) for changes and test reports.
+For bugs or reproducible compatibility problems, use [GitHub issues](https://github.com/jony100200/Ojon/issues).
