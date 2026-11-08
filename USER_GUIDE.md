@@ -1,676 +1,110 @@
-# Ojon (ওজন) — User Guide
+# Ojon user guide
 
-> **Pre-alpha guide.** Ojon provides a Rust backend CLI and an optional native Kathamo GUI. Standard source builds are verified. Universal model family support remains in active development.
+Ojon provides a Rust command-line application and an optional native Kathamo desktop interface. It works with installed model conversion and inference tools.
 
-## 1. What Ojon does
+## Install
 
-Ojon is designed to be **one place to inspect, quantize, and test models** using existing engines. It does not train models or invent a new universal quantization format.
-
-Intended path: **Import → Inspect → Choose supported conversion → Preflight → Quantize → Test → Export**.
-
-## MiniMax H3 W4A4 and NVFP4 (public experimental adapters)
-
-Use the dedicated [MiniMax H3 guide](docs/MINIMAX_H3.md) for complete requirements, examples and runtime validation. Ojon supports **OrbitQuant W4A4 component conversion** from a full Diffusers directory and **NVFP4 single-file ComfyUI safetensors conversion** from a compatible original checkpoint. These are separate methods; a packed component does **not** constitute a runnable OrbitQuant video release, and NVFP4 storage does **not** guarantee 4-bit activation inference. The video smoke test accepts either a standard ComfyUI UNETLoader workflow or an OrbitQuant complete-release workflow selected explicitly with --runtime orbitquant. CI covers protocol tests, not actual GPU video generation or quality parity.
-
-## Resource preflight and large model precautions
-
-Use Ojon's non-invasive resource checks before attempting a 50GB or 95GB original model. It reads actual free host RAM and destination drive capacity, and detects NVIDIA per-device free VRAM where `nvidia-smi` is installed. **Intel Arc/XPU free VRAM is measured only when optional `xpu-smi` supports a valid single-shot memory query.** If it is missing, unsupported on the operating system or reports `N/A`, the free VRAM remains unknown; total advertised capacity is never assumed free.
-
-```powershell
-ojon resource-plan "./models/original-hf" "./outputs" --mode hqq --device xpu --json
-ojon resource-plan "./models/original-hf" "./outputs" --mode openvino --device cpu --json
-ojon resource-plan "./models/original-hf" "./outputs" --mode autoround --device xpu --json
-```
-
-Examples use portable relative paths. Create the indicated directories, or replace the examples with suitable locations on your machine.
-
-The HQQ, OpenVINO and AutoRound *operator safety budget* requires at least original source weight bytes plus a **4 GiB RAM reserve**; destination capacity requires original weight bytes plus **2 GiB disk reserve** (or twice source weights for AutoRound/GGUF). These are policy floors, **not** estimates of actual peak memory. Backend activation, GPU driver support and runtime compatibility are separate tests. Streamed GGUF/native packers are not assigned imaginary peak RAM.
-
-Both `research-run` and `autoround-run` enforce resource policy before conversion. If the capacity is below the policy floor or a required measurement is unknown, they reject the run. `--allow-resource-risk` is an explicit opt-in on an already confirmed run; it does not make a full 95GB checkpoint fit in 32GB RAM. No model weights or datasets are downloaded by this preflight.
-
-## Research backends: HQQ and OpenVINO/NNCF
-
-These commands work independently of the KS llama.cpp build. Install public `hqq` + PyTorch + Transformers for HQQ, or public `optimum-intel` / OpenVINO / NNCF for `optimum-cli`, in a trusted local environment. Use `--tool` to select the appropriate Python/CLI executable. Ojon does **not** install dependencies or download a model.
-
-```powershell
-# Dry-run plan, no model loaded
-ojon research-plan hqq "./models/original-hf" "./models/out-hqq" --device cpu --bits 4 --group 64 --json
-ojon research-plan openvino "./models/original-hf" "./models/out-ov-int4" --bits 4 --ratio 1.0 --json
-ojon research-plan openvino "./models/original-hf" "./models/out-ov-mixed" --bits 4 --ratio 0.8 --json
-
-# After validating available RAM, Python packages and target loader, authorize only the chosen experiment
-ojon research-run openvino "./models/original-hf" "./models/out-ov-int4" --bits 4 --ratio 1.0 --confirm
-```
-
-HQQ exports `qmodel.pt` and `config.json`, not GGUF; use `AutoHQQHFModel.from_quantized` for compatible inference. OpenVINO exports matching `.xml/.bin` IR artifacts, not GGUF; use OpenVINO/Optimum Intel loaders. Both conversions are staged to avoid publishing an incomplete final output and explicitly refuse to overwrite existing results. They block automatic Hugging Face network downloads. Their output checks do **not** run the loaders, measure memory or evaluate quality. Intel Arc/XPU acceleration is possible only where the exact installed device kernel, PyTorch and model architecture support it. Do not attempt a larger-than-RAM original checkpoint until streaming/offloading has been benchmarked.
-
-## AutoRound GGUF recipes (Intel implementation)
-
-Plan a genuine AutoRound GGUF export with `gguf:q4_k_m` (default) or `--bits 5 --format gguf:q5_k_m`. These are experimental upstream formats; the output remains subject to loader and quality validation.
-
-For calibrated tuning, provide an existing local JSON dataset and nonzero iteration count. Without an explicit dataset, Ojon uses 0-iteration RTN and blocks automatic model/dataset downloads when running.
-
-```powershell
-ojon autoround-plan "./models/hf-original" "./models/out\q4-rtn" --bits 4 --iters 0 --device cpu --json
-ojon autoround-plan "./models/hf-original" "./models/out\q5-calibrated" --bits 5 --format gguf:q5_k_m --iters 200 --dataset "./datasets/calibration.json" --device xpu --json
-```
-
-To execute, use `autoround-run` with the same options and `--confirm`. Ojon checks that GGUF output metadata exists, not that the model runs or meets a quality threshold. Compare against existing llama.cpp K/IQ conversions using held-out data and a verified target loader. See Intel's upstream AutoRound step-by-step guide.
-
-## Build a calibration corpus from your own text
-
-The importance matrix and every KL-divergence number are only as good as the
-text behind them. Instruct models calibrate best on chat-style, task-representative
-text (your prompts, chat exports, docs, code), not encyclopedia prose.
-
-```sh
-ojon corpus-build ./calibration.txt ./my-chats/ ./docs/ notes.md --json
-```
-
-Accepts `.txt .md .rst .json .jsonl .py .rs` (JSON/JSONL are flattened to their
-string values), drops exact-duplicate paragraphs and control characters, refuses
-to overwrite, and writes `calibration.txt.report.json` with byte and approximate
-token counts and whether the result reaches the recommended 1 MiB.
-
-## One command: `auto-quant`
-
-```sh
-ojon auto-quant original-F16.gguf ./out --preset balanced --corpus my-calibration.txt --confirm
-```
-
-Presets answer the only question that matters, "how much loss is acceptable":
-`smallest` (q4_k base, down to iq2_s, +0.02 mean KLD), `balanced` (default: q5_k
-base, down to iq3_s, +0.01), `safest` (q6_k base, down to q4_k, +0.005). Everything
-else is a measured default: importance matrix from a hold-out split of the
-corpus, GPU fit chosen by the tools, 24 chunks, p99 tail gate, boundary
-refinement, resumable. Without `--confirm` it prints the plan and every default
-it would use. The result line says plainly whether the final file is within
-budget or whether the base candidate is the one to keep.
-
-## From original to accepted quant, in order
-
-1. `imatrix-run` (or `recipe-run --imatrix auto`) on chat-style calibration text.
-2. `recipe-plan` then `recipe-run --confirm`: the smallest per-class recipe within a
-   KL-divergence budget, measured, with the boundary refinement and a receipt.
-3. Task suite on the accepted file (`task_eval` / the Optimize workflow): KL
-   divergence bounds the distribution shift, the suite measures answer flips.
-4. `bench-*` on the target hardware: size and KLD say nothing about tokens per
-   second on your card.
-5. For image/video GGUF: `diffusion-parity` against the reference on a fixed seed.
-6. For a sibling model: `recipe-apply` with `--verify-budget` instead of a new search.
-7. For a VLM: `quantize-hf --mmproj-out` for the projector, then `quant-parity-run
-   --vision-suite --mmproj [--mmproj-candidate]` so the projector precision is
-   measured too, not inherited.
-
-Each step writes its own receipt; nothing earlier is overwritten.
-
-## Measured mixed-precision recipe: smallest size within a KL-divergence budget
-
-`sweep-*` picks one whole-model format. `recipe-*` goes further: it measures, per
-tensor class, how low the precision can go before the model's output
-distribution moves more than you allow, then assembles the smallest recipe that
-stays inside that budget. Nothing is assumed about which tensors are sensitive;
-every number comes from quantizing and measuring this model.
-
-```sh
-# Plan only: lists the classes present, every probe, and the quantization count
-ojon recipe-plan original-F16.gguf ./recipe-out --corpus data/calibration.txt
-
-# Execute (one quantization per probe; keeps one probe file on disk at a time)
-ojon recipe-run original-F16.gguf ./recipe-out --corpus data/calibration.txt      --base q5_k --floor iq2_s --budget 0.01 --imatrix model.imatrix --confirm
-```
-
-Protocol, all through public `llama-quantize` and `llama-perplexity`:
-
-1. Reference logits of the original over a fixed corpus slice (`--chunks`, default 40).
-2. Base candidate: every searched class pinned to `--base` (q4_k, q5_k or q6_k).
-3. Probes: for each class (embeddings, output head, attention q/k, attention
-   v/out, dense FFN gate/up, dense FFN down, expert gate/up, expert down, shared
-   expert) and each ladder level below the base down to the class floor, one
-   quantization with only that class lowered, measured as mean KLD against the
-   reference. Routers and 1-D tensors are never touched.
-4. Greedy selection by bytes saved per unit of added KLD until the summed deltas
-   reach `--budget`; the final recipe is quantized and measured again.
-5. `recipe-receipt.json` records every probe, the recipe, the final measured KLD,
-   and `measured_within_budget`. A recipe over budget is reported as rejected and
-   the base candidate stays the accepted output.
-
-Calibration and evaluation text never overlap: with one `--corpus` the file is
-split in half on a paragraph boundary (first half calibrates the importance
-matrix, second half is measured); `--eval-corpus` names a separate held-out
-file instead. Public dynamic-quant pipelines calibrate on hundreds of thousands
-to over a million tokens of chat-style text for instruct models, and the plan
-warns when the corpus is under 1 MiB. Options worth knowing: `--ngl auto` lets the tools split an original larger than VRAM across GPU and CPU (`--fit on`) instead of failing to load; `--imatrix auto` computes an importance matrix from the
-same corpus before any probe (low-bit levels depend on it; without one the search
-understates how low a class can go), `--imatrix <file>` reuses one you already
-have, and `--budget-p99 <x>` adds a tail gate so the 99th-percentile per-token KLD
-may not rise more than `x` over the base either. Mean KLD alone can hide rare,
-large divergences on individual tokens. After the recipe is measured, one more file is tried that keeps the first two
-and last two transformer blocks of every lowered class at the base level
-(boundary blocks are the most sensitive); it replaces the recipe only if it
-measures better by more than the reported uncertainty and is at most 2% bigger
-(`--no-boundary-refine` skips this). A long run keeps an append-only
-`recipe-progress.jsonl`; if it dies after hours, `recipe-run ... --resume` in the
-same directory reuses the importance matrix, reference logits, base candidate and
-every measured probe, and only redoes what is missing.
-
-In the Kathamo GUI, **Manual Tools > Plan KLD Recipe Search (read-only)** writes
-the same `recipe-plan.json` for the loaded original (it uses the Optimize tab's
-held-out perplexity corpus) and prints the probe count; executing the search
-stays a deliberate CLI step with `--confirm`.
-
-To reuse a measured recipe on another original of the same family (a new
-fine-tune, an uncensored variant) without re-probing:
-
-```sh
-ojon recipe-apply other-original-F16.gguf ./applied ./recipe-out/recipe-receipt.json      --corpus data/calibration.txt --verify-budget 0.05 --confirm
-```
-
-Classes the recipe never measured stay at the base and are listed in the
-receipt. With `--verify-budget`, a fresh reference is built from the new
-original and the output's mean KLD must stay under that absolute value;
-without it the receipt says plainly that nothing was measured on this model.
-
-Mean KLD is a distance between output distributions, not a task score. A recipe
-within budget still goes through the task suite before any capability claim.
-Typical budgets: 0.005 strict, 0.01 default, 0.02 relaxed; the receipt also
-carries the 99th percentile and maximum per-token KLD for the tails.
-
-## Plan several quantization options before choosing
-
-```powershell
-ojon optimize-plan "./models/qwen-original" --device xpu --json
-ojon optimize-plan "./models/source-f16.gguf" --device cuda --json
-```
-
-`optimize-plan` is metadata-only and returns a versioned JSON comparison proposal. It keeps separate choices for size, balanced precision, calibration, or distinct available backends. A `missing_tool`, `experimental`, `blocked_source`, `storage_only`, or `requires_compatibility_test` state is not permission to execute or a claim of loadability. The device flag describes a requested target; no live free VRAM/RAM or driver support is measured yet. `recommendation: null` is intentional until real matched quality, memory and runtime measurements exist. To execute a supported route, use the existing guarded manual commands.
-
-## GGUF performance testing with real llama-bench receipts
-
-Ojon's performance test works only for a **GGUF** accepted by a user-installed public `llama-bench`. HQQ artifacts, OpenVINO IR, image/video safetensors, audio models and Ojon's storage-only `.ojonq` files need different loaders and evaluation adapters.
-
-```powershell
-# Read-only, no tensor loads
-ojon bench-plan "./models/Qwen3-Q4_K_M.gguf" --json
-
-# Loads quantized weights intentionally, writes a NEW receipt without overwriting
-ojon bench-run "./models/Qwen3-Q4_K_M.gguf" "./reports/qwen-q4.json" --tool "./tools/llama.cpp\llama-bench.exe" --prompt-tokens 512 --gen-tokens 128 --repetitions 3 --gpu-layers 99 --confirm
-
-# Optional, only when the original really fits the machine and same settings
-ojon bench-run "./models/Qwen3-BF16.gguf" "./reports/qwen-bf16.json" --tool "./tools/llama.cpp\llama-bench.exe" --prompt-tokens 512 --gen-tokens 128 --repetitions 3 --gpu-layers 99 --confirm
-ojon bench-compare "./reports/qwen-bf16.json" "./reports/qwen-q4.json" --json
-```
-
-The Kathamo GUI exposes **Benchmark Output (512/128, 3 runs)** in its existing Test pane. Supply an actual output GGUF and the installed `llama-bench` path. The process runs off the render thread, displays real prefill/decode tokens/s and writes its receipt beside the model.
-
-If BF16 is too large for your RAM/VRAM, **skip the BF16 run**. Ojon will not invent performance for an unloaded checkpoint. Ojon also does **not** measure held-out task accuracy, tool calls, OCR, grounding, peak GPU memory, or TTFT with this adapter. Benchmark speed is only one axis; continue to validate inference via `smoke` and quality via task-specific tests. A comparison across mismatched GPUs or runtime builds is explicitly flagged as non-comparable.
-
-## Model discovery, adapter merging and best-variant recommendation (early backend features)
-
-Ojon aims to make one **local** workflow from existing public backends, not create another quantization or training algorithm. For new AI model families, Ojon should first identify the checkpoint and the target runtime, then connect only a compatible upstream tool. Classification is a suggestion, **not an automatic conversion permission**.
+1. Install Rust and Cargo.
+2. Clone the repository and build the CLI.
+3. Use `backends` to see which model-processing tools are available.
 
 ```bash
-ojon probe /models/my-model.gguf --json
-ojon probe /models/my-model.safetensors --json
-ojon probe /models/my-hf-model-folder --json
-ojon backends --json
+git clone https://github.com/jony100200/Ojon.git
+cd Ojon
+cargo build --release --locked --bin ojon
+cargo run --release --locked --bin ojon -- backends
 ```
 
-Ojon does not collect training data, run fine-tuning jobs or provide distillation commands. If you already have a compatible adapter, use `lora-merge-plan`/`lora-merge-run` and follow the normal quantise / evaluate / verify workflow. Re-evaluate any changed model against a frozen held-out task suite before release.
+Use `cargo run --release --locked --bin ojon -- --help` for the complete command reference.
 
-For supported GGUF LLMs, a quality-aware converter may use an **importance matrix** made from representative text with the official `llama-imatrix` binary:
+## Inspect a model
 
 ```bash
-ojon imatrix-plan /models/source-f16.gguf /data/representative-text.txt /models/imatrix.gguf
-# Only after reviewing local calibration data, original weights, expected system RAM and target hardware:
-ojon imatrix-run /models/source-f16.gguf /data/representative-text.txt /models/imatrix.gguf --gpu-layers 0 --context 2048 --confirm
-ojon plan /models/source-f16.gguf /models/output-Q4_K_M.gguf --precision Q4_K_M --imatrix /models/imatrix.gguf
-ojon quantize /models/source-f16.gguf /models/output-Q4_K_M.gguf --precision Q4_K_M --imatrix /models/imatrix.gguf
+cargo run --release --locked --bin ojon -- inspect path/to/model.gguf
+cargo run --release --locked --bin ojon -- probe path/to/model.gguf --json
 ```
 
-The importance matrix may improve quality retention, but it is not a benchmark or a guarantee of negligible loss. Do not apply this LLM-specific calibration route to arbitrary diffusion/video/speech models.
+These commands read model metadata without executing inference. For Hugging Face model directories, use `inspect-hf`.
 
-For the smallest acceptable model, benchmark the original and each quantization on an appropriate **identical task suite** and record the actual measurements. Then provide actual values in the JSON quality-evidence format accepted by `ojon recommend`. You can use `ojon recommend --help` for CLI details; do not mark a result verified without performing real tests.
+## Automatic quantization
+
+Supply an original F16/BF16 GGUF, a representative calibration corpus, and an independent held-out evaluation corpus.
 
 ```bash
-ojon recommend /reports/real-quality-evidence.json --json
+cargo run --release --locked --bin ojon -- auto-quant model-f16.gguf output/ --preset balanced --corpus calibration.txt --eval-corpus heldout.txt
 ```
 
-Ojon chooses only among candidates reported to have passed real runtime-loading and task-evaluation checks and every user-supplied tolerance. If no candidate passes, it recommends none. The evidence is user-supplied and **not independently authenticated by Ojon**. For VLMs test OCR/grounding; for image/video test relevant generation fidelity; for speech test transcription or speech quality; for embeddings test retrieval quality—not an unrelated text benchmark.
-
-Local agents may call the JSON commands. They cannot control your computer through this repository alone: actual execution requires a locally installed agent or an explicitly authorized bridge. Treat conversion and training as user-approved write operations.
-
----
-
-## Diffusion precision sweep: the image counterpart of the recipe search
-
-```sh
-ojon diffusion-sweep-run flux-dev.safetensors ./ComfyUI/models/unet --workflow flux_api.json \
-     --reference-name flux-dev-F16.gguf --formats q8_0,q5_0,q4_K,q4_0,q3_K --min-psnr 30 --confirm
-```
-
-Each format is converted with `sd-cli` into ComfyUI's UNet directory (the loader
-refers to files by name, so outputs must land there), then generated beside the
-reference on the same fixed-seed workflow through `diffusion-parity`. The
-receipt (`ojon.diffusion_sweep.v1`) lists every format with its size and
-worst-frame PSNR (and temporal delta for `--kind video`) and names the smallest
-format that passed the gate, or none. `diffusion-sweep-plan` prints the plan and
-converts nothing.
-
-### FIBO 2 and other models sd-cli does not know: `--converter comfy-gguf`
-
-```sh
-ojon diffusion-sweep-run fibo2_dev_bf16.safetensors ./ComfyUI/models/unet --workflow fibo2_api.json \
-     --reference-name fibo2_dev_bf16.safetensors --converter comfy-gguf \
-     --convert-script "<ComfyUI>\custom_nodes\ComfyUI-GGUF\tools\convert.py" --python <python with torch+gguf> \
-     --formats Q8_0,Q6_K,Q5_K_M,Q4_K_M,Q4_0 --min-psnr 30 --confirm
-```
-
-The ComfyUI-GGUF converter (molbal fork) converts and quantizes in one streamed
-Python pass (`--src --dst --streamed --quant-type`), so FIBO 2, Krea 2 and the
-other architectures stable-diffusion.cpp lacks go through the same sweep and
-the same fixed-seed parity gate. Its format names are its own (`Q5_K_M`, not
-`q5_0`); the plan refuses a format the chosen converter does not have. Loading a
-`fibo2` GGUF in ComfyUI needs that fork's loader node as well.
-
-## Measured image parity for diffusion GGUF quants
-
-The language side gates a quant on KL divergence. For image and video models the
-equivalent is pixel parity on a fixed seed: the same API-format ComfyUI workflow
-runs twice, once with the reference weights and once with the candidate GGUF,
-and the decoded PNG outputs are compared.
-
-```sh
-ojon diffusion-parity --workflow flux_api.json --reference-name flux-dev-F16.gguf      --candidate-name flux-dev-Q4_K_S.gguf --min-psnr 30 --confirm
-```
-
-The receipt (`ojon.diffusion_parity.v1`) reports PSNR, mean absolute pixel
-difference and the fraction of pixels over `--pixel-tolerance` per image, and
-`passed` against `--min-psnr` on the worst image. The workflow must carry an
-explicit integer seed on every sampler. For video, `--kind video` decodes
-MP4/WebM/GIF outputs to frames with ffmpeg and adds a temporal-consistency
-delta (mean |reference motion - candidate motion| per frame step); flicker and
-blur show up there even when single-frame PSNR looks fine, and
-`--max-temporal-delta` gates it. A pass is a statement about this workflow and
-seed, not about every prompt.
-
-## Embedding and reranker parity
-
-Perplexity and KL divergence say little about an embedding model: its output is
-a vector, not a next-token distribution. `embed-parity-*` compares the vectors
-instead. Both the reference and the candidate GGUF embed the same held-out
-lines through the public `llama-embedding` tool, and Ojon measures how far the
-candidate's vectors and rankings drift from the reference's.
-
-```sh
-# Plan only: validates the files and prints the exact llama-embedding commands; writes nothing
-ojon embed-parity-plan bge-m3-F16.gguf bge-m3-Q5_K_M.gguf ./embed-out --texts heldout.txt
-
-# Execute, with a retrieval split and a reranker variant
-ojon embed-parity-run bge-m3-F16.gguf bge-m3-Q5_K_M.gguf ./embed-out --texts heldout.txt      --queries queries.txt --documents docs.txt --min-cosine 0.99 --min-recall 0.95 --confirm
-ojon embed-parity-run reranker-F16.gguf reranker-Q6_K.gguf ./rerank-out --pooling rank      --queries queries.txt --documents docs.txt --min-ndcg 0.95 --confirm
-```
-
-Inputs are one text per line (`--texts` 8..=4096 lines; `--queries` and
-`--documents` optional, both or neither). `--pooling` is `mean` by default
-(`last`, `cls` or `rank` as the model requires); `--ngl N` / `--ngl auto`,
-`--ctx` and `--batch` are passed through to the tool.
-
-The receipt (`ojon.embed_parity.v1`) reports, with the exact commands:
-
-- per-text cosine between reference and candidate vectors: min, mean, p05;
-- top-k neighbour overlap (`--top-k`, default 5): for every text, the share of
-  its k nearest other texts under the reference that are also its k nearest
-  under the candidate;
-- with queries and documents: Recall@k and NDCG@10 of the candidate's
-  query-to-document ranking against the reference's ranking;
-- `--pooling rank`: the tool scores every query/document pair; Recall@k and
-  NDCG@10 come from those score matrices, and the cosine is taken per query
-  over its vector of document scores.
-
-The gate is `--min-cosine` (default 0.99) on the **minimum** per-text cosine,
-plus `--min-recall` / `--min-ndcg` when given. A pass means the candidate
-reproduces the reference's geometry on this set. It is a similarity
-measurement between two models, not a retrieval or reranking benchmark: there
-are no relevance labels, the reference's ranking stands in for them, and a
-candidate can agree with a reference that is itself poor at the task.
-
-## VLM projector as a quantization variable
-
-A vision-language model is two GGUF files: the language tower and the
-multimodal projector (`mmproj`). `quantize-hf` converts the projector in the
-same run when the source `config.json` carries a vision tower (`vision_config`
-or a VLM `model_type`); on a text-only source `--mmproj-out` is refused.
-
-```sh
-ojon quantize-hf ./Qwen2-VL-2B ./out/qwen2vl-Q4_K_M.gguf --precision Q4_K_M      --mmproj-out ./out/mmproj-f16.gguf                       # default --mmproj-precision f16
-ojon quantize-hf ./Qwen2-VL-2B ./out/qwen2vl-Q4_K_M-b.gguf --precision Q4_K_M      --mmproj-out ./out/mmproj-q8_0.gguf --mmproj-precision q8_0
-```
-
-`--mmproj-precision` is `f16` (default), `bf16` or `q8_0`, the three types the
-upstream converter accepts for `--mmproj`. The projector is never overwritten.
-The text receipt gains `mmproj.path`, `mmproj.precision`, `mmproj.bytes` and
-`mmproj.vision_inference_test=NOT_RUN`; a JSON sidecar
-`<mmproj>.ojon-receipt.json` (`ojon.mmproj_receipt.v1`) carries the same
-`mmproj` object. Conversion loads nothing into a runtime.
-
-`quant-parity-plan|run` then scores the projector choice. `--mmproj` stays
-with the reference; `--mmproj-candidate` is used for every candidate run:
-
-```sh
-ojon quant-parity-run qwen2vl-F16.gguf qwen2vl-F16.gguf suite.json ./parity      --precisions Q4_K_M --vision-suite vision.json      --mmproj ./out/mmproj-f16.gguf --mmproj-candidate ./out/mmproj-q8_0.gguf --confirm
-```
-
-The candidate projector must be an existing GGUF distinct from `--mmproj`.
-Both paths are recorded in the plan and in the report (`mmproj`,
-`mmproj_candidate`, per-row `vision.reference_mmproj` /
-`vision.candidate_mmproj`), and the row's `evidence_scope` becomes
-`TEXT_AND_VISION_TASK_SUITE_ONLY_PROJECTOR_VARIED`. Without
-`--mmproj-candidate` nothing changes: one projector feeds both sides.
-
-Vision scoring prefers `llama-mtmd-cli` when it is discovered (or given with
-`--vision-tool`), falling back to the configured `--eval-tool`. Older
-`llama-cli` builds do not accept `--mmproj` / `--image`; only the rewritten
-`llama-cli` (shipped with `llama-cli-impl.dll`) and `llama-mtmd-cli` do.
-
-## Is this quant any good? `kld-reference` and `kld-eval`
-
-```sh
-ojon kld-reference Qwen3.8-27B-BF16.gguf qwen38.reference.logits --corpus corpus-eval.txt --chunks 8 --device Vulkan0 --confirm
-ojon kld-eval Qwen3.8-27B-UD-Q5_K_M.gguf Qwen3.8-27B-UD-Q4_K_XL.gguf recipe.gguf \
-     --reference qwen38.reference.logits --corpus corpus-eval.txt --chunks 8 --device Vulkan0 \
-     --original Qwen3.8-27B-BF16.gguf --out kld-eval-receipt.json
-```
-
-The recipe search's own measurement, exposed for any file: save the original's
-logits once on held-out text, then score every candidate against them with the
-same context, chunk count and tool. This is how an online quant and an Ojon
-recipe land on one scale (bytes, mean KLD with its uncertainty, p99, max). Use
-`--device` to keep the measurement on one GPU when another one is serving a
-model. The receipt (`ojon.kld_eval.v1`) states the claim: a similarity
-measurement between two files on this corpus, not a capability claim.
-
-Repeat noise, measured: the same q5_k file scored mean 0.024363 inside a recipe
-run and 0.024535 through `kld-eval` on one GPU (uncertainty ± 0.0007, p99
-0.139 vs 0.137). Differences smaller than that are not differences.
-
-## LoRA that makes the original better, then quant
-
-```sh
-ojon lora-merge-run qwen3-8b-f16.gguf runs/adapter_out merged/qwen3-8b-tuned-f16.gguf      --hf-base ./models/Qwen3-8B --task-suite tasks.json --confirm
-ojon quant-compare-run qwen3-8b-f16.gguf tasks.json merged/qwen3-8b-tuned-f16.vs-base-report.json      --candidate merged=merged/qwen3-8b-tuned-f16.gguf
-ojon auto-quant merged/qwen3-8b-tuned-f16.gguf merged/quants --preset balanced
-```
-
-Order matters: merge first, quantize last, so the KLD recipe search measures the
-quant against the *improved* original. The adapter is a GGUF adapter or a PEFT
-directory (`adapter_config.json` + `adapter_model.safetensors`, what the
-`learn-train-run` path produces); a PEFT folder is converted beside the output
-with `convert_lora_to_gguf.py --outtype f16` (found next to the HF converter,
-or `--convert-script`). The base must be F16/BF16/F32: `llama-export-lora`
-merges into an unquantized original and writes F16 tensors. `--scale` maps to
-the tool's `--lora-scaled`.
-
-The merge receipt (`ojon.lora_merge.v1`) records sizes and both commands and
-states its claim: merge only. KLD against the base is not a gate here, because a
-merged model differs from its base on purpose. The gate is the held-out task
-suite through `quant-compare-run` with the base as reference and the merged
-file as the candidate: quantize the merged file only if it holds or beats the
-base, or the quant inherits an unmeasured change.
-
-Live check (2026-10-30): a zero-delta rank-8 adapter on two tensors of
-Qwen3-0.6B F16 merged through `lora-merge-run` in one pass; the tool reported
-2 merged / 311 written, and every tensor of the output was numerically equal to
-the base (the only byte-level difference was a negative zero becoming positive
-zero in the F32 round trip). A real adapter from `learn-train-run` is the next
-test; the pure parts (adapter detection, base precision check, command
-rendering, never-overwrite) are unit-tested.
-
-## OCR models: the character-error-rate gate
-
-```sh
-python scripts/make_ocr_pages.py pages --count 6          # or your own pages.jsonl with real scans
-ojon ocr-parity-run model-F16.gguf model-Q5_K_M.gguf --mmproj mmproj-F16.gguf --pages pages/pages.jsonl \
-     --device Vulkan0 --max-cer-delta 0.02 --confirm
-```
-
-Every model reads every page through `llama-mtmd-cli` (temperature 0, fixed
-seed) and the transcript is scored against the manifest text as a character
-error rate (lower-cased, whitespace collapsed). The gate is the candidate's
-corpus CER minus the original's; a candidate that reads better than the
-original passes. The receipt (`ojon.ocr_parity.v1`) keeps every transcript and
-states the claim: a parity measurement on these pages, not a general OCR
-accuracy. Synthetic pages prove plumbing; real scans in your language prove
-the quant.
-
-## Speech: whisper.cpp quantize and WER gate
-
-whisper.cpp models are GGML `.bin` files, not GGUF, and whisper.cpp ships its
-own quantizer. `ojon probe ggml-base.bin` recognises them (`audio_speech`,
-format `ggml_bin`); `whisper-quant-*` runs the public `whisper-quantize` tool
-and `whisper-parity-*` measures what the quantization did to transcription.
-
-```sh
-# Plan only: validates the model and prints the exact whisper-quantize commands; writes nothing
-ojon whisper-quant-plan ggml-base.bin ./whisper-out --formats q8_0,q5_0,q4_0
-
-# Execute: one .bin per format plus whisper-quant-receipt.json (sizes, ratios, exact commands)
-ojon whisper-quant-run ggml-base.bin ./whisper-out --formats q8_0,q5_0,q4_0 --confirm
-
-# WER gate: original and candidates transcribe the same held-out clips
-ojon whisper-parity-plan ggml-base.bin ./whisper-out/ggml-base-q5_0.bin ./whisper-out/ggml-base-q4_0.bin     --clips clips.jsonl --language en --max-wer-delta 0.02
-ojon whisper-parity-run  ggml-base.bin ./whisper-out/ggml-base-q5_0.bin --clips clips.jsonl --confirm
-```
-
-Formats are whisper.cpp's scalar types `q8_0`, `q5_0`, `q4_0` (default set),
-`q5_1` and `q4_1`; the tool's usage is `whisper-quantize <in.bin> <out.bin>
-<type>` with the lower-case type name, as in `examples/quantize/quantize.cpp`.
-The executable is `whisper-quantize` in current builds (`quantize` in older
-ones); point `--tool` or `OJON_WHISPER_QUANTIZE` at it when it is not on PATH.
-Inputs must be whisper GGML `.bin`: the tool checks the GGML magic and does not
-read GGUF.
-
-The clips manifest is JSONL, one clip per line, 1..=512 clips, relative audio
-paths resolved against the manifest's folder:
-
-```json
-{"audio": "clips/0001.wav", "text": "the reference transcript of this clip"}
-{"audio": "clips/0002.wav", "text": "another one"}
-```
-
-Every model transcribes every clip with
-`whisper-cli -m <model> -f <clip> -nt -np -l <lang> -t <threads> -otxt -of <stem>`
-(flags from whisper.cpp `examples/cli`); the `<stem>.txt` output is scored
-against the manifest text with word error rate (lower-case, punctuation
-stripped, whitespace collapsed; word-level Levenshtein with substitution,
-insertion and deletion counts). The receipt (`ojon.whisper_parity.v1`) lists
-per-clip WER for every model, corpus WER (pooled errors over pooled reference
-words), the candidate-minus-original delta, pass/fail against
-`--max-wer-delta` (default 0.02), every command, and the transcripts folder.
-
-A pass means the candidate's WER on these clips is within the budget of the
-original's WER on the same clips. It is not a general accuracy claim: the
-original's own WER is whatever it is on your clips, and a clip set in one
-language or domain says nothing about another. The live runner is verified on
-the first real clip set; the pure parts (manifest, WER, gate) are unit-tested.
-
-## Native image/video model weight compression (experimental)
-
-Ojon ships its **own Rust quantizer** for eligible 2D weight matrices in original F16, BF16 or F32 safetensors checkpoints. It uses bounded-memory per-group affine uniform quantization (2/3/4-bit); unrecognized and sensitive tensors are preserved without modification. There is no dependency on RebelUI, PyTorch or GPU drivers for this converter.
-
-```powershell
-ojon pack-plan "./models/original.safetensors" "./models/packed\model-q4.ojonq" --bits 4 --group 64
-ojon pack-run "./models/original.safetensors" "./models/packed\model-q4.ojonq" --bits 4 --group 64 --confirm
-ojon unpack "./models/packed\model-q4.ojonq" "./models/packed\model-q4-restored.safetensors" --confirm
-```
-
-**Format boundary:** `.ojonq` is a documented Ojon-owned weight-storage format, **not** GGUF, ComfyUI W4A8, or directly loadable low-bit Diffusers weights. The built-in Rust unpacker reconstructs ordinary safetensors for portability, but its restored weights no longer save GPU VRAM and have quantization error. Task quality, image fidelity and compatible on-device kernels remain unverified.
-
-Optional SVDQuant INT4 image/video conversion is separately available via an independently installed public [diffuse-compressor](https://github.com/rootonchair/diffuse-compressor) checkout for compatible local Diffusers pipelines. The SVDQuant pipeline uses NVIDIA CUDA; neither installed Python dependencies nor 16 GB GPU feasibility can be inferred from source detection.
-
-```powershell
-ojon diffusion-plan "./models/MyDiffusersPipeline" "./models/packed\denoiser-int4.safetensors" --checkout "./tools/diffuse-compressor" --backend svdq --kind image --format int4
-ojon diffusion-inspect "./models/MyDiffusersPipeline" "./models/packed\denoiser-int4.safetensors" --checkout "./tools/diffuse-compressor" --backend svdq --kind image --format int4 --confirm
-ojon diffusion-run "./models/MyDiffusersPipeline" "./models/packed\denoiser-int4.safetensors" --checkout "./tools/diffuse-compressor" --backend svdq --kind image --format int4 --confirm
-```
-
-All file-writing operations are explicit, outputs must not exist, and sources are never overwritten. Model-quality evaluation should compare matched prompts, seeds, schedulers, frames and all conditioning components.
-
----
-## Advanced model optimization: GSQ and RCO (experimental)
-
-Ojon can also orchestrate two independent, public Apache-2.0 projects: [GSQ](https://github.com/IST-DASLab/GSQ) for learned low-bit scalar weights and [RCO](https://github.com/IST-DASLab/RCO) for layer-wise precision search under an average-bit budget. These are **separate optional Python programs**, not bundled Ojon quantizers. Their output still requires runtime and quality testing.
-
-**GSQ:** install a trusted copy of the upstream source and its dependencies into your own isolated Python environment. Supply an existing local YAML configuration with `model.name` pointing to a local HF model folder. The safe default is a **one-layer smoke test**; a full run requires `--all-layers`.
-
-```powershell
-ojon gsq-plan "./tools/GSQ" "./data/gsq-config.yaml" --python "./venvs/gsq\Scripts\python.exe"
-ojon gsq-run "./tools/GSQ" "./data/gsq-config.yaml" --python "./venvs/gsq\Scripts\python.exe" --layers 1 --confirm
-# If quantization completes and the checkpoint is ready:
-ojon gsq-assemble-plan "./tools/GSQ" "./data/gsq-config.yaml" "./models/gsq-output"
-ojon gsq-assemble "./tools/GSQ" "./data/gsq-config.yaml" "./models/gsq-output" --confirm
-```
-
-**RCO:** for an original **dense Qwen3** Hugging Face checkpoint, Ojon can launch the public upstream CUDA/PyTorch stage that creates a per-layer 2/3/4-bit GPTQ database. This stage is experimental and requires a suitable CUDA environment, calibration data already cached locally, and substantial scratch memory. It has not been tested on typical consumer GPUs. After the database has been built, Ojon can run a bounded precision search and assemble the result. A search assignment is not a ready-to-load model.
-
-```powershell
-ojon rco-db-plan "./tools/RCO" "./models/hf-original" "./data/rco-new-db" --tokens 16384
-ojon rco-db-run "./tools/RCO" "./models/hf-original" "./data/rco-new-db" --confirm
-# Use the populated output directory actually created by the upstream script:
-ojon rco-plan "./tools/RCO" "./models/hf-original" "./data/rco-layer-db" 2.5
-ojon rco-run "./tools/RCO" "./models/hf-original" "./data/rco-layer-db" 2.5 --confirm
-# After the upstream search produces an assignment:
-ojon rco-assemble-plan "./tools/RCO" "./models/hf-original" "./data/rco-layer-db" "./data/rco-layer-db\assignment.json" "./models/rco-packed"
-ojon rco-assemble "./tools/RCO" "./models/hf-original" "./data/rco-layer-db" "./data/rco-layer-db\assignment.json" "./models/rco-packed" --confirm
-```
-
-Replace all placeholder paths with your actual existing files, including the real assignment file name generated by RCO. RCO assembly produces a **compressed-tensors Hugging Face checkpoint**, not automatically GGUF. Both integrations request offline Hugging Face and Weights & Biases modes; this is **not an operating-system network sandbox**. No claim is made that these researchers' Python trainers fit a specific 16 GB or 24 GB GPU. Run planning first and inspect source, Python environment, configuration, calibration data, scratch space and output.
-
----
-
-## Using your installed quantization tools
-
-**You install only the external backends you want.** Ojon does not bundle llama.cpp, diffusion runtimes, Python environments or conversion models. For local HF folders, Ojon can call the installed official llama.cpp Python conversion script, then quantize the resulting intermediate GGUF.
-
-1. Download or build the standard, public [llama.cpp](https://github.com/ggml-org/llama.cpp) tools. The initial GGUF workflow uses `llama-quantize` for conversion and optionally `llama-cli` for local inference testing. No private or modified version is required.
-2. Ojon searches `PATH`, a few common executable folders and the optional `OJON_BACKENDS_DIR` directory when it starts. The native UI displays **Found** or **Not found**. Choose **Rescan installed tools** after installing a tool.
-3. If Ojon cannot find a custom build, enter its exact executable path in the relevant field or set `OJON_LLAMA_QUANTIZE` / `OJON_LLAMA_CLI`. The CLI accepts `--tool` explicitly.
-4. Use **Official download** in the GUI to open the publisher's project/release page. Users choose and install the package themselves. No installation is performed by Ojon.
-5. A detected file is **not** a successful compatibility test. The current workflow supports compatible single-file GGUF input or a Hugging Face model folder using llama.cpp's public conversion script. Image/speech tools are detected for convenience, but their conversion adapters are not connected.
-
-Use `cargo run -- backends` for the list of detection results, actual found paths and publisher links. If a tool lives outside all recognized folders, configure it manually. The detector intentionally does not scan the entire computer or run executables during startup.
-
-For Windows PowerShell with a custom tools folder:
-
-```powershell
-$env:OJON_BACKENDS_DIR = "./tools/AI"
-cargo run -- backends
-cargo run --features gui --bin ojon-gui
-```
-
-For other quantization approaches, see the public upstream projects [NNCF](https://github.com/openvinotoolkit/nncf), [Model Optimizer](https://github.com/NVIDIA/Model-Optimizer), [Quark](https://github.com/amd/Quark) and [CTranslate2](https://github.com/OpenNMT/CTranslate2). **These are future adapter candidates, not currently connected Ojon conversion features.**
-
----
-
-## Current Rust backend (pre-alpha)
-
-The Rust backend is in `src/`. Inspecting GGUF metadata does not require Kathamo, Python or a GPU. The optional `quantize-hf` operation requires Python and the public llama.cpp converter script and its dependencies; the actual quantization uses the standard llama.cpp `llama-quantize` executable.
-
-Install Rust/Cargo and your own compatible `llama-quantize`, then try:
+The first command previews the configuration and probe count. To execute:
 
 ```bash
-cargo build --release
-cargo run --release -- inspect /models/source-f16.gguf
-cargo run --release -- plan /models/source-f16.gguf /models/output-Q5_K_M.gguf --precision Q5_K_M --tool /tools/llama-quantize
-cargo run --release -- quantize /models/source-f16.gguf /models/output-Q5_K_M.gguf --precision Q5_K_M --tool /tools/llama-quantize
-cargo run --release -- verify /models/output-Q5_K_M.gguf
-# Two-stage conversion from an existing local HF checkpoint folder:
-cargo run --release -- inspect-hf /models/my-checkpoint
-cargo run --release -- quantize-hf /models/my-checkpoint /models/model-Q5_K_M.gguf --converter /tools/llama.cpp/convert_hf_to_gguf.py --python python --quantizer /tools/llama-quantize
-cargo run --release -- smoke /models/output-Q5_K_M.gguf --tool /tools/llama-cli --tokens 16 --gpu-layers 0
+cargo run --release --locked --bin ojon -- auto-quant model-f16.gguf output/ --preset balanced --corpus calibration.txt --eval-corpus heldout.txt --confirm
 ```
 
-These are examples, **not evidence that conversion has been successfully run**. Use a small, disposable, high-precision model as the first validation. Substitute Windows executable paths as appropriate. Default quantization is Q5_K_M; Q4_K_M, Q3_K_M and Q6_K are also offered. The direct GGUF adapter accepts **single-file GGUF input**. The HF path accepts a local model directory containing `config.json` plus safetensors or `pytorch_model*.bin`, where the upstream conversion script supports that model family. Split GGUF intermediates are not supported. The HF path requires substantial RAM and scratch space for an intermediate GGUF, and may fail on constrained hardware.
+Available presets:
 
-A successful conversion means the external converter exited successfully and the resulting file passed Ojon's bounded GGUF header/metadata/tensor-catalog check. The output is staged and never replaces an existing destination. An optional receipt is created alongside it. **This does not verify every tensor payload or guarantee the target runtime can load it.**
-
-`smoke` optionally calls a real installed `llama-cli`; default `--gpu-layers 0` uses CPU mode. Success means the inference command exited successfully, not that the answer was correct or accuracy was preserved. It may still need substantial RAM. No model download, GPU support installation, advanced calibration, cancellation service or full graphical model-quality evaluation is bundled in this stage. The Kathamo window exposes inspection, conversion and a basic inference smoke action.
-
----
-
-## 2. Import a model
-
-Planned inputs include supported local model folders, safetensors/GGUF bundles, ONNX models and optional user-approved Hugging Face snapshots. Ojon should examine headers, configs, indexes, tokenizer/processor files, required components and shard completeness **without loading the full source model just to display its information**.
-
-An architecture that cannot be confidently identified should show **Needs review**, not a generic conversion button.
-
-## 3. Pick the target runtime before precision
-
-The model's target loader matters as much as its size. A GGUF quantization suitable for one llama.cpp build is not automatically compatible with a diffusion runtime or another VLM loader.
-
-After inspecting a model, Ojon should list only compatible backends and recipes. Precision labels will include their output format and runtime:
-
-- **Q5_K_M / Q4_K_M:** typical quality/size choices for compatible GGUF language models, with eligible Q3/Q6 as alternatives.
-- **FP8 / INT8:** when supported by the model architecture and exporter/loader.
-- **W4A8 / AWQ / GPTQ / AutoRound:** model-family-specific methods and packing; calibration may be required.
-- **NVFP4 / MXFP4:** only on supported models, kernels and target hardware; these are not interchangeable with GGUF Q4.
-
-Unavailable selections must display a reason: no converter, unsupported architecture, incompatible runtime, insufficient memory, missing calibration data or unverified combination.
-
-## 4. Review the preflight plan
-
-Before any write operation, Ojon should show source size, estimated final size, peak CPU RAM, peak VRAM **per physical device**, temporary/scratch storage, converter version, output directory and confidence/unknowns.
-
-Conversions still read the original model weights. Some methods can process weights tensor by tensor or shard by shard; not every calibrated method can. A 30 GB output may still need significantly more scratch space or memory during conversion.
-
-Ojon should never overwrite the original checkpoint. Conversion outputs will be staged separately and published only after checks.
-
-## 5. Convert and follow progress
-
-The current native **Job Status & Telemetry** panel displays bounded real converter output lines, job elapsed time, and, after successful conversion, actual output bytes compared with source bytes. The interface reports **detected executables**, not 'online' backends, and requires the current source to be inspected before starting conversion. **A true completion percentage, cancel/recovery workflow, hardware telemetry and automated task-quality benchmarks are not implemented yet.** Those must never be fabricated, and all source weights remain separate from staged output.
-
-Actual worker binaries may need to be installed or configured separately. No optional backend is assumed present solely because Ojon recognizes its name.
-
-## 6. Test the smaller model
-
-The intended **Test** page uses the target runtime, not a simulation:
-
-| Type | Test experience |
+| Preset | Objective |
 | --- | --- |
-| LLM | Prompt/chat, latency, tokens/s and resource use |
-| VLM/OCR/grounding | Image input, visual questions, OCR or coordinates |
-| Image generator | Prompt/seed/sampler, generated preview and resource use |
-| Video generator | Short generated clip and temporal inspection |
-| Speech/STT/TTS | Audio transcription or generated speech playback |
-| Embedding/reranker | Similarity, rankings and retrieval examples |
-| Other utility | The actual task's output and appropriate metrics |
+| `safest` | Retain higher precision with a tighter divergence budget |
+| `balanced` | Balance file size and measured distribution change |
+| `smallest` | Explore lower precision under a looser budget |
 
-If the converted model still does not fit available hardware, Ojon must say **Not locally load-tested**. Structural validation alone does not establish runtime compatibility or retained model quality.
+Advanced options:
 
-## 7. Compare against an original-model reference
+- `--target-bytes N`: target an output size in bytes.
+- `--search`: search again instead of applying a stored family recipe.
+- `--resume`: continue a previously interrupted search.
+- `--device DEVICE`: select a supported runtime device.
 
-When both original and quantized models can run, paired local tests are preferable. When the original cannot run, a reputable published benchmark may be used as a **reference only**—with model version, benchmark dataset, prompt template and evaluation conditions recorded. Different settings can make the comparison invalid.
+The initial search creates and evaluates multiple candidates; larger models require additional memory, disk space and execution time. Inspect the generated receipt before choosing a variant.
 
-Report statuses should clearly separate: **Converted**, **Format-valid**, **Runtime-loadable**, **Task-tested**, **Direct baseline comparison**, and **External reference comparison**.
+## Measured recipe search
 
-## 8. Hardware and larger models
+To control the mixed-precision search directly, use the recipe tools:
 
-Ojon uses the hardware available on **your machine**. Model size, conversion method, RAM, storage and available CPU/GPU resources determine what can run. There is no requirement to match the developer's hardware.
+```bash
+cargo run --release --locked --bin ojon -- recipe-plan model-f16.gguf output/ --corpus calibration.txt --eval-corpus heldout.txt --base q5_k --floor q4_k --budget 0.01
+```
 
-More VRAM does not make every converter compatible. Multiple GPUs are not one pooled memory device unless the chosen backend explicitly supports that arrangement. CPU-only processing can be a valid alternative for certain converters.
+Review the plan before running `recipe-run` with the same settings, `--resume` and `--confirm`. See [recipe search](docs/RECIPE_SEARCH.md) for calibration, KL divergence and result interpretation.
 
-Compatibility reports should include the model, converter version, runtime, operating system and tested hardware so results can be reproduced.
+To list saved recipes:
 
-## 9. Errors and safety
+```bash
+cargo run --release --locked --bin ojon -- recipe-library list
+```
 
-- **Unsupported model:** check model family, file completeness, target runtime and converter compatibility.
-- **Not enough memory/disk:** change recipe, backend or execution device where the selected method supports it; otherwise use larger hardware.
-- **Missing components:** verify the original tokenizer, processor, projector, vision encoder and shard index as appropriate.
-- **Conversion succeeded but won't load:** treat as a failed runtime verification, not a successful runnable model.
-- **Low-quality result:** run a task-relevant evaluation; do not equate a smaller file with preserved quality.
+## Hardware and quality checks
 
-Local files remain local unless you explicitly select a remote source or external service. Source checkpoints must be read-only during conversion.
+```bash
+cargo run --release --locked --bin ojon -- backends --probe
+cargo run --release --locked --bin ojon -- resource-plan path/to/model path/to/output-parent --json
+```
 
-## 10. Status and availability
+Ojon can inspect resources and gather quality/runtime receipts using supported backends. Model-file inspection, successful conversion, runtime loading and actual task-quality preservation are separate checks.
 
-**Pre-alpha:** the public Rust backend and native [Kathamo](https://github.com/jony100200/Kathamo) GUI are on `main`. Continuous integration compilation is verified. **Ojon requires no private repositories or unpublished studio tools**; users supply compatible public conversion and inference tools.
+For evaluation criteria, see [Quality strategy](QUALITY_STRATEGY.md).
+
+## Desktop UI
+
+```bash
+cargo run --release --locked --features gui --bin ojon-gui
+```
+
+The GUI uses [Kathamo](https://github.com/jony100200/Kathamo). The Rust CLI remains available independently of the GUI.
+
+## Specialized workflows
+
+The CLI also exposes experimental model editing, optional image/video quantization adapters, OCR and audio comparisons, and model-format-specific operations. Check `--help` for supported commands and the selected backend's own requirements.
+
+For MiniMax H3 conversion examples, see [MiniMax H3](docs/MINIMAX_H3.md). These adapters use external conversion tools and require model-specific runtime validation.
+
+## Development
+
+```bash
+cargo fmt --all -- --check
+cargo check --locked --bin ojon
+cargo test --locked --lib --bin ojon
+cargo check --locked --features gui --bin ojon-gui
+```
+
+See [Contributing](CONTRIBUTING.md) for changes and test reports.

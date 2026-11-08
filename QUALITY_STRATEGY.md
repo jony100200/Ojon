@@ -1,103 +1,39 @@
 # Quality strategy
 
-Ojon chooses the smallest **runnable** model that meets explicit quality
-thresholds on the intended local hardware. It never treats a successful
-conversion, a valid GGUF header, or a zero-score evaluation reference as
-proof of retained capability.
+Ojon optimizes for **usable model quality per byte**. File size alone does not determine the best candidate.
 
-## Priority board — 2026-11-03
+## Comparison protocol
 
-**P0: prove how good Ojon's quantisation actually is.** Freeze original BF16
-model, calibration and distinct held-out tests. Compare stock llama.cpp
-Q4_K_M/Q3_K_M with and without the same imatrix against Ojon's KLD-guided
-mixed-precision recipe **at the same byte budget**, on the same backend.
-Record original and output hashes, exact builds, real PPL and KL mean/p99,
-task-level coding/reasoning/tool scores, speed, peak RAM/VRAM and uncertainty.
-Repeat with a different 4B-8B model before claiming general advantage.
+1. **Same source:** Record the original checkpoint and its hash. Compare candidates derived from the same model revision.
+2. **Fair quantization:** Use comparable converter versions and calibration settings, including the same importance matrix when applicable.
+3. **Independent evaluation:** Keep calibration and held-out evaluation datasets separate.
+4. **Quality evidence:** Measure KL divergence/perplexity plus task-level results for the intended uses (for example, coding, reasoning, tool use, Bengali and English).
+5. **Hardware evidence:** Confirm actual loading, memory demand and throughput on the intended runtime/device.
+6. **Decision:** Retain the smallest candidate that meets declared quality and runtime requirements. Otherwise report no passing candidate.
 
-**Current evidence:** the recorded Qwen3-0.6B trial reduced file size from
-34.7% to 33.8% of BF16 while mean KLD increased from 0.0234 to 0.0326.
-That meets its local mean-KL budget but does **not** establish task-quality
-preservation or beat an equal-size stock quant. A Flint MoE probe stopped
-incomplete under host memory pressure. A newer **CPU-only** comparison of
-stock Q4 (484 MB), stock Q5 (551 MB) and Ojon's existing mixed recipe
-(503 MB) measured mean KL against the same FP16 source at 0.108343,
-0.035708 and 0.034154 respectively. Ojon's recipe was 8.69% smaller
-than the stock Q5 file, but used an importance matrix that stock Q5 did
-not; the small KL difference is within measurement uncertainty. This is
-encouraging workflow evidence, **not a matched-calibration superiority
-claim**. See `docs/RECIPE_SEARCH.md` for hashes and full limitations.
+A GGUF header check is not an inference test. A KL threshold alone is not proof of task accuracy.
 
-**Research comparison:** llama.cpp is our GGUF encoder, not a separate Ojon
-quality win. Unsloth Dynamic 2 uses per-layer selection, AutoRound optimises
-rounding and mixed-bit allocation, and EXL3 uses a distinct QTIP-derived format
-and runtime. Ojon currently provides externally measured class-level search
-and wrappers for some of those upstream engines; no head-to-head superiority
-has been established.
+## Receipts
 
-**P1 after the same-budget benchmark:** refine block-group and MoE allocation
-with real sensitivity measurements, calibrate quality on held-out tasks, and
-reduce the number of full-model probes.
+A reproducible experiment should record:
 
-**P2 deferred usability features:** Model Doctor, Hardware Fit Advisor,
-Quality Passport, export wizard, Model Vault, batch/resume and MoE Optimiser.
-Do not prioritise these over a verified quantisation win.
+- Source model identity and relevant file hashes
+- Model architecture and tensor/quantization recipe
+- Quantizer and runtime versions
+- Calibration and evaluation dataset identities
+- Output file bytes and measured distribution metrics
+- Task-level scores and any known regressions
+- Hardware, execution settings, memory and throughput when measured
+- Decision: accepted, rejected or incomplete
 
-## Model source and reference
+## Model editing
 
-- Use an original F16/BF16/F32 GGUF as the quantization source. Never
-  requantize an existing Q4/Q5 file to make another candidate.
-- The original GGUF can be its own quality reference. A matching, already
-  accepted Q4 GGUF can instead be the reference when searching below Q4.
-- Compare already available GGUFs without an original through
-  `quant-compare-*`. Tensor agreement checks format compatibility, not
-  cryptographic checkpoint lineage.
-- Start with Q4_K_M and Q5_K_M. Search lower precision only when task,
-  perplexity, size, load and hardware measurements justify it.
+Behaviour-editing experiments require a separate before/after comparison to the untouched original model. Quantizing an edited checkpoint is a second transformation and must be evaluated separately.
 
-## Acceptance
+Preserve both references in the resulting report. Avoid claiming behavioral improvement unless the change is demonstrated on appropriate held-out requests without material capability loss.
 
-1. Use the same prompts and inference settings for teacher and candidates.
-   The teacher must score above zero for coding, reasoning and tool-call
-   categories; otherwise the suite is uninformative and no model is chosen.
-2. Set maximum tolerated loss and minimum size saving explicitly. Include
-   vision tests for VLMs and a held-out perplexity corpus when required.
-3. Confirm model load, tokens, speed and memory with the target inference
-   backend and hardware. A GGUF container inspection is a preflight only.
-4. Select the smallest candidate that passes every required gate. Report the
-   exact evidence scope. “No detected regression on this suite” never means
-   mathematically lossless.
+## Current scope
 
-## Directional editing and automatic uncensoring
+The development experiments show working quantitative tools but have not demonstrated a general head-to-head victory against leading community quantizations. Acceptance evidence is model-specific and backend-specific.
 
-For explicit GGUF per-layer structural eligibility and independent paired quality
-evidence gates, see [`docs/BEHAVIOUR_QA.md`](docs/BEHAVIOUR_QA.md).
-These read-only checks are **not** model edits or independent runtime attestations.
-
-Research and implementation gaps against Heretic 2.x ARA (including
-hybrid-attention coverage and capability gates) are tracked in
-[`docs/HERETIC_2_RESEARCH.md`](docs/HERETIC_2_RESEARCH.md).
-
-An original single-file little-endian F16/BF16/F32 GGUF can be edited
-directly with a measured activation direction. Ojon writes a separate GGUF
-and recipe receipt while preserving the original. The supported projection targets are exact
-`blk.N.attn_output.weight` and `blk.N.ffn_down.weight` float matrices.
-Quantized, router, expert and vision tensors are excluded from this route.
-
-Through `uncensor-auto-plan` / `uncensor-auto-run` (and the Kathamo GUI **Uncensor Model** workflow), Ojon automatically:
-1. Captures paired refusal-vs-compliance directions across transformer blocks using `llama-cvector-generator` and ranks candidate layers by measured direction L2 norm.
-2. Evaluates multiple editing strategies independently (`norm_preserving_ablation`, `standard_ablation`, and Heretic-style `projected_multi_layer_heretic` combining attention output and FFN down-projections across top-ranked middle blocks).
-3. Measures both harmful-probe refusal reduction (`refusal_rate`) and benign-prompt false-refusal rate (`benign_overrefusal_rate`), alongside held-out coding/reasoning/tool-use capability retention.
-4. Exports a detachable `<stem>-control-vector.gguf` alongside the winning edited high-precision checkpoint and reloads the published checkpoint to verify container integrity and real runtime inference.
-5. When post-edit quantisation is enabled (`--quantize Q4_K_M|Q5_K_M|Q6_K`), runs the combined workflow (`Original -> Edited Teacher -> Quantised Candidate`) and verifies the final quantised artifact against **both** the original model (`vs_original`) and the accepted edited teacher (`vs_edited_teacher`).
-
-The automatic selector requires nonzero baseline coding, reasoning and tool
-scores and a measured reduction in harmful refusals or benign over-refusals.
-It publishes no edit when the baseline cannot support those comparisons. A
-quantised file is reported as the final output only when its dual-reference
-gate passes; a rejected file remains available for inspection with a failed
-status in the receipt.
-
-The edit sweep evaluates candidates sequentially and retains at most the
-current best plus the candidate under test. This bounds extra full-size GGUF
-storage to two copies during the sweep.
+See [the user guide](USER_GUIDE.md) for commands and [recipe search](docs/RECIPE_SEARCH.md) for the quantization method.
