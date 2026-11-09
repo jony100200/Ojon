@@ -105,6 +105,20 @@ fn pick_model_file() -> Option<PathBuf> {
     None
 }
 
+/// Pick an already installed binary/script; never run it during setup.
+#[cfg(windows)]
+fn pick_backend_file() -> Option<PathBuf> {
+    let script = "Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.OpenFileDialog; $f.Title = 'Select installed backend'; $f.Filter = 'Backend executables (*.exe;*.cmd;*.py)|*.exe;*.cmd;*.py|All Files (*.*)|*.*'; if ($f.ShowDialog() -eq 'OK') { [Console]::Out.WriteLine($f.FileName) }";
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Sta", "-Command", script])
+        .output()
+        .ok()?;
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!name.is_empty()).then(|| PathBuf::from(name))
+}
+#[cfg(not(windows))]
+fn pick_backend_file() -> Option<PathBuf> { None }
+
 #[cfg(windows)]
 fn pick_folder(description: &str) -> Option<PathBuf> {
     let safe_desc = description.replace('\'', "");
@@ -146,6 +160,8 @@ enum Focus {
     Model,
     Output,
     Quantizer,
+    Cvector,
+    SdCli,
     Converter,
     Runtime,
     EvalServer,
@@ -280,6 +296,8 @@ struct Workstation {
     local_settings: LocalSettings,
     settings_load_failed: bool,
     quantizer: String,
+    cvector: String,
+    sd_cli: String,
     converter: String,
     runtime: String,
     eval_server: String,
@@ -291,6 +309,7 @@ struct Workstation {
     workspace_tab: usize,
     optimize_settings_tab: usize,
     optimize_review_tab: usize,
+    setup_view: bool,
     backends_expanded: bool,
     advanced_opt_expanded: bool,
     advanced_unc_expanded: bool,
@@ -402,6 +421,18 @@ impl Workstation {
             .map(|p| p.to_string_lossy().into_owned())
             .or_else(|| settings.backend("OJON_LLAMA_CLI").map(str::to_owned))
             .unwrap_or_else(|| "llama-cli".to_owned());
+        let cvector = backends.iter()
+            .find(|b| b.spec.id == BackendId::LlamaCvectorGenerator)
+            .and_then(|b| b.executable.as_ref())
+            .map(|p| p.to_string_lossy().into_owned())
+            .or_else(|| settings.backend("OJON_LLAMA_CVECTOR").map(str::to_owned))
+            .unwrap_or_else(|| "llama-cvector-generator".to_owned());
+        let sd_cli = backends.iter()
+            .find(|b| b.spec.id == BackendId::StableDiffusionCpp)
+            .and_then(|b| b.executable.as_ref())
+            .map(|p| p.to_string_lossy().into_owned())
+            .or_else(|| settings.backend("OJON_SD_CLI").map(str::to_owned))
+            .unwrap_or_else(|| "sd-cli".to_owned());
         let eval_server = backends
             .iter()
             .find(|b| b.spec.id == BackendId::LlamaServer)
@@ -452,8 +483,9 @@ impl Workstation {
         });
         let detected_gpus = discover_runtime_gpu_devices();
         let job_history = load_job_history().unwrap_or_default();
+        let setup_view = !backends.iter().any(|b| b.installed());
         Self {
-            source, output, quantizer, converter, runtime, eval_server, benchmark,
+            source, output, quantizer, cvector, sd_cli, converter, runtime, eval_server, benchmark,
             local_settings:settings.clone(),
             settings_load_failed:settings_problem.is_some(),
             prompt: "Explain in one sentence what a quantized language model is.".into(),
@@ -463,6 +495,7 @@ impl Workstation {
             workspace_tab: 0,
             optimize_settings_tab: 0,
             optimize_review_tab: 0,
+            setup_view,
             backends_expanded: false,
             advanced_opt_expanded: false,
             advanced_unc_expanded: false,
@@ -565,6 +598,8 @@ impl Workstation {
                 "convert_hf_to_gguf.py",
             ),
             ("OJON_LLAMA_CLI", self.runtime.trim(), "llama-cli"),
+            ("OJON_LLAMA_CVECTOR", self.cvector.trim(), "llama-cvector-generator"),
+            ("OJON_SD_CLI", self.sd_cli.trim(), "sd-cli"),
             ("OJON_LLAMA_SERVER", self.eval_server.trim(), "llama-server"),
             ("OJON_LLAMA_BENCH", self.benchmark.trim(), "llama-bench"),
         ] {
@@ -692,6 +727,20 @@ impl Workstation {
                 self.runtime = path.to_string_lossy().into_owned();
             }
         }
+        if self.cvector.trim() == "llama-cvector-generator" || self.cvector.trim().is_empty() {
+            if let Some(path) = self.backends.iter()
+                .find(|b| b.spec.id == BackendId::LlamaCvectorGenerator)
+                .and_then(|b| b.executable.as_ref()) {
+                self.cvector = path.to_string_lossy().into_owned();
+            }
+        }
+        if self.sd_cli.trim() == "sd-cli" || self.sd_cli.trim().is_empty() {
+            if let Some(path) = self.backends.iter()
+                .find(|b| b.spec.id == BackendId::StableDiffusionCpp)
+                .and_then(|b| b.executable.as_ref()) {
+                self.sd_cli = path.to_string_lossy().into_owned();
+            }
+        }
         let installed = self.backends.iter().filter(|b| b.installed()).count();
         self.status = format!("{installed} known backend executable(s) detected. Discovery alone does not confirm compatibility.");
         self.needs_redraw = true;
@@ -710,6 +759,8 @@ impl Workstation {
                 "llama-quantize",
             ),
             (BackendId::LlamaCli, self.runtime.trim(), "llama-cli"),
+            (BackendId::LlamaCvectorGenerator, self.cvector.trim(), "llama-cvector-generator"),
+            (BackendId::StableDiffusionCpp, self.sd_cli.trim(), "sd-cli"),
             (
                 BackendId::LlamaServer,
                 self.eval_server.trim(),
@@ -2090,6 +2141,8 @@ impl Workstation {
             Focus::Model => &mut self.source,
             Focus::Output => &mut self.output,
             Focus::Quantizer => &mut self.quantizer,
+            Focus::Cvector => &mut self.cvector,
+            Focus::SdCli => &mut self.sd_cli,
             Focus::Converter => &mut self.converter,
             Focus::Runtime => &mut self.runtime,
             Focus::EvalServer => &mut self.eval_server,
@@ -2181,6 +2234,8 @@ impl Workstation {
         let source = &mut self.source;
         let output = &mut self.output;
         let quantizer = &mut self.quantizer;
+        let cvector = &mut self.cvector;
+        let sd_cli = &mut self.sd_cli;
         let converter = &mut self.converter;
         let runtime = &mut self.runtime;
         let eval_server = &mut self.eval_server;
@@ -2192,6 +2247,7 @@ impl Workstation {
         let workspace_tab = &mut self.workspace_tab;
         let optimize_settings_tab = &mut self.optimize_settings_tab;
         let optimize_review_tab = &mut self.optimize_review_tab;
+        let setup_view = &mut self.setup_view;
         let backends_expanded = &mut self.backends_expanded;
         let advanced_opt_expanded = &mut self.advanced_opt_expanded;
         let advanced_unc_expanded = &mut self.advanced_unc_expanded;
@@ -2270,6 +2326,7 @@ impl Workstation {
         let mut probe_capabilities = false;
         let mut save_local_settings = false;
         let mut download: Option<BackendId> = None;
+        let mut browse_backend: Option<Focus> = None;
         let mut new_focus = self.focus;
         let mut browse_model = false;
         let mut browse_folder = false;
@@ -2300,7 +2357,9 @@ impl Workstation {
         {
             // New Kathamo navigation; each destination is an existing working view.
             let rail = NavigationRail::new()
-                .with_selected(if *workspace_tab == 2 {
+                .with_selected(if *setup_view {
+                    "setup"
+                } else if *workspace_tab == 2 {
                     "uncensor"
                 } else if *workspace_tab == 1 {
                     "manual"
@@ -2335,6 +2394,11 @@ impl Workstation {
                     "manual",
                     StudioIcon::Settings,
                     "Manual Tools",
+                ))
+                .add_main(NavigationRailItem::new(
+                    "setup",
+                    StudioIcon::Settings,
+                    "Setup",
                 ));
             if let Some(destination) = rail.render(
                 &mut cmds,
@@ -2348,25 +2412,31 @@ impl Workstation {
                 &palette,
             ) {
                 match destination {
+                    "setup" => { *setup_view = true; }
                     "optimize" => {
+                        *setup_view = false;
                         *workspace_tab = 0;
                         *optimize_settings_tab = 0;
                         *optimize_review_tab = 0;
                     }
                     "hardware" => {
+                        *setup_view = false;
                         *workspace_tab = 0;
                         *optimize_settings_tab = 2;
                         *optimize_review_tab = 0;
                         *advanced_opt_expanded = true;
                     }
                     "results" => {
+                        *setup_view = false;
                         *workspace_tab = 0;
                         *optimize_review_tab = 1;
                     }
                     "manual" => {
+                        *setup_view = false;
                         *workspace_tab = 1;
                     }
                     "uncensor" => {
+                        *setup_view = false;
                         *workspace_tab = 2;
                     }
                     _ => {}
@@ -2505,6 +2575,137 @@ impl Workstation {
                 );
             });
 
+
+            // Dedicated setup page: no model load, cloud call or install during discovery.
+            if *setup_view {
+                ui.columns(
+                    (height - 154.0).max(520.0),
+                    &[SizeConstraint::Fixed(480.0), SizeConstraint::Flex(1.0)],
+                    |idx, col| {
+                        if idx == 0 {
+                            col.glass_card(530.0, |card| {
+                                card.heading("BACKEND SETUP");
+                                card.label("Install only what your selected operation requires.");
+                                card.label("Inspect model metadata: Ojon alone is enough.");
+                                card.separator();
+                                let found = |id: BackendId| backends.iter()
+                                    .any(|b| b.spec.id == id && b.installed());
+                                card.label("GGUF QUANTIZATION");
+                                card.status_pill(
+                                    if found(BackendId::LlamaQuantize) || Path::new(quantizer.trim()).is_file() {
+                                        "llama-quantize detected"
+                                    } else { "llama-quantize missing" },
+                                    found(BackendId::LlamaQuantize) || Path::new(quantizer.trim()).is_file(),
+                                );
+                                card.label("Quality evaluation also uses llama-cli and llama-perplexity.");
+                                card.separator();
+                                card.label("GGUF BEHAVIOR EDITING");
+                                card.status_pill(
+                                    if found(BackendId::LlamaCvectorGenerator) { "Control-vector tool detected" }
+                                    else { "Control-vector tool missing" },
+                                    found(BackendId::LlamaCvectorGenerator),
+                                );
+                                card.label("Requires compatible llama.cpp tools and a supported GGUF.");
+                                card.separator();
+                                card.label("IMAGE / VIDEO MODELS");
+                                card.status_pill(
+                                    if found(BackendId::StableDiffusionCpp) { "sd-cli detected" }
+                                    else { "sd-cli not detected (optional)" },
+                                    found(BackendId::StableDiffusionCpp),
+                                );
+                                card.label("Uses sd-cli or the selected model's converter.");
+                                card.label("ComfyUI is optional for preview / parity workflows.");
+                                card.label("MiniMax H3 has separate OrbitQuant / Python requirements.");
+                                card.separator();
+                                card.label("Detected means executable found, not proven model support.");
+                                if card.button_secondary("Get llama.cpp from publisher").clicked() {
+                                    download = Some(BackendId::LlamaQuantize);
+                                }
+                                if card.button_secondary("Get stable-diffusion.cpp").clicked() {
+                                    download = Some(BackendId::StableDiffusionCpp);
+                                }
+                            });
+                        } else {
+                            col.glass_card(530.0, |card| {
+                                card.heading("FIND YOUR INSTALLED TOOLS");
+                                card.label("Set an existing executable path, or use the official publisher link.");
+                                card.label("Paths and settings stay on your computer.");
+                                let available = |id: BackendId, path: &str| {
+                                    Path::new(path.trim()).is_file() ||
+                                        backends.iter().any(|b| b.spec.id == id && b.installed())
+                                };
+                                card.horizontal(23.0, |row| {
+                                    row.label("llama-quantize  |  GGUF conversion");
+                                    row.badge(if available(BackendId::LlamaQuantize, quantizer) { "Detected" } else { "Missing" },
+                                        available(BackendId::LlamaQuantize, quantizer));
+                                });
+                                if card.text_input(quantizer, "Path to llama-quantize.exe").clicked() {
+                                    new_focus = Some(Focus::Quantizer);
+                                }
+                                if card.button_secondary("Browse quantizer...").clicked() {
+                                    browse_backend = Some(Focus::Quantizer);
+                                }
+                                card.separator();
+                                card.horizontal(23.0, |row| {
+                                    row.label("llama-cli  |  Inference");
+                                    row.badge(if available(BackendId::LlamaCli, runtime) { "Detected" } else { "Missing" },
+                                        available(BackendId::LlamaCli, runtime));
+                                });
+                                if card.text_input(runtime, "Path to llama-cli.exe").clicked() {
+                                    new_focus = Some(Focus::Runtime);
+                                }
+                                if card.button_secondary("Browse inference tool...").clicked() {
+                                    browse_backend = Some(Focus::Runtime);
+                                }
+                                card.separator();
+                                card.label("Hugging Face converter  |  HF model folders");
+                                if card.text_input(converter, "Path to convert_hf_to_gguf.py").clicked() {
+                                    new_focus = Some(Focus::Converter);
+                                }
+                                if card.button_secondary("Browse converter...").clicked() {
+                                    browse_backend = Some(Focus::Converter);
+                                }
+                                card.separator();
+                                card.horizontal(23.0, |row| {
+                                    row.label("llama-cvector-generator  |  Behavior editing");
+                                    row.badge(if available(BackendId::LlamaCvectorGenerator, cvector) { "Detected" } else { "Missing" },
+                                        available(BackendId::LlamaCvectorGenerator, cvector));
+                                });
+                                if card.text_input(cvector, "Path to llama-cvector-generator.exe").clicked() {
+                                    new_focus = Some(Focus::Cvector);
+                                }
+                                if card.button_secondary("Browse behavior tool...").clicked() {
+                                    browse_backend = Some(Focus::Cvector);
+                                }
+                                card.separator();
+                                card.horizontal(23.0, |row| {
+                                    row.label("sd-cli  |  Image / video conversions");
+                                    row.badge(if available(BackendId::StableDiffusionCpp, sd_cli) { "Detected" } else { "Missing" },
+                                        available(BackendId::StableDiffusionCpp, sd_cli));
+                                });
+                                if card.text_input(sd_cli, "Path to sd-cli.exe").clicked() {
+                                    new_focus = Some(Focus::SdCli);
+                                }
+                                if card.button_secondary("Browse image tool...").clicked() {
+                                    browse_backend = Some(Focus::SdCli);
+                                }
+                                card.horizontal(30.0, |actions| {
+                                    if actions.button("Save Local Preferences").clicked() {
+                                        save_local_settings = true;
+                                    }
+                                    if actions.button_secondary("Rescan Tools").clicked() {
+                                        rescan = true;
+                                    }
+                                    if actions.button_secondary("Probe Capabilities").clicked() {
+                                        probe_capabilities = true;
+                                    }
+                                });
+                                card.label("Other tools are available in Manual Tools > Backend Tools.");
+                            });
+                        }
+                    },
+                );
+            } else {
             // 2. Main Two-Column Workstation Layout
             ui.columns(
                 (height - 154.0).max(520.0),
@@ -3197,6 +3398,7 @@ impl Workstation {
                     }
                 },
             );
+            }
         }
         if auto_generated_output && previous_precision != self.precision() {
             self.output = default_output(&self.source, self.precision());
@@ -3214,6 +3416,23 @@ impl Workstation {
         }
         if probe_capabilities {
             self.start_capability_probe();
+        }
+        if let Some(target) = browse_backend {
+            if let Some(selected) = pick_backend_file() {
+                let path = selected.to_string_lossy().into_owned();
+                match target {
+                    Focus::Quantizer => self.quantizer = path,
+                    Focus::Cvector => self.cvector = path,
+                    Focus::SdCli => self.sd_cli = path,
+                    Focus::Runtime => self.runtime = path,
+                    Focus::Converter => self.converter = path,
+                    Focus::EvalServer => self.eval_server = path,
+                    Focus::Benchmark => self.benchmark = path,
+                    _ => {}
+                }
+                self.persist_local_settings(true);
+                self.needs_redraw = true;
+            }
         }
         if browse_model {
             if let Some(picked) = pick_model_file() {
