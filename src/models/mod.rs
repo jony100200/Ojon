@@ -10,6 +10,7 @@ pub mod mtp;
 pub mod model_build;
 pub mod whisper;
 pub mod lora_merge;
+pub mod weight_patch;
 pub mod orbitquant;
 pub mod comfy_checkpoint;
 

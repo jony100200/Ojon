@@ -73,6 +73,28 @@ To list saved recipes:
 cargo run --release --locked --bin ojon -- recipe-library list
 ```
 
+## Apply a weight delta, then compress
+
+To change a model before quantizing it, give Ojon a delta file and an `ojon.weight_patch.v1` manifest (delta hash, target tensor names, optional source tensor hashes). Ojon writes a new folder and only reads the original:
+
+```bash
+cargo run --release --locked --bin ojon -- weight-patch-plan path/to/hf-model patch.json patched-model
+cargo run --release --locked --bin ojon -- weight-patch-run  path/to/hf-model patch.json patched-model --confirm
+cargo run --release --locked --bin ojon -- weight-patch-verify patched-model
+cargo run --release --locked --bin ojon -- weight-patch-rollback patched-model restored-model --confirm
+```
+
+The output folder holds a receipt with every hash and the original bytes of the patched tensors, so the change can be checked and undone exactly.
+
+To run the whole path from one config (patches, GGUF conversion, imatrix, a quant ladder, KLD, your own test commands, then the smallest candidate within your tolerance or no winner):
+
+```bash
+cargo run --release --locked --bin ojon -- pipeline-plan pipeline.json
+cargo run --release --locked --bin ojon -- pipeline-run  pipeline.json --confirm
+```
+
+Each test is a command that writes `{"metrics": {...}, "runtime": {...}}`. Runs resume where they stopped.
+
 ## Hardware and quality checks
 
 ```bash

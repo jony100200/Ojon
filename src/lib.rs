@@ -61,6 +61,7 @@ pub use self::models::mtp;
 pub use self::models::model_build;
 pub use self::models::whisper;
 pub use self::models::lora_merge;
+pub use self::models::weight_patch;
 
 // Eval
 pub use self::eval::benchmark;
@@ -72,6 +73,7 @@ pub use self::eval::task_eval;
 // Workflows
 pub use self::workflows::adapter_smoke;
 pub use self::workflows::optimize_workflow;
+pub use self::workflows::pipeline;
 pub use self::workflows::options;
 pub use self::workflows::research_routes;
 pub use self::workflows::simple_workflow;

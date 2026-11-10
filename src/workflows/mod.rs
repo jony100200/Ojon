@@ -1,6 +1,7 @@
 pub mod adapter_smoke;
 pub mod flint_pipeline;
 pub mod optimize_workflow;
+pub mod pipeline;
 pub mod options;
 pub mod research_routes;
 pub mod simple_workflow;

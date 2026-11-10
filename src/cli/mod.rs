@@ -2,6 +2,7 @@
 
 pub mod audio;
 pub mod lora;
+pub mod patch;
 pub mod ocr;
 pub mod kld;
 pub mod auto;
@@ -46,6 +47,9 @@ pub fn run() -> io::Result<()> {
         return Ok(());
     }
     if kld::handle(cmd, &mut args)? {
+        return Ok(());
+    }
+    if patch::handle(cmd, &mut args)? {
         return Ok(());
     }
     if lora::handle(cmd, &mut args)? {
