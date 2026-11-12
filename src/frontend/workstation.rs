@@ -5022,6 +5022,44 @@ mod tests {
         if let Some(dir) = &shots {
             save_frame(&mut ws, dir, "e2e_queue");
         }
+        // The new file is listed under Models as made by Ojon, and is really on disk.
+        ws.go_to(look::Screen::Models);
+        assert!(
+            ws.models.iter().any(|m| m.made_by_ojon && !m.missing),
+            "the result is not listed under Models"
+        );
+        if let Some(dir) = &shots {
+            save_frame(&mut ws, dir, "e2e_models");
+        }
+        // An accepted uncensor result offers the same file onward. The edit itself is
+        // stood in for by the file just made; the buttons and both model runs are real.
+        if let Some(made) = ws.opt_result.as_ref().and_then(|r| r["provisional_candidate"]["path"].as_str().map(PathBuf::from)) {
+            ws.unc_auto_result = Some(serde_json::json!({
+                "status": "SELECTED_FROM_MEASURED_SCORES",
+                "baseline": {"refusal_rate": 0.125, "benign_overrefusal_rate": 0.0},
+                "candidates": [],
+                "output_edited": made.to_string_lossy(),
+            }));
+            ws.go_to(look::Screen::Uncensor);
+            ws.scroll = 5000.0;
+            assert!(click(&mut ws, screens::PROBES[0].0));
+            ws.scroll = 5000.0;
+            assert!(click(&mut ws, "Run test"));
+            assert!(ws.busy, "Run test did not start on Uncensor: {}", ws.status);
+            assert!(wait(&mut ws, 900, &|ws| !ws.busy));
+            let compared = ws.compare.as_ref().expect("both answers are kept");
+            assert_eq!(compared.prompt, screens::PROBES[0].1);
+            assert!(compared.original.is_ok() && compared.changed.is_ok(), "{}", ws.status);
+            ws.scroll = 5000.0;
+            if let Some(dir) = &shots {
+                save_frame(&mut ws, dir, "e2e_uncensor_accepted_compare");
+            }
+            ws.scroll = 5000.0;
+            assert!(click(&mut ws, "Quantize this result"));
+            assert_eq!(ws.screen, look::Screen::Quantize);
+            assert_eq!(PathBuf::from(ws.source.trim()), made);
+            assert!(wait(&mut ws, 180, &|ws| ws.model.is_some() && !ws.busy), "{}", ws.status);
+        }
     }
 
     /// Runs one real uncensor job through the guided screen, start to result.
