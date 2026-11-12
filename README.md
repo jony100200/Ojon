@@ -58,9 +58,11 @@ Ojon reports actual candidate outcomes; it does not assume an edited model is be
 cargo run --release --locked --features gui --bin ojon-gui
 ```
 
+The app opens on a Home screen with the two jobs. Quantize and Uncensor are each three steps on one page (model, goal or method, review and start). Queue lists every job this computer has run, Models lists the models you opened and the ones Ojon made, and a setup assistant opens on first run when no tools are found. The detailed workstation pages stay under Tools and Backends & Setup. A light theme is available from the top bar.
+
 Settings are stored in the user's configuration directory. Model files and optimized outputs use user-controlled locations.
 
-**Release status:** The CLI and native desktop source can be built today. A packaged Windows installer is not yet published.
+**Release status:** The CLI and native desktop source can be built today. `scripts/package_windows.ps1` builds a Windows zip with a per-user installer; a packaged release is not yet published.
 
 [User guide](USER_GUIDE.md) · [MiniMax H3 conversion guide](docs/MINIMAX_H3.md) · [Issue tracker](https://github.com/jony100200/Ojon/issues)
 

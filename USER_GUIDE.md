@@ -114,6 +114,18 @@ cargo run --release --locked --features gui --bin ojon-gui
 
 The GUI uses [Kathamo](https://github.com/jony100200/Kathamo). The Rust CLI remains available independently of the GUI.
 
+| Screen | What it is for |
+|---|---|
+| Home | Start a job, see the running job and recent models. |
+| Quantize | Choose a model, choose a goal (Best Quality, Balanced, Smallest Practical), review and start. Shows the stage, time and last log line while it runs, then the accepted model with its size and measured quality. |
+| Compare answers | On a finished result: send one question to the original and to the smaller model and read both replies. Nothing is scored. |
+| Uncensor | The same three steps. The original file is never changed, and a result is kept only if the measurements pass; a rejected run says so and lists each candidate's measured rates. |
+| Queue | The running job and past jobs, with Load result where a job left one. |
+| Models | Models you opened, models Ojon made, and GGUF files in your folders. |
+| Tools, Backends & Setup | The detailed workstation pages and tool paths. |
+
+The setup assistant lists the tools Ojon drives; it does not install them. A repeat run on a model that already has a finished result writes to a new numbered folder.
+
 ## Specialized workflows
 
 The CLI also exposes experimental model editing, optional image/video quantization adapters, OCR and audio comparisons, and model-format-specific operations. Check `--help` for supported commands and the selected backend's own requirements.
