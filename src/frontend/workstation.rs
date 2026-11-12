@@ -5024,6 +5024,53 @@ mod tests {
         }
     }
 
+    /// Runs one real uncensor job through the guided screen, start to result.
+    /// Needs OJON_E2E_MODEL (a small full-precision GGUF) and working tools,
+    /// including the control-vector generator. Run with `--ignored`.
+    #[test]
+    #[ignore]
+    fn guided_uncensor_runs_a_real_job() {
+        let Some(model) = std::env::var_os("OJON_E2E_MODEL").map(PathBuf::from) else {
+            return;
+        };
+        let shots = std::env::var_os("OJON_SCREENSHOT_DIR").map(PathBuf::from);
+        let wait = |ws: &mut Workstation, secs: u64, done: &dyn Fn(&Workstation) -> bool| {
+            let end = Instant::now() + Duration::from_secs(secs);
+            while !done(ws) && Instant::now() < end {
+                ws.poll();
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            done(ws)
+        };
+        let mut ws = Workstation::new();
+        ws.modal = None;
+        ws.go_to(look::Screen::Uncensor);
+        ws.set_source(&model);
+        assert!(
+            wait(&mut ws, 180, &|ws| ws.model.is_some() && !ws.busy),
+            "the model was not inspected: {}",
+            ws.status
+        );
+        ws.unc_auto_quantize = 0;
+        ws.scroll = 5000.0;
+        assert!(click(&mut ws, "Start"));
+        assert!(ws.busy, "Start did not start a job: {}", ws.status);
+        ws.scroll = 5000.0;
+        if let Some(dir) = &shots {
+            save_frame(&mut ws, dir, "e2e_uncensor_running");
+        }
+        assert!(wait(&mut ws, 3 * 3600, &|ws| !ws.busy), "the job did not finish");
+        ws.scroll = 5000.0;
+        if let Some(dir) = &shots {
+            save_frame(&mut ws, dir, "e2e_uncensor_result");
+        }
+        eprintln!("status: {}", ws.status);
+        for line in &ws.log_tail {
+            eprintln!("log: {line}");
+        }
+        let result = ws.unc_auto_result.as_ref().unwrap_or_else(|| panic!("no result: {}", ws.status));
+        eprintln!("result status: {}", result["status"]);
+    }
     #[test]
     fn ojon_gui_renders_clean_frame() {
         let mut ws = Workstation::new();
