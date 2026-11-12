@@ -41,7 +41,6 @@ use ui_platform::winit::{
 };
 use ui_platform::PointerState;
 use ui_render::{CommandBuffer, CpuBackend, GpuBackend, RenderBackend, SoftwarePresenter};
-use ui_themes::BilingualLabel;
 use ui_widgets::{
     icon_cache::IconAtlas,
     KathamoUi,
@@ -156,6 +155,28 @@ fn open_folder_in_explorer(path: &Path) -> std::io::Result<()> {
         std::process::Command::new("xdg-open").arg(dir).spawn()?;
     }
     Ok(())
+}
+
+/// Where the look choice is kept: beside the settings file, so it follows the same
+/// OJON_SETTINGS_PATH override.
+fn ui_prefs_path() -> Option<PathBuf> {
+    ojon_backend::settings_path()
+        .ok()
+        .and_then(|path| path.parent().map(|dir| dir.join("ui.json")))
+}
+
+fn load_light_theme() -> bool {
+    ui_prefs_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .is_some_and(|value| value["theme"] == "light")
+}
+
+fn save_light_theme(light: bool) {
+    if let Some(path) = ui_prefs_path() {
+        let theme = if light { "light" } else { "dark" };
+        let _ = std::fs::write(path, serde_json::json!({ "theme": theme }).to_string());
+    }
 }
 
 /// An overlay drawn over the current screen.
@@ -324,6 +345,8 @@ struct Workstation {
     screen: look::Screen,
     scroll: f32,
     modal: Option<Modal>,
+    models: Vec<screens::ModelRow>,
+    model_paths: Vec<PathBuf>,
     backends_expanded: bool,
     advanced_opt_expanded: bool,
     advanced_unc_expanded: bool,
@@ -498,6 +521,7 @@ impl Workstation {
         let detected_gpus = discover_runtime_gpu_devices();
         let job_history = load_job_history().unwrap_or_default();
         let setup_view = !backends.iter().any(|b| b.installed());
+        look::set_light(load_light_theme());
         Self {
             source, output, quantizer, cvector, sd_cli, converter, runtime, eval_server, benchmark,
             local_settings:settings.clone(),
@@ -514,6 +538,8 @@ impl Workstation {
             scroll: 0.0,
             // First run with no tools found: start with the setup assistant.
             modal: if setup_view { Some(Modal::Setup(0)) } else { None },
+            models: Vec::new(),
+            model_paths: Vec::new(),
             backends_expanded: false,
             advanced_opt_expanded: false,
             advanced_unc_expanded: false,
@@ -717,7 +743,81 @@ impl Workstation {
         self.screen = screen;
         self.scroll = 0.0;
         self.setup_view = screen == look::Screen::Setup;
+        if screen == look::Screen::Models {
+            self.refresh_models();
+        }
         self.needs_redraw = true;
+    }
+
+    /// Rebuild the Models list: files from the job history, plus GGUF files in the folders
+    /// the person already uses (model folder, the current model's folder, result folders).
+    fn refresh_models(&mut self) {
+        let mut seen = std::collections::HashSet::new();
+        let mut found: Vec<(PathBuf, bool)> = Vec::new();
+        let mut add = |path: PathBuf, made: bool, found: &mut Vec<(PathBuf, bool)>| {
+            if !path.as_os_str().is_empty() && seen.insert(path.to_string_lossy().to_lowercase()) {
+                found.push((path, made));
+            }
+        };
+        add(PathBuf::from(self.source.trim()), false, &mut found);
+        for job in self.job_history.iter().rev() {
+            if let Some(result) = &job.result_artifact {
+                add(PathBuf::from(result), true, &mut found);
+            }
+            add(PathBuf::from(&job.source_model), false, &mut found);
+        }
+        let mut folders: Vec<PathBuf> = Vec::new();
+        if let Some(dir) = &self.local_settings.model_directory {
+            folders.push(PathBuf::from(dir));
+        }
+        if let Some(parent) = Path::new(self.source.trim()).parent() {
+            folders.push(parent.to_path_buf());
+        }
+        for dir in [self.opt_output.trim(), self.unc_output.trim()] {
+            if !dir.is_empty() {
+                folders.push(PathBuf::from(dir));
+            }
+        }
+        for folder in folders {
+            let Ok(entries) = std::fs::read_dir(&folder) else {
+                continue;
+            };
+            for entry in entries.flatten().take(400) {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("gguf")) {
+                    add(path, false, &mut found);
+                }
+            }
+        }
+        found.truncate(200);
+        self.models = found
+            .iter()
+            .map(|(path, made)| {
+                let meta = std::fs::metadata(path).ok();
+                let size = meta.as_ref().filter(|m| m.is_file()).map(|m| {
+                    let bytes = m.len() as f64;
+                    if bytes >= 1_073_741_824.0 {
+                        format!("{:.2} GiB", bytes / 1_073_741_824.0)
+                    } else {
+                        format!("{:.0} MB", bytes / 1_048_576.0)
+                    }
+                });
+                screens::ModelRow {
+                    name: path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+                    folder: path
+                        .parent()
+                        .map(|d| d.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    size: size.unwrap_or_default(),
+                    made_by_ojon: *made,
+                    missing: meta.is_none(),
+                }
+            })
+            .collect();
+        self.model_paths = found.into_iter().map(|(path, _)| path).collect();
     }
 
     fn rescan_backends(&mut self) {
@@ -2386,6 +2486,8 @@ impl Workstation {
         let mut next_modal: Option<Option<Modal>> = None;
         let mut load_source: Option<PathBuf> = None;
         let mut content_height = 0.0f32;
+        let mut refresh_models = false;
+        let toggle_theme: bool;
         let screen = self.screen;
         let modal = self.modal;
         let scroll = self.scroll;
@@ -2489,7 +2591,7 @@ impl Workstation {
         });
         {
             let mut p = look::Paint::new(&mut cmds, &screen_pointer);
-            p.fill(window_rect, look::CANVAS, 0.0, None);
+            p.fill(window_rect, look::canvas(), 0.0, None);
             let bar = look::top_bar(&mut p, width, screen, busy);
             go = bar.go;
             if bar.process_model {
@@ -2499,6 +2601,7 @@ impl Workstation {
             if bar.setup_assistant {
                 next_modal = Some(Some(Modal::Setup(0)));
             }
+            toggle_theme = bar.toggle_theme;
         }
         if screen == look::Screen::Home {
             let active = busy.then(|| look::ActiveJob {
@@ -2788,6 +2891,21 @@ impl Workstation {
                     }
                 }
             }
+        } else if screen == look::Screen::Models {
+            let mut p = look::Paint::new(&mut cmds, &screen_pointer);
+            let a = screens::models(&mut p, area, scroll, &self.models);
+            content_height = a.height;
+            refresh_models |= a.rescan;
+            if a.add {
+                browse_model = true;
+                go = Some(look::Screen::Quantize);
+            }
+            if let Some((path, target)) = a.open.and_then(|(i, t)| Some((self.model_paths.get(i)?, t))) {
+                open_recent = Some((path.to_string_lossy().into_owned(), target));
+            }
+            if let Some(path) = a.folder.and_then(|i| self.model_paths.get(i)) {
+                open_folder_target = path.parent().map(Path::to_path_buf);
+            }
         } else if screen == look::Screen::Queue {
             let rows: Vec<screens::HistoryRow> = job_history
                 .iter()
@@ -2832,9 +2950,10 @@ impl Workstation {
             );
 
             // 1. Studio Telemetry & Header Bar
+            let page_title = if *setup_view { "Backends & Setup" } else { "Tools" };
             ui.horizontal(72.0, |top| {
                 top.vertical(252.0, |brand| {
-                    brand.bilingual_heading(&BilingualLabel::new("Ojon", "ওজন"));
+                    brand.heading(page_title);
                     brand.horizontal(22.0, |pills| {
                         pills.status_pill(if busy { "Processing" } else { "Idle" }, !busy);
                         let found = backends.iter().filter(|b| b.installed()).count();
@@ -3997,6 +4116,15 @@ impl Workstation {
             self.modal = next;
             self.needs_redraw = true;
         }
+        if refresh_models {
+            self.refresh_models();
+            self.needs_redraw = true;
+        }
+        if toggle_theme {
+            look::set_light(!look::is_light());
+            save_light_theme(look::is_light());
+            self.needs_redraw = true;
+        }
         let room = (height - look::BAR_H).max(0.0);
         self.scroll = self.scroll.clamp(0.0, (content_height - room).max(0.0));
         if cancel_job {
@@ -4283,6 +4411,8 @@ fn run_auto_quant_cli(
     let stem = request.model.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "model".into());
     let base = request.output_dir.clone().unwrap_or_else(|| request.model.parent().unwrap_or(Path::new(".")).to_path_buf());
     let out = base.join(format!("{stem}-ojon-{preset}"));
+    // The command-line tool refuses a result folder that does not exist yet.
+    std::fs::create_dir_all(&out).map_err(|e| format!("could not create {}: {e}", out.display()))?;
     let mut cmd = Command::new(&cli);
     cmd.arg("auto-quant").arg(&request.model).arg(&out).args(["--preset", preset]);
     if let Some(device) = request.runtime_device.as_deref().filter(|d| !d.is_empty()) {
@@ -4539,6 +4669,200 @@ mod tests {
         }
     }
 
+    /// Click the first drawn text equal to `label`, as a person would.
+    fn click(ws: &mut Workstation, label: &str) -> bool {
+        // One frame first, so a scroll request is clamped to the screen's real length.
+        ws.render(1500.0, 960.0);
+        let cmds = ws.render(1500.0, 960.0);
+        let at = cmds.commands().iter().find_map(|c| match c {
+            ui_render::DrawCommand::Text { text, pos, .. } if text == label => Some(*pos),
+            _ => None,
+        });
+        let Some(at) = at else {
+            return false;
+        };
+        ws.pointer.position = Vec2::new(at.x + 3.0, at.y + 3.0);
+        ws.click_pulse = true;
+        ws.render(1500.0, 960.0);
+        true
+    }
+
+    fn save_frame(ws: &mut Workstation, dir: &Path, name: &str) {
+        let cmds = ws.render(1500.0, 960.0);
+        let mut cpu = CpuBackend::new();
+        cpu.begin_frame(1500, 960, look::canvas());
+        cpu.submit(&cmds);
+        let _ = cpu.end_frame();
+        let mut data = format!("P6\n{} {}\n255\n", 1500, 960).into_bytes();
+        for &p in cpu.pixels() {
+            data.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8]);
+        }
+        let _ = std::fs::write(dir.join(format!("ojon_{name}.ppm")), data);
+    }
+
+    #[test]
+    fn setup_assistant_steps_and_closes() {
+        let mut ws = Workstation::new();
+        ws.go_to(look::Screen::Home);
+        ws.modal = Some(Modal::Setup(0));
+        for step in 1..=3 {
+            assert!(click(&mut ws, "Continue"));
+            assert_eq!(ws.modal, Some(Modal::Setup(step)));
+        }
+        assert!(click(&mut ws, "Back"));
+        assert_eq!(ws.modal, Some(Modal::Setup(2)));
+        assert!(click(&mut ws, "4. Ready to Begin"));
+        assert!(click(&mut ws, "Done"));
+        assert_eq!(ws.modal, None);
+        ws.modal = Some(Modal::Setup(1));
+        assert!(click(&mut ws, "Set paths by hand"));
+        assert_eq!((ws.modal, ws.screen), (None, look::Screen::Setup));
+        assert!(ws.setup_view);
+    }
+
+    #[test]
+    fn guided_quantize_choices_reach_the_real_settings() {
+        let mut ws = Workstation::new();
+        ws.modal = None;
+        ws.go_to(look::Screen::Quantize);
+        for (label, goal) in [("Best Quality", 3), ("Smallest Practical", 1), ("Balanced", 0)] {
+            ws.opt_goal = 2;
+            assert!(click(&mut ws, label));
+            assert_eq!(ws.opt_goal, goal, "{label}");
+        }
+        ws.opt_device = 0;
+        assert!(click(&mut ws, "CPU Only"));
+        assert_eq!(ws.opt_device, 1);
+        assert!(click(&mut ws, "This Computer"));
+        assert_eq!(ws.opt_device, 0);
+        // Step 3 is below the fold: scroll to it, as a person would.
+        ws.scroll = 500.0;
+        assert!(click(&mut ws, "View pipeline"));
+        assert_eq!(ws.modal, Some(Modal::Pipeline));
+        assert!(click(&mut ws, "Close"));
+        assert_eq!(ws.modal, None);
+        // Without a model, Start is shown but does nothing.
+        ws.source.clear();
+        assert!(click(&mut ws, "Start Quantizing"));
+        assert!(!ws.busy);
+        assert!(click(&mut ws, "A Specific GPU Backend"));
+        assert_eq!(ws.screen, look::Screen::Tools);
+        assert_eq!((ws.workspace_tab, ws.optimize_settings_tab), (0, 2));
+    }
+
+    #[test]
+    fn guided_uncensor_choices_reach_the_real_settings() {
+        let mut ws = Workstation::new();
+        ws.modal = None;
+        ws.go_to(look::Screen::Uncensor);
+        for (label, after) in [("Also make Q5_K_M", 2), ("Also make Q6_K", 3), ("Keep full precision", 0)] {
+            assert!(click(&mut ws, label));
+            assert_eq!(ws.unc_auto_quantize, after, "{label}");
+        }
+        ws.source.clear();
+        ws.scroll = 500.0;
+        assert!(click(&mut ws, "Start"));
+        assert!(!ws.busy);
+        assert!(click(&mut ws, "Manual trace edit is in Tools"));
+        assert_eq!((ws.screen, ws.workspace_tab, ws.unc_tab), (look::Screen::Tools, 2, 1));
+    }
+
+    #[test]
+    fn models_lists_real_files_and_opens_them_in_a_flow() {
+        let dir = std::env::temp_dir().join(format!("ojon_models_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("tiny.gguf"), b"not a real model").unwrap();
+        let mut ws = Workstation::new();
+        ws.modal = None;
+        ws.job_history.clear();
+        ws.source.clear();
+        ws.opt_output = dir.to_string_lossy().into_owned();
+        ws.go_to(look::Screen::Models);
+        assert!(ws.models.iter().any(|m| m.name == "tiny.gguf" && !m.missing));
+        ws.job_history.push(JobHistoryEntry {
+            id: "t".into(),
+            workflow: "optimize_model".into(),
+            source_model: dir.join("gone.gguf").to_string_lossy().into_owned(),
+            output_dir: String::new(),
+            objective_or_mode: String::new(),
+            status: "COMPLETED".into(),
+            current_stage: String::new(),
+            started_epoch_secs: 0,
+            finished_epoch_secs: None,
+            result_artifact: None,
+            summary_note: String::new(),
+        });
+        assert!(click(&mut ws, "Look again"));
+        assert!(ws.models.iter().any(|m| m.name == "gone.gguf" && m.missing));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn theme_toggle_switches_every_colour_role() {
+        let dark = look::canvas();
+        look::set_light(true);
+        assert_ne!(look::canvas(), dark);
+        look::set_light(false);
+        assert_eq!(look::canvas(), dark);
+    }
+
+    /// Runs one real quantize job through the guided screen, start to result.
+    /// Needs OJON_E2E_MODEL (a small full-precision GGUF), working tools, and the
+    /// `ojon` command-line tool beside this test binary. Run with `--ignored`.
+    #[test]
+    #[ignore]
+    fn guided_quantize_runs_a_real_job() {
+        let Some(model) = std::env::var_os("OJON_E2E_MODEL").map(PathBuf::from) else {
+            return;
+        };
+        let shots = std::env::var_os("OJON_SCREENSHOT_DIR").map(PathBuf::from);
+        let wait = |ws: &mut Workstation, secs: u64, done: &dyn Fn(&Workstation) -> bool| {
+            let end = Instant::now() + Duration::from_secs(secs);
+            while !done(ws) && Instant::now() < end {
+                ws.poll();
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            done(ws)
+        };
+        let mut ws = Workstation::new();
+        ws.modal = None;
+        ws.go_to(look::Screen::Quantize);
+        ws.set_source(&model);
+        assert!(
+            wait(&mut ws, 180, &|ws| ws.model.is_some() && !ws.busy),
+            "the model was not inspected: {}",
+            ws.status
+        );
+        ws.opt_goal = 0;
+        ws.opt_device = 1;
+        // A held-out text lets the job measure quality instead of skipping it.
+        if let Some(corpus) = std::env::var_os("OJON_E2E_CORPUS") {
+            ws.opt_ppl = corpus.to_string_lossy().into_owned();
+        }
+        ws.scroll = 500.0;
+        assert!(click(&mut ws, "Start Quantizing"));
+        assert!(ws.busy, "Start did not start a job: {}", ws.status);
+        assert!(wait(&mut ws, 60, &|ws| !ws.log_tail.is_empty() || !ws.busy));
+        if let Some(dir) = &shots {
+            save_frame(&mut ws, dir, "e2e_running");
+        }
+        assert!(wait(&mut ws, 3 * 3600, &|ws| !ws.busy), "the job did not finish");
+        ws.scroll = 500.0;
+        if let Some(dir) = &shots {
+            save_frame(&mut ws, dir, "e2e_result");
+        }
+        eprintln!("status: {}", ws.status);
+        for line in &ws.log_tail {
+            eprintln!("log: {line}");
+        }
+        let result = ws.opt_result.as_ref().unwrap_or_else(|| panic!("no result: {}", ws.status));
+        eprintln!("result status: {}", result["status"]);
+        ws.go_to(look::Screen::Queue);
+        if let Some(dir) = &shots {
+            save_frame(&mut ws, dir, "e2e_queue");
+        }
+    }
+
     #[test]
     fn ojon_gui_renders_clean_frame() {
         let mut ws = Workstation::new();
@@ -4582,7 +4906,7 @@ mod tests {
                 ws.modal = modal;
                 let cmds = ws.render(1500.0, 960.0);
                 let mut cpu = CpuBackend::new();
-                cpu.begin_frame(1500, 960, look::CANVAS);
+                cpu.begin_frame(1500, 960, look::canvas());
                 cpu.submit(&cmds);
                 let _ = cpu.end_frame();
                 let mut data = format!("P6\n{} {}\n255\n", 1500, 960).into_bytes();
@@ -4592,6 +4916,14 @@ mod tests {
                 let name = format!("ojon_{shot}.ppm");
                 let _ = std::fs::write(artifact_dir.join(name), data);
             }
+            // The same places in the light theme.
+            look::set_light(true);
+            ws.modal = None;
+            for (name, screen) in [("light_home", look::Screen::Home), ("light_quantize", look::Screen::Quantize)] {
+                ws.go_to(screen);
+                save_frame(&mut ws, &artifact_dir, name);
+            }
+            look::set_light(false);
         }
     }
 
