@@ -2,6 +2,31 @@
 
 Ojon provides a Rust command-line application and an optional native Kathamo desktop interface. It works with installed model conversion and inference tools.
 
+## Model compatibility examples
+
+Ojon provides source-first conversion workflows for supported language, vision-language, image and video model formats. These are real examples, not a universal compatibility guarantee.
+
+| Model | Conversion / functionality | Current verification |
+| --- | --- | --- |
+| **Qwen3-0.6B (LLM)** | F16 GGUF to a measured mixed-precision recipe (Q4_K embeddings, Q5_K elsewhere); 1.51 GB to 503 MB | Prior local conversion and held-out distribution measurements documented; broad task-quality retention is not established |
+| **FrogNano 4B (LLM)** | Separately edited BF16 model converted to Q4_K_M GGUF (2.78 GB) | Previous local quantized inference and small task comparison documented; the behavioral edit was **not** shown to reduce refusals |
+| **P-H3 Image** | BF16 safetensors to Q4_K GGUF: **40.47 GB to 11.62 GB (71.28% smaller)** | 532 tensors retained, 314 Q4_K tensors; output reopened and inspected; **image generation and visual-quality parity not yet tested** |
+| **MiniMax H3 (video)** | W4A4/OrbitQuant component and NVFP4 checkpoint adapter commands plus ComfyUI video testing | A W4A8 MiniMax video was demonstrated using external weights; Ojon-origin quantized weights and a fully verified release still require their own conversion and playback checks |
+| **Multimodal VLMs** | GGUF quantization with optional vision-projector conversion plus llama.cpp multimodal parity hooks | Command paths available; each architecture, projector, runtime load and vision quality needs a model-specific test |
+
+### Try the supported workflows
+
+For an F16/BF16 text-model GGUF, use [automatic quantization](#automatic-quantization). For the P-H3 image-model family, use a compatible stable-diffusion.cpp `sd-cli` build:
+
+```sh
+ojon diffusion-gguf-plan original-image.safetensors output-image.gguf --tool sd-cli --kind image --format q4_K
+ojon diffusion-gguf-run original-image.safetensors output-image.gguf --tool sd-cli --kind image --format q4_K --confirm
+```
+
+The command writes a quantized diffusion-model file, **not** its separate text encoder or VAE. Actual image generation requires the matching components and a compatible runtime. For video conversion options, see the [MiniMax H3 guide](docs/MINIMAX_H3.md). For multimodal models, use `ojon --help` to inspect the `quantize-hf` / projector and parity options.
+
+A successful format conversion proves that Ojon created and inspected an artifact; it does not, by itself, prove runtime loading, equal image/video quality, lower VRAM use or faster generation.
+
 ## Install
 
 1. Install Rust and Cargo.
