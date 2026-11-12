@@ -12,6 +12,7 @@ pub mod flint;
 pub mod inspect;
 pub mod quant;
 pub mod uncensor;
+pub mod w4a8;
 
 use std::env;
 use std::ffi::OsString;
@@ -53,6 +54,9 @@ pub fn run() -> io::Result<()> {
         return Ok(());
     }
     if lora::handle(cmd, &mut args)? {
+        return Ok(());
+    }
+    if w4a8::handle(cmd, &mut args)? {
         return Ok(());
     }
     if audio::handle(cmd, &mut args)? {

@@ -18,6 +18,7 @@ pub mod recipe_library;
 pub mod recipe_run;
 pub mod sweep;
 pub mod wer;
+pub mod w4a8;
 pub mod whisper_parity;
 pub mod ocr_parity;
 
