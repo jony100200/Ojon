@@ -9,3 +9,58 @@ Numerical linear algebra constitutes the computational foundation for contempora
 Digital signal processing systems convert continuous physical phenomena into discrete representations through periodic uniform sampling and analog-to-digital quantization. The Nyquist-Shannon sampling theorem establishes that continuous band-limited signals containing frequency components up to a maximum frequency B can be completely reconstructed from an infinite sequence of discrete samples acquired at an effective sampling rate exceeding twice the bandwidth limit. When an analog signal contains spectral energy exceeding the Nyquist threshold, high-frequency components fold back into the baseband spectrum as irreversible aliasing distortion, necessitating steep analog low-pass anti-aliasing filters preceding sample-and-hold circuitry.
 
 Quantization of artificial neural network parameters transforms continuous high-precision floating-point weight tensors into low-bitwidth discrete integer representations, drastically reducing model storage footprint and memory transfer bandwidth. In post-training quantization schemes, rounding floating-point values to nearest discrete grid coordinates inevitably introduces quantization noise into hidden layer activations. Calibration procedures, such as importance-matrix estimation and activation outlier clipping, analyze representative activation distributions across held-out evaluation corpora to compute per-channel or per-block scaling factors that minimize Frobenius norm errors between original and quantized matrix products.
+
+A recipe is a small program for the kitchen. To make flatbread for four people, mix three hundred grams of flour with a teaspoon of salt, then add about one hundred and eighty millilitres of warm water a little at a time. Knead for eight minutes until the dough is smooth and springs back when pressed. Rest it under a damp cloth for half an hour. Divide it into eight pieces, roll each one thin, and cook in a dry, hot pan for about a minute on each side, until brown spots appear and the bread puffs. If the dough sticks, add flour by the spoonful; if it cracks at the edges, it needs a few more drops of water.
+
+"Did you back up the photos before you reset the phone?" Mira asked.
+"I thought the cloud did that on its own," said Tom.
+"Only if it was switched on. Open the settings and look for the date of the last backup."
+"It says March. That was eight months ago."
+"Then everything since March lives only on the phone. Copy it to the laptop first, check that the files open, and reset the phone after that, not before."
+"That will take all evening."
+"Losing eight months of photos takes longer."
+
+The river begins as snowmelt high in the mountains, where it is narrow, cold and fast. It cuts a steep valley through hard rock, carrying gravel that grinds the bed deeper each spring. Lower down, the slope eases and the water slows; here it drops its heaviest load first, then sand, then silt, building a wide plain of fertile soil. Farmers have worked this plain for thousands of years, planting after the flood and harvesting before the next one. Near the sea the river splits into many channels and forms a delta, a shifting land of mud, reeds and birds, half fresh water and half salt.
+
+def moving_average(values, window):
+    """Return the average of each run of `window` values."""
+    if window <= 0:
+        raise ValueError("window must be positive")
+    result = []
+    total = 0.0
+    for index, value in enumerate(values):
+        total += value
+        if index >= window:
+            total -= values[index - window]
+        if index >= window - 1:
+            result.append(total / window)
+    return result
+
+print(moving_average([3, 5, 7, 9, 11], 2))  # [4.0, 6.0, 8.0, 10.0]
+
+SELECT customers.name, COUNT(orders.id) AS order_count, SUM(orders.total) AS spent
+FROM customers
+LEFT JOIN orders ON orders.customer_id = customers.id
+WHERE orders.created_at >= '2024-01-01'
+GROUP BY customers.name
+HAVING SUM(orders.total) > 500
+ORDER BY spent DESC
+LIMIT 20;
+
+A train leaves the station at 9:15 and travels at 80 kilometres per hour. A second train leaves the same station at 10:00 on the same line at 110 kilometres per hour. When the second train starts, the first is already 60 kilometres ahead, because it has run for three quarters of an hour. The second train closes the gap at 30 kilometres per hour, the difference between the two speeds, so it needs two hours to catch up. They meet at 12:00, 220 kilometres from the station. To check: the first train has travelled for two and three quarter hours at 80, which is also 220.
+
+Minutes of the planning meeting. Present: the project lead, two engineers, the designer and the support manager. First item: the release date. The engineers reported that the import feature is finished but the export feature still fails on files larger than two gigabytes. The group agreed to move the release by one week rather than ship a known failure. Second item: support load. The support manager said that a third of all questions last month were about installation, and asked for a shorter setup guide with pictures. The designer will draft it by Friday. Third item: the budget for testing devices was approved. Actions: fix large-file export, write the setup guide, order three test devices, meet again next Tuesday.
+
+The human heart is a muscle about the size of a fist. It has four chambers: two atria that receive blood and two ventricles that pump it out. Blood low in oxygen returns from the body to the right atrium, passes to the right ventricle and is pushed to the lungs, where it gives up carbon dioxide and takes on oxygen. It comes back to the left atrium, moves into the left ventricle, and from there is driven through the aorta to the rest of the body. Valves between the chambers keep the flow going one way. At rest the heart beats about sixty to eighty times a minute; during hard exercise it may beat more than twice as fast.
+
+Dear Ms Rahman, thank you for your letter of the fourth. I am sorry that the chair arrived with a cracked leg. We will send a replacement this week at no cost, and the driver will collect the damaged one at the same visit, so you do not need to pack it. If you would rather have your money back, tell us and we will refund the full amount within five working days. I have also asked the warehouse to look at how these chairs are packed, since yours is the second such report this month. With apologies for the trouble, yours sincerely, the customer service team.
+
+In economics, opportunity cost is what you give up when you choose one thing over another. A student who spends an evening at a paid job gives up the hours of study; a town that builds a car park on an empty lot gives up the playground it could have built there. The cost is not always money. It is the value of the best alternative not taken, which is why two people facing the same price can sensibly make different choices: what each of them would otherwise do with the time or the land is different.
+
+How to change a bicycle tyre. First, release the brake and take the wheel off. Let out any air left in the tube. Push one side of the tyre away from the rim and slide a lever under its edge; hook the lever to a spoke and use a second lever a hand's width along to lift the edge over the rim. Pull out the old tube and run your fingers carefully inside the tyre to find whatever caused the puncture. Put a little air in the new tube so it holds its shape, seat it inside the tyre, and work the edge back over the rim with your thumbs, finishing at the valve. Pump it up, check that the tyre sits evenly all round, and refit the wheel.
+
+Translation exercise. English: Where is the nearest pharmacy? French: Où est la pharmacie la plus proche ? Spanish: ¿Dónde está la farmacia más cercana? German: Wo ist die nächste Apotheke? English: I would like a table for two at eight o'clock. French: Je voudrais une table pour deux à huit heures. Spanish: Quisiera una mesa para dos a las ocho. German: Ich hätte gern einen Tisch für zwei um acht Uhr.
+
+{"order_id": 48213, "status": "shipped", "items": [{"sku": "LAMP-02", "quantity": 1, "price": 39.5}, {"sku": "BULB-E27", "quantity": 4, "price": 2.25}], "shipping": {"method": "standard", "days": 3}, "total": 48.5}
+
+The old lighthouse keeper climbed the stairs every evening for forty years, one hundred and twelve steps, with a can of oil in one hand and the rail in the other. He knew each step by its sound. When the light was made electric, the company told him he could stop climbing; a switch at the bottom would do it. He thanked them, and the next evening he climbed the stairs again, without the oil, and stood by the lamp while it came on by itself. "Someone should see it start," he said, and nobody argued with him.
