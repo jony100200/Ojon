@@ -157,6 +157,22 @@ fn open_folder_in_explorer(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The model's reply from the test tool's output: what follows the echoed question, up to
+/// the tool's own speed line. The banner and command list before it are dropped.
+fn reply_only(output: &str, prompt: &str) -> String {
+    let text = output.replace("\r\n", "\n");
+    let after = match text.rfind(prompt) {
+        Some(at) => &text[at + prompt.len()..],
+        None => text.as_str(),
+    };
+    let end = ["\n[ Prompt:", "\nExiting..."]
+        .iter()
+        .filter_map(|mark| after.find(mark))
+        .min()
+        .unwrap_or(after.len());
+    after[..end].trim().to_string()
+}
+
 /// Where the look choice is kept: beside the settings file, so it follows the same
 /// OJON_SETTINGS_PATH override.
 fn ui_prefs_path() -> Option<PathBuf> {
@@ -223,6 +239,7 @@ enum Focus {
     UncPaired,
     UncRefusalSuite,
     UncTaskSuite,
+    ComparePrompt,
 }
 
 #[derive(Clone, PartialEq)]
@@ -316,6 +333,7 @@ enum WorkerEvent {
     Quantized(Result<QuantizeResult, String>),
     HfQuantized(Result<HfQuantizeResult, String>),
     Smoke(Result<SmokeCapture, String>),
+    Compare(screens::CompareResult),
     Bench(Result<(PathBuf, serde_json::Value), String>),
     BackendCapabilities(serde_json::Value),
     Stage(String),
@@ -345,6 +363,8 @@ struct Workstation {
     screen: look::Screen,
     scroll: f32,
     modal: Option<Modal>,
+    compare_prompt: String,
+    compare: Option<screens::CompareResult>,
     models: Vec<screens::ModelRow>,
     model_paths: Vec<PathBuf>,
     backends_expanded: bool,
@@ -538,6 +558,8 @@ impl Workstation {
             scroll: 0.0,
             // First run with no tools found: start with the setup assistant.
             modal: if setup_view { Some(Modal::Setup(0)) } else { None },
+            compare_prompt: String::new(),
+            compare: None,
             models: Vec::new(),
             model_paths: Vec::new(),
             backends_expanded: false,
@@ -1921,8 +1943,52 @@ impl Workstation {
             let _ = tx.send(WorkerEvent::Smoke(result));
         });
     }
-    fn start_bench(&mut self) {
+    /// Ask the original model and a changed one the same question, one after the other,
+    /// with the test tool already set up. Nothing is scored: the person reads both answers.
+    fn start_compare(&mut self, changed: PathBuf) {
         if self.busy {
+            return;
+        }
+        let prompt = self.compare_prompt.trim().to_string();
+        if prompt.is_empty() {
+            self.status = "Type a question to compare, or pick one of the examples.".into();
+            self.needs_redraw = true;
+            return;
+        }
+        let gpu_layers = self
+            .gpu_layers
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|layers| *layers <= 512)
+            .unwrap_or(0);
+        let (original, runtime) = (PathBuf::from(self.source.trim()), self.runtime.clone());
+        let tx = self.tx.clone();
+        self.busy = true;
+        self.started_at = Some(Instant::now());
+        self.last_elapsed = None;
+        self.log_tail.clear();
+        self.completed_stages.clear();
+        self.current_stage = "Asking both models".into();
+        self.status = "Asking the original and the new model the same question.".into();
+        self.needs_redraw = true;
+        std::thread::spawn(move || {
+            let ask = |model: &Path| {
+                smoke_gguf_capture(model, Path::new(runtime.trim()), &prompt, 96, gpu_layers)
+                    .map(|capture| reply_only(&capture.stdout, &prompt))
+                    .map_err(|e| e.to_string())
+            };
+            let original = ask(&original);
+            let changed = ask(&changed);
+            let _ = tx.send(WorkerEvent::Compare(screens::CompareResult {
+                prompt: prompt.clone(),
+                original,
+                changed,
+            }));
+        });
+    }
+
+    fn start_bench(&mut self) {        if self.busy {
             return;
         }
         let gpu_layers = match self.gpu_layers.trim().parse::<i32>() {
@@ -2225,6 +2291,15 @@ impl Workstation {
                 WorkerEvent::Smoke(Err(e)) => {
                     self.status = format!("Inference smoke check failed: {e}")
                 }
+                WorkerEvent::Compare(result) => {
+                    self.status = if result.original.is_ok() && result.changed.is_ok() {
+                        "Both models answered. Read the two answers side by side.".into()
+                    } else {
+                        "A model could not be run: see the answer boxes.".into()
+                    };
+                    self.current_stage = "Answers compared".into();
+                    self.compare = Some(result);
+                }
                 WorkerEvent::Bench(Ok((path, receipt))) => {
                     let pp = receipt["prompt_processing"]["tokens_per_second"]
                         .as_f64()
@@ -2298,6 +2373,7 @@ impl Workstation {
             Focus::UncPaired => &mut self.unc_paired,
             Focus::UncRefusalSuite => &mut self.unc_refusal_suite,
             Focus::UncTaskSuite => &mut self.unc_task_suite,
+            Focus::ComparePrompt => &mut self.compare_prompt,
         };
         if self.control_held {
             if let Key::Character(ref key) = event.logical_key {
@@ -2487,6 +2563,23 @@ impl Workstation {
         let mut load_source: Option<PathBuf> = None;
         let mut content_height = 0.0f32;
         let mut refresh_models = false;
+        let mut compare_preset: Option<&'static str> = None;
+        let mut compare_run: Option<PathBuf> = None;
+        let compare_prompt = &self.compare_prompt;
+        let compare_result = self.compare.as_ref();
+        let compare_focused = self.focus == Some(Focus::ComparePrompt);
+        // Answers can be compared once a job has written a GGUF beside a GGUF original.
+        let compare_for = |path: &Option<PathBuf>, label: &'static str| {
+            path.as_ref()
+                .filter(|p| model.is_some() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("gguf")))
+                .map(|_| screens::CompareView {
+                    prompt: compare_prompt,
+                    focused: compare_focused,
+                    busy,
+                    changed_label: label,
+                    result: compare_result,
+                })
+        };
         let toggle_theme: bool;
         let screen = self.screen;
         let modal = self.modal;
@@ -2684,11 +2777,12 @@ impl Workstation {
                     if let (Some(bpw), Some(bytes)) =
                         (topo["effective_bpw"].as_f64(), topo["file_bytes"].as_u64())
                     {
-                        lines.push(format!(
-                            "Size: {:.2} GiB  ·  {:.2} bits per weight",
-                            gib(bytes),
-                            bpw
-                        ));
+                        let size = if bytes >= 1_073_741_824 {
+                            format!("{:.2} GiB", gib(bytes))
+                        } else {
+                            format!("{:.0} MB", bytes as f64 / 1_048_576.0)
+                        };
+                        lines.push(format!("Size: {size}  ·  {bpw:.2} bits per weight"));
                     }
                 }
                 for item in result["evidence"]["results"].as_array().into_iter().flatten().take(3) {
@@ -2702,10 +2796,10 @@ impl Workstation {
                         .unwrap_or_else(|| "size not measured".into());
                     let quality = item["score_change_points"]
                         .as_f64()
-                        .map(|v| format!("quality {v:+.1} points"))
-                        .unwrap_or_else(|| "quality not measured".into());
+                        .map(|v| format!("  ·  task score {v:+.1} points"))
+                        .unwrap_or_default();
                     lines.push(format!(
-                        "{name}: {}  ·  {saving}  ·  {quality}",
+                        "{name}: {}  ·  {saving}{quality}",
                         item["status"].as_str().unwrap_or("unknown")
                     ));
                 }
@@ -2751,6 +2845,7 @@ impl Workstation {
                 job: &job_view,
                 plan,
                 result,
+                compare: compare_for(&opt_candidate_path, "Smaller model"),
             };
             let mut p = look::Paint::new(&mut cmds, &screen_pointer);
             let a = screens::quantize(&mut p, &mut self.icons, area, scroll, &view);
@@ -2776,6 +2871,13 @@ impl Workstation {
             cancel_job |= a.cancel;
             if a.pipeline {
                 next_modal = Some(Some(Modal::Pipeline));
+            }
+            if a.compare.focus {
+                new_focus = Some(Focus::ComparePrompt);
+            }
+            compare_preset = a.compare.preset;
+            if a.compare.run {
+                compare_run = opt_candidate_path.clone();
             }
             if let Some(path) = &opt_candidate_path {
                 if a.open_folder {
@@ -2855,6 +2957,7 @@ impl Workstation {
                 job: &job_view,
                 plan,
                 result,
+                compare: compare_for(&unc_published_path, "Edited model"),
             };
             let mut p = look::Paint::new(&mut cmds, &screen_pointer);
             let a = screens::uncensor(&mut p, &mut self.icons, area, scroll, &view);
@@ -2874,6 +2977,13 @@ impl Workstation {
             unc_auto_plan |= a.preview;
             unc_auto_run |= a.approve;
             cancel_job |= a.cancel;
+            if a.compare.focus {
+                new_focus = Some(Focus::ComparePrompt);
+            }
+            compare_preset = a.compare.preset;
+            if a.compare.run {
+                compare_run = unc_published_path.clone();
+            }
             if let Some(path) = &unc_published_path {
                 if a.open_folder {
                     open_folder_target = path.parent().map(Path::to_path_buf);
@@ -2912,7 +3022,15 @@ impl Workstation {
                 .rev()
                 .map(|job| screens::HistoryRow {
                     name: file_name(&job.source_model),
-                    detail: [job.workflow.as_str(), job.objective_or_mode.as_str(), job.current_stage.as_str()]
+                    detail: [
+                        match job.workflow.as_str() {
+                            "optimize_model" => "Quantize",
+                            name if name.starts_with("uncensor") => "Uncensor",
+                            name => name,
+                        },
+                        job.objective_or_mode.as_str(),
+                        job.current_stage.as_str(),
+                    ]
                         .iter()
                         .filter(|part| !part.trim().is_empty())
                         .copied()
@@ -4116,6 +4234,13 @@ impl Workstation {
             self.modal = next;
             self.needs_redraw = true;
         }
+        if let Some(question) = compare_preset {
+            self.compare_prompt = question.to_string();
+            self.needs_redraw = true;
+        }
+        if let Some(path) = compare_run {
+            self.start_compare(path);
+        }
         if refresh_models {
             self.refresh_models();
             self.needs_redraw = true;
@@ -4410,7 +4535,19 @@ fn run_auto_quant_cli(
     // next to the user's original model.
     let stem = request.model.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "model".into());
     let base = request.output_dir.clone().unwrap_or_else(|| request.model.parent().unwrap_or(Path::new(".")).to_path_buf());
-    let out = base.join(format!("{stem}-ojon-{preset}"));
+    // A folder that already holds a finished result is kept as it is: a repeat run gets
+    // the next numbered folder. An unfinished one is resumed in place.
+    let finished = |dir: &Path| {
+        ["recipe-receipt.json", "recipe-applied-receipt.json", "recipe.gguf", "recipe-applied.gguf"]
+            .iter()
+            .any(|name| dir.join(name).exists())
+    };
+    let mut out = base.join(format!("{stem}-ojon-{preset}"));
+    let mut run = 2;
+    while finished(&out) {
+        out = base.join(format!("{stem}-ojon-{preset}-{run}"));
+        run += 1;
+    }
     // The command-line tool refuses a result folder that does not exist yet.
     std::fs::create_dir_all(&out).map_err(|e| format!("could not create {}: {e}", out.display()))?;
     let mut cmd = Command::new(&cli);
@@ -4688,6 +4825,7 @@ mod tests {
     }
 
     fn save_frame(ws: &mut Workstation, dir: &Path, name: &str) {
+        ws.render(1500.0, 960.0); // settles any scroll request first
         let cmds = ws.render(1500.0, 960.0);
         let mut cpu = CpuBackend::new();
         cpu.begin_frame(1500, 960, look::canvas());
@@ -4798,6 +4936,13 @@ mod tests {
     }
 
     #[test]
+    fn reply_only_drops_the_tool_banner_and_speed_line() {
+        let raw = "Loading model...\r\nbuild : b1\r\n\r\n> What is 2+2?\r\nIt is 4.\r\nSecond line.\r\n\r\n[ Prompt: 9.9 t/s | Generation: 54.1 t/s ]\r\n\r\nExiting...";
+        assert_eq!(reply_only(raw, "What is 2+2?"), "It is 4.\nSecond line.");
+        assert_eq!(reply_only("plain answer\n", "not echoed"), "plain answer");
+    }
+
+    #[test]
     fn theme_toggle_switches_every_colour_role() {
         let dark = look::canvas();
         look::set_light(true);
@@ -4857,12 +5002,75 @@ mod tests {
         }
         let result = ws.opt_result.as_ref().unwrap_or_else(|| panic!("no result: {}", ws.status));
         eprintln!("result status: {}", result["status"]);
+        // Ask both models the same example question from the results card.
+        ws.scroll = 5000.0;
+        assert!(click(&mut ws, screens::PROBES[2].0), "the example question is offered");
+        assert_eq!(ws.compare_prompt, screens::PROBES[2].1);
+        ws.scroll = 5000.0;
+        assert!(click(&mut ws, "Run test"));
+        assert!(ws.busy, "Run test did not start: {}", ws.status);
+        assert!(wait(&mut ws, 900, &|ws| !ws.busy), "the comparison did not finish");
+        let compared = ws.compare.as_ref().expect("both answers are kept");
+        eprintln!("original: {:?}", compared.original);
+        eprintln!("changed: {:?}", compared.changed);
+        assert!(compared.original.is_ok() && compared.changed.is_ok(), "{}", ws.status);
+        ws.scroll = 5000.0;
+        if let Some(dir) = &shots {
+            save_frame(&mut ws, dir, "e2e_compare");
+        }
         ws.go_to(look::Screen::Queue);
         if let Some(dir) = &shots {
             save_frame(&mut ws, dir, "e2e_queue");
         }
     }
 
+    /// Runs one real uncensor job through the guided screen, start to result.
+    /// Needs OJON_E2E_MODEL (a small full-precision GGUF) and working tools,
+    /// including the control-vector generator. Run with `--ignored`.
+    #[test]
+    #[ignore]
+    fn guided_uncensor_runs_a_real_job() {
+        let Some(model) = std::env::var_os("OJON_E2E_MODEL").map(PathBuf::from) else {
+            return;
+        };
+        let shots = std::env::var_os("OJON_SCREENSHOT_DIR").map(PathBuf::from);
+        let wait = |ws: &mut Workstation, secs: u64, done: &dyn Fn(&Workstation) -> bool| {
+            let end = Instant::now() + Duration::from_secs(secs);
+            while !done(ws) && Instant::now() < end {
+                ws.poll();
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            done(ws)
+        };
+        let mut ws = Workstation::new();
+        ws.modal = None;
+        ws.go_to(look::Screen::Uncensor);
+        ws.set_source(&model);
+        assert!(
+            wait(&mut ws, 180, &|ws| ws.model.is_some() && !ws.busy),
+            "the model was not inspected: {}",
+            ws.status
+        );
+        ws.unc_auto_quantize = 0;
+        ws.scroll = 5000.0;
+        assert!(click(&mut ws, "Start"));
+        assert!(ws.busy, "Start did not start a job: {}", ws.status);
+        ws.scroll = 5000.0;
+        if let Some(dir) = &shots {
+            save_frame(&mut ws, dir, "e2e_uncensor_running");
+        }
+        assert!(wait(&mut ws, 3 * 3600, &|ws| !ws.busy), "the job did not finish");
+        ws.scroll = 5000.0;
+        if let Some(dir) = &shots {
+            save_frame(&mut ws, dir, "e2e_uncensor_result");
+        }
+        eprintln!("status: {}", ws.status);
+        for line in &ws.log_tail {
+            eprintln!("log: {line}");
+        }
+        let result = ws.unc_auto_result.as_ref().unwrap_or_else(|| panic!("no result: {}", ws.status));
+        eprintln!("result status: {}", result["status"]);
+    }
     #[test]
     fn ojon_gui_renders_clean_frame() {
         let mut ws = Workstation::new();
