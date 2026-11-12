@@ -9,6 +9,7 @@ pub mod auto;
 pub mod common;
 pub mod diffusion;
 pub mod flint;
+pub mod gguf_tools;
 pub mod inspect;
 pub mod quant;
 pub mod uncensor;
@@ -54,6 +55,9 @@ pub fn run() -> io::Result<()> {
         return Ok(());
     }
     if lora::handle(cmd, &mut args)? {
+        return Ok(());
+    }
+    if gguf_tools::handle(cmd, &mut args)? {
         return Ok(());
     }
     if w4a8::handle(cmd, &mut args)? {
