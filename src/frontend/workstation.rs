@@ -41,11 +41,14 @@ use ui_platform::winit::{
 };
 use ui_platform::PointerState;
 use ui_render::{CommandBuffer, CpuBackend, GpuBackend, RenderBackend, SoftwarePresenter};
-use ui_themes::{BilingualLabel, ThemePalette};
+use ui_themes::BilingualLabel;
 use ui_widgets::{
-    icon_cache::{IconAtlas, StudioIcon},
-    KathamoUi, NavigationRail, NavigationRailItem,
+    icon_cache::IconAtlas,
+    KathamoUi,
 };
+
+use super::look;
+use super::screens;
 
 // Native Windows clipboard: cheap path pasting without a browser/UI runtime.
 // Safe only for CF_UNICODETEXT global-memory clipboard handles.
@@ -153,6 +156,14 @@ fn open_folder_in_explorer(path: &Path) -> std::io::Result<()> {
         std::process::Command::new("xdg-open").arg(dir).spawn()?;
     }
     Ok(())
+}
+
+/// An overlay drawn over the current screen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Modal {
+    Pipeline,
+    /// The setup assistant, at one of its four steps.
+    Setup(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -310,6 +321,9 @@ struct Workstation {
     optimize_settings_tab: usize,
     optimize_review_tab: usize,
     setup_view: bool,
+    screen: look::Screen,
+    scroll: f32,
+    modal: Option<Modal>,
     backends_expanded: bool,
     advanced_opt_expanded: bool,
     advanced_unc_expanded: bool,
@@ -496,6 +510,10 @@ impl Workstation {
             optimize_settings_tab: 0,
             optimize_review_tab: 0,
             setup_view,
+            screen: look::Screen::Home,
+            scroll: 0.0,
+            // First run with no tools found: start with the setup assistant.
+            modal: if setup_view { Some(Modal::Setup(0)) } else { None },
             backends_expanded: false,
             advanced_opt_expanded: false,
             advanced_unc_expanded: false,
@@ -556,7 +574,7 @@ impl Workstation {
             log_tail: VecDeque::new(),
             status:settings_problem.map(|e|format!(
                 "Local settings could not be loaded: {e}. Check ojon settings show; original file untouched."
-            )).unwrap_or_else(||"Drop a GGUF file or HF model folder here, or click Browse Model...".into()),
+            )).unwrap_or_else(||"Choose a model to begin, or drop a GGUF file or model folder on the window.".into()),
             busy: false,
             tx, rx,
             icons: IconAtlas::new(),
@@ -694,6 +712,14 @@ impl Workstation {
             }
         }
     }
+    /// Open one of the top-bar places. Tools and Setup are the full manual workstation.
+    fn go_to(&mut self, screen: look::Screen) {
+        self.screen = screen;
+        self.scroll = 0.0;
+        self.setup_view = screen == look::Screen::Setup;
+        self.needs_redraw = true;
+    }
+
     fn rescan_backends(&mut self) {
         self.backend_capabilities = None;
         self.backends = discover_backends();
@@ -2222,14 +2248,15 @@ impl Workstation {
         let previous_precision = self.precision();
         let auto_generated_output = self.output == default_output(&self.source, previous_precision);
         let mut cmds = CommandBuffer::new();
-        let palette = ThemePalette::studio_graphite();
+        let palette = look::palette();
         let mut click_pointer = self.pointer.clone();
         click_pointer.primary_down = self.click_pulse;
         self.click_pulse = false;
-        let navigation_width = 56.0;
+        // Older views sit in one centred column under the top bar.
+        let column = (width - 48.0).clamp(700.0, 1240.0);
         let viewport = Rect::from_min_size(
-            Vec2::new(navigation_width, 0.0),
-            Vec2::new((width - navigation_width).max(700.0), height.max(500.0)),
+            Vec2::new(((width - column) * 0.5).max(0.0), look::BAR_H + 8.0),
+            Vec2::new(column, (height - look::BAR_H - 8.0).max(500.0)),
         );
         let source = &mut self.source;
         let output = &mut self.output;
@@ -2354,100 +2381,454 @@ impl Workstation {
         ) = (
             false, false, false, false, false, false, false, false, false, false, false,
         );
-        {
-            // New Kathamo navigation; each destination is an existing working view.
-            let rail = NavigationRail::new()
-                .with_selected(if *setup_view {
-                    "setup"
-                } else if *workspace_tab == 2 {
-                    "uncensor"
-                } else if *workspace_tab == 1 {
-                    "manual"
-                } else if *optimize_review_tab == 1 {
-                    "results"
-                } else if *optimize_settings_tab == 2 {
-                    "hardware"
-                } else {
-                    "optimize"
-                })
-                .add_main(NavigationRailItem::new(
-                    "optimize",
-                    StudioIcon::Sparkles,
-                    "Optimize",
-                ))
-                .add_main(NavigationRailItem::new(
-                    "uncensor",
-                    StudioIcon::Sparkles,
-                    "Uncensor",
-                ))
-                .add_main(NavigationRailItem::new(
-                    "hardware",
-                    StudioIcon::Cpu,
-                    "Hardware",
-                ))
-                .add_main(NavigationRailItem::new(
-                    "results",
-                    StudioIcon::Check,
-                    "Results",
-                ))
-                .add_main(NavigationRailItem::new(
-                    "manual",
-                    StudioIcon::Settings,
-                    "Manual Tools",
-                ))
-                .add_main(NavigationRailItem::new(
-                    "setup",
-                    StudioIcon::Settings,
-                    "Setup",
-                ));
-            if let Some(destination) = rail.render(
-                &mut cmds,
-                &mut self.icons,
-                Rect::from_min_size(
-                    Vec2::ZERO,
-                    Vec2::new(navigation_width - 4.0, viewport.height()),
-                ),
-                click_pointer.position,
-                click_pointer.primary_down,
-                &palette,
-            ) {
-                match destination {
-                    "setup" => { *setup_view = true; }
-                    "optimize" => {
-                        *setup_view = false;
-                        *workspace_tab = 0;
-                        *optimize_settings_tab = 0;
-                        *optimize_review_tab = 0;
-                    }
-                    "hardware" => {
-                        *setup_view = false;
-                        *workspace_tab = 0;
-                        *optimize_settings_tab = 2;
-                        *optimize_review_tab = 0;
-                        *advanced_opt_expanded = true;
-                    }
-                    "results" => {
-                        *setup_view = false;
-                        *workspace_tab = 0;
-                        *optimize_review_tab = 1;
-                    }
-                    "manual" => {
-                        *setup_view = false;
-                        *workspace_tab = 1;
-                    }
-                    "uncensor" => {
-                        *setup_view = false;
-                        *workspace_tab = 2;
-                    }
-                    _ => {}
+        let mut go: Option<look::Screen>;
+        let mut open_recent: Option<(String, look::Screen)> = None;
+        let mut next_modal: Option<Option<Modal>> = None;
+        let mut load_source: Option<PathBuf> = None;
+        let mut content_height = 0.0f32;
+        let screen = self.screen;
+        let modal = self.modal;
+        let scroll = self.scroll;
+        // While an overlay is open, nothing under it can be hovered or clicked.
+        let screen_pointer = if modal.is_some() {
+            PointerState {
+                position: Vec2::new(-1.0, -1.0),
+                primary_down: false,
+                ..click_pointer.clone()
+            }
+        } else {
+            click_pointer.clone()
+        };
+        let window_rect = Rect::from_min_size(Vec2::ZERO, Vec2::new(width, height));
+        let area = Rect::from_min_max(Vec2::new(0.0, look::BAR_H + 1.0), Vec2::new(width, height));
+        let gib = |bytes: u64| bytes as f64 / 1_073_741_824.0;
+        let file_name = |path: &str| {
+            Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string())
+        };
+        let model_view = {
+            let src = source.trim();
+            if src.is_empty() {
+                screens::ModelView {
+                    name: "No model chosen".into(),
+                    facts: String::new(),
+                    state: screens::ModelState::None,
+                }
+            } else if let Some(info) = model {
+                let mut facts = Vec::new();
+                if let Some(arch) = info.architecture.as_deref() {
+                    facts.push(arch.to_string());
+                }
+                if let Some(topo) = model_topology {
+                    facts.push(format!("{:.2}B parameters", topo.total_parameters as f64 / 1e9));
+                    facts.push(format!("{:.2} bits per weight", topo.effective_bpw));
+                }
+                facts.push(format!("{:.2} GiB", gib(info.file_bytes)));
+                facts.push("GGUF".into());
+                screens::ModelView {
+                    name: info.model_name.clone().unwrap_or_else(|| file_name(src)),
+                    facts: facts.join("  ·  "),
+                    state: screens::ModelState::Ready,
+                }
+            } else if let Some(info) = hf_folder {
+                screens::ModelView {
+                    name: file_name(src),
+                    facts: format!(
+                        "Hugging Face folder  ·  {} weight files  ·  {:.2} GiB",
+                        info.weight_files,
+                        gib(info.source_weight_bytes)
+                    ),
+                    state: screens::ModelState::Ready,
+                }
+            } else if let Some(p) = model_probe {
+                screens::ModelView {
+                    name: file_name(src),
+                    facts: format!("{}  ·  {:.2} GiB", p.category.as_str(), gib(p.bytes)),
+                    state: screens::ModelState::MetadataOnly,
+                }
+            } else {
+                screens::ModelView {
+                    name: file_name(src),
+                    facts: "Reading the model…".into(),
+                    state: screens::ModelState::Checking,
                 }
             }
+        };
+        let job_view = screens::JobView {
+            busy,
+            stage: current_stage.clone(),
+            done: completed_stages.clone(),
+            elapsed: job_elapsed
+                .map(|t| format!("{}m {:02}s", t.as_secs() / 60, t.as_secs() % 60))
+                .unwrap_or_default(),
+            log: log_tail.iter().rev().take(2).cloned().collect(),
+            status: status.clone(),
+        };
+        let folder_words = |folder: &str| {
+            if folder.trim().is_empty() {
+                "Next to the source model".to_string()
+            } else {
+                folder.trim().to_string()
+            }
+        };
+        // The optimizer's chosen file, when it wrote one.
+        let opt_candidate_path: Option<PathBuf> = opt_result.and_then(|result| {
+            let selected = &result["provisional_candidate"];
+            selected
+                .as_str()
+                .or_else(|| selected["path"].as_str())
+                .map(PathBuf::from)
+        });
+        let unc_published_path: Option<PathBuf> = unc_auto_result.and_then(|result| {
+            result["output_quantized"]
+                .as_str()
+                .or_else(|| result["output_edited"].as_str())
+                .map(PathBuf::from)
+        });
+        {
+            let mut p = look::Paint::new(&mut cmds, &screen_pointer);
+            p.fill(window_rect, look::CANVAS, 0.0, None);
+            let bar = look::top_bar(&mut p, width, screen, busy);
+            go = bar.go;
+            if bar.process_model {
+                browse_model = true;
+                go = Some(look::Screen::Quantize);
+            }
+            if bar.setup_assistant {
+                next_modal = Some(Some(Modal::Setup(0)));
+            }
+        }
+        if screen == look::Screen::Home {
+            let active = busy.then(|| look::ActiveJob {
+                name: if source.trim().is_empty() {
+                    "Working".to_string()
+                } else {
+                    file_name(source.trim())
+                },
+                stage: if current_stage.trim().is_empty() {
+                    status.clone()
+                } else {
+                    current_stage.clone()
+                },
+                elapsed: format!("{} so far", job_view.elapsed),
+                steps_done: completed_stages.len(),
+            });
+            let recent: Vec<look::RecentJob> = job_history
+                .iter()
+                .rev()
+                .take(3)
+                .map(|job| look::RecentJob {
+                    name: file_name(&job.source_model),
+                    detail: if job.objective_or_mode.trim().is_empty() {
+                        job.workflow.clone()
+                    } else {
+                        format!("{} · {}", job.workflow, job.objective_or_mode)
+                    },
+                    state: job.status.clone(),
+                    source: job.source_model.clone(),
+                })
+                .collect();
+            let mut p = look::Paint::new(&mut cmds, &screen_pointer);
+            let home = look::home(&mut p, &mut self.icons, area, active.as_ref(), &recent);
+            if home.go.is_some() {
+                go = home.go;
+            }
+            open_recent = home.open;
+        } else if screen == look::Screen::Quantize {
+            let this_computer = detected_gpus
+                .iter()
+                .find(|g| !g.is_integrated)
+                .or_else(|| detected_gpus.first())
+                .map(|gpu| format!("{}  ·  {:.1} GiB free", gpu.name, gib(gpu.free_vram_bytes)))
+                .unwrap_or_else(|| "Auto: a GPU if your tools report one".into());
+            let plan = opt_planned.map(|(_, review)| {
+                let valid = review["ready_for_user_approved_execution"] == true;
+                let mut lines = vec![format!(
+                    "Route: {}",
+                    review["route"].as_str().unwrap_or("unavailable")
+                )];
+                if let Some(step) = review["next_user_step"].as_str() {
+                    lines.push(step.to_string());
+                }
+                if !valid {
+                    for note in review["checks"].as_array().into_iter().flatten().take(2) {
+                        if let Some(reason) = note.as_str() {
+                            lines.push(reason.to_string());
+                        }
+                    }
+                }
+                screens::PlanView {
+                    ready: valid && optimizer_plan_current,
+                    headline: if valid && optimizer_plan_current {
+                        "Plan ready for your approval".into()
+                    } else if !optimizer_plan_current {
+                        "Settings changed: preview the plan again".into()
+                    } else {
+                        "Something is missing".into()
+                    },
+                    lines,
+                }
+            });
+            let result = opt_result.map(|result| {
+                let accepted = result["status"].as_str() == Some("PROVISIONAL_CANDIDATE_FOUND");
+                let mut lines = Vec::new();
+                if let Some(path) = &opt_candidate_path {
+                    lines.push(format!("New model: {}", path.display()));
+                }
+                if let Some(topo) = result.get("selected_candidate_topology") {
+                    if let (Some(bpw), Some(bytes)) =
+                        (topo["effective_bpw"].as_f64(), topo["file_bytes"].as_u64())
+                    {
+                        lines.push(format!(
+                            "Size: {:.2} GiB  ·  {:.2} bits per weight",
+                            gib(bytes),
+                            bpw
+                        ));
+                    }
+                }
+                for item in result["evidence"]["results"].as_array().into_iter().flatten().take(3) {
+                    let name = item["name"]
+                        .as_str()
+                        .or_else(|| item["type"].as_str())
+                        .unwrap_or("candidate");
+                    let saving = item["savings_pct"]
+                        .as_f64()
+                        .map(|v| format!("{v:.1}% smaller"))
+                        .unwrap_or_else(|| "size not measured".into());
+                    let quality = item["score_change_points"]
+                        .as_f64()
+                        .map(|v| format!("quality {v:+.1} points"))
+                        .unwrap_or_else(|| "quality not measured".into());
+                    lines.push(format!(
+                        "{name}: {}  ·  {saving}  ·  {quality}",
+                        item["status"].as_str().unwrap_or("unknown")
+                    ));
+                }
+                let speed = &result["selected_candidate_performance"];
+                let speed_words = if speed["status"] == "MEASURED" {
+                    format!(
+                        "{:.1} tokens/s reading, {:.1} tokens/s writing",
+                        speed["metrics"]["prompt_processing"]["tokens_per_second"]
+                            .as_f64()
+                            .unwrap_or(0.0),
+                        speed["metrics"]["token_generation"]["tokens_per_second"]
+                            .as_f64()
+                            .unwrap_or(0.0)
+                    )
+                } else {
+                    "speed not measured".to_string()
+                };
+                lines.push(format!(
+                    "Reload check: {}  ·  {speed_words}",
+                    result["selected_candidate_runtime_load"]["status"]
+                        .as_str()
+                        .unwrap_or("not tested")
+                ));
+                screens::ResultView {
+                    accepted,
+                    headline: if accepted {
+                        "Accepted: the new model passed every quality and size check".into()
+                    } else if result["status"] == "APPLIED_QUALITY_NOT_MEASURED" {
+                        "Applied, but quality was not measured (add a held-out text in Tools)".into()
+                    } else {
+                        "Rejected: no candidate passed the checks".into()
+                    },
+                    lines,
+                    has_output: opt_candidate_path.is_some(),
+                }
+            });
+            let view = screens::QuantizeView {
+                model: &model_view,
+                goal: *opt_goal,
+                device: *opt_device,
+                this_computer,
+                output: folder_words(opt_output),
+                job: &job_view,
+                plan,
+                result,
+            };
+            let mut p = look::Paint::new(&mut cmds, &screen_pointer);
+            let a = screens::quantize(&mut p, &mut self.icons, area, scroll, &view);
+            content_height = a.height;
+            browse_model |= a.choose_file;
+            browse_folder |= a.choose_folder;
+            if let Some(goal) = a.goal {
+                *opt_goal = goal;
+            }
+            if let Some(device) = a.device {
+                *opt_device = device;
+            }
+            if a.open_tools {
+                *workspace_tab = 0;
+                *optimize_settings_tab = 2;
+                *advanced_opt_expanded = true;
+                go = Some(look::Screen::Tools);
+            }
+            browse_opt_out |= a.choose_output;
+            one_click_opt |= a.start;
+            advise |= a.preview;
+            opt_run |= a.approve;
+            cancel_job |= a.cancel;
+            if a.pipeline {
+                next_modal = Some(Some(Modal::Pipeline));
+            }
+            if let Some(path) = &opt_candidate_path {
+                if a.open_folder {
+                    open_folder_target = path.parent().map(Path::to_path_buf);
+                }
+                if a.test_model {
+                    load_candidate_target = Some(path.clone());
+                }
+                if a.export {
+                    if let Some(result) = opt_result {
+                        export_report_json = Some((
+                            path.with_extension("optimization-report.json"),
+                            result.clone(),
+                        ));
+                    }
+                }
+            }
+        } else if screen == look::Screen::Uncensor {
+            let plan = unc_auto_planned.map(|(_, plan)| screens::PlanView {
+                ready: true,
+                headline: "Search plan ready for your approval".into(),
+                lines: vec![format!(
+                    "{} candidates will be edited and measured.",
+                    plan["candidate_count"].as_u64().unwrap_or(0)
+                )],
+            });
+            let result = unc_auto_result.map(|result| {
+                let accepted = result["status"].as_str() == Some("SELECTED_FROM_MEASURED_SCORES");
+                let pct = |v: &serde_json::Value| 100.0 * v.as_f64().unwrap_or(0.0);
+                let mut lines = vec![format!(
+                    "Before: refuses {:.1}% of test requests  ·  refuses {:.1}% of harmless ones",
+                    pct(&result["baseline"]["refusal_rate"]),
+                    pct(&result["baseline"]["benign_overrefusal_rate"])
+                )];
+                for row in result["candidates"].as_array().into_iter().flatten().take(4) {
+                    lines.push(format!(
+                        "{} ({}): refuses {:.1}%  ·  harmless {:.1}%  ·  capability {}",
+                        row["name"].as_str().unwrap_or("?"),
+                        row["method"].as_str().unwrap_or("ablation"),
+                        pct(&row["refusal_rate"]),
+                        pct(&row["benign_overrefusal_rate"]),
+                        if row["quality_pass"] == true { "kept" } else { "not kept" }
+                    ));
+                }
+                if let Some(reload) = result.get("edited_reload_verification").filter(|v| !v.is_null()) {
+                    lines.push(format!(
+                        "Reload check of the edited model: {}",
+                        reload["status"].as_str().unwrap_or("verified")
+                    ));
+                }
+                if let Some(quant) = result.get("quantized_verification").filter(|v| !v.is_null()) {
+                    lines.push(format!(
+                        "Smaller version: refuses {:.1}%  ·  {}",
+                        pct(&quant["refusal_rate"]),
+                        if quant["passes_dual_reference_gate"] == true {
+                            "passed against the original and the edited model"
+                        } else {
+                            "did not pass against the original and the edited model"
+                        }
+                    ));
+                }
+                screens::ResultView {
+                    accepted,
+                    headline: if accepted {
+                        "Accepted: the measured winner was verified and saved".into()
+                    } else {
+                        "Rejected: no candidate passed the refusal and capability checks".into()
+                    },
+                    lines,
+                    has_output: unc_published_path.is_some(),
+                }
+            });
+            let view = screens::UncensorView {
+                model: &model_view,
+                after: *unc_auto_quantize,
+                output: folder_words(unc_output),
+                job: &job_view,
+                plan,
+                result,
+            };
+            let mut p = look::Paint::new(&mut cmds, &screen_pointer);
+            let a = screens::uncensor(&mut p, &mut self.icons, area, scroll, &view);
+            content_height = a.height;
+            browse_model |= a.choose_file;
+            browse_folder |= a.choose_folder;
+            if let Some(after) = a.after {
+                *unc_auto_quantize = after;
+            }
+            if a.open_tools {
+                *workspace_tab = 2;
+                *unc_tab = 1;
+                go = Some(look::Screen::Tools);
+            }
+            browse_unc_out |= a.choose_output;
+            one_click_unc |= a.start;
+            unc_auto_plan |= a.preview;
+            unc_auto_run |= a.approve;
+            cancel_job |= a.cancel;
+            if let Some(path) = &unc_published_path {
+                if a.open_folder {
+                    open_folder_target = path.parent().map(Path::to_path_buf);
+                }
+                if a.test_model {
+                    load_candidate_target = Some(path.clone());
+                }
+                if a.quantize_result {
+                    load_source = Some(path.clone());
+                }
+                if a.export {
+                    if let Some(result) = unc_auto_result {
+                        export_report_json =
+                            Some((path.with_extension("uncensor-report.json"), result.clone()));
+                    }
+                }
+            }
+        } else if screen == look::Screen::Queue {
+            let rows: Vec<screens::HistoryRow> = job_history
+                .iter()
+                .rev()
+                .map(|job| screens::HistoryRow {
+                    name: file_name(&job.source_model),
+                    detail: [job.workflow.as_str(), job.objective_or_mode.as_str(), job.current_stage.as_str()]
+                        .iter()
+                        .filter(|part| !part.trim().is_empty())
+                        .copied()
+                        .collect::<Vec<_>>()
+                        .join("  ·  "),
+                    state: job.status.clone(),
+                    action: if job.result_artifact.is_some() {
+                        Some("Load result")
+                    } else if job.status == "CHECKPOINT_RECOVERABLE" {
+                        Some("Recover")
+                    } else {
+                        None
+                    },
+                })
+                .collect();
+            let mut p = look::Paint::new(&mut cmds, &screen_pointer);
+            let a = screens::queue(&mut p, area, scroll, &job_view, &model_view.name, &rows);
+            content_height = a.height;
+            cancel_job |= a.cancel;
+            if a.pipeline {
+                next_modal = Some(Some(Modal::Pipeline));
+            }
+            if let Some(job) = a.open.and_then(|i| job_history.iter().rev().nth(i)) {
+                load_candidate_target = Some(PathBuf::from(
+                    job.result_artifact.as_deref().unwrap_or(&job.source_model),
+                ));
+            }
+        } else {
             let mut ui = KathamoUi::new(
                 &mut cmds,
                 &mut self.icons,
                 &palette,
                 viewport,
-                click_pointer,
+                screen_pointer.clone(),
             );
 
             // 1. Studio Telemetry & Header Bar
@@ -3400,6 +3781,112 @@ impl Workstation {
             );
             }
         }
+        // Overlays are drawn last, over whichever screen is open.
+        if let Some(open) = modal {
+            let mut p = look::Paint::new(&mut cmds, &click_pointer);
+            match open {
+                Modal::Pipeline => {
+                    let result_done = opt_result.is_some() || unc_auto_result.is_some();
+                    let accepted = opt_result
+                        .is_some_and(|r| r["status"] == "PROVISIONAL_CANDIDATE_FOUND")
+                        || unc_auto_result
+                            .is_some_and(|r| r["status"] == "SELECTED_FROM_MEASURED_SCORES");
+                    let inspected = source_is_current && model_probe.is_some();
+                    let mark = |done: bool, active: bool| {
+                        if done {
+                            screens::Phase::Done
+                        } else if active {
+                            screens::Phase::Active
+                        } else {
+                            screens::Phase::Waiting
+                        }
+                    };
+                    let view = screens::PipelineView {
+                        title: model_view.name.clone(),
+                        operation: if screen == look::Screen::Uncensor {
+                            "Uncensor: find the refusal direction, edit, measure".into()
+                        } else {
+                            "Quantize: measured search for the best smaller model".into()
+                        },
+                        phases: [
+                            ("Inspect", "Read the model's layout and size", mark(inspected, !busy && !result_done)),
+                            ("Optimise", "Build candidates and measure each one", mark(result_done, busy)),
+                            ("Reload & Verify", "Load the result again and check it", mark(result_done, false)),
+                            ("Ready", "Accepted result saved with its report", mark(accepted, false)),
+                        ],
+                        job: &job_view,
+                    };
+                    if screens::pipeline(&mut p, &mut self.icons, window_rect, &view) {
+                        next_modal = Some(None);
+                    }
+                }
+                Modal::Setup(step) => {
+                    let found = |id: BackendId| backends.iter().any(|b| b.spec.id == id && b.installed());
+                    let system = match std::env::consts::OS {
+                        "windows" => "Windows",
+                        "macos" => "macOS",
+                        "linux" => "Linux",
+                        other => other,
+                    };
+                    let view = screens::SetupView {
+                        step,
+                        system: format!("{system} ({})", std::env::consts::ARCH),
+                        processor: std::thread::available_parallelism()
+                            .map(|n| format!("{n} threads"))
+                            .unwrap_or_else(|_| "Not reported".into()),
+                        gpus: detected_gpus
+                            .iter()
+                            .map(|gpu| {
+                                (
+                                    gpu.name.clone(),
+                                    format!(
+                                        "{:.1} GiB total  ·  {:.1} GiB free",
+                                        gib(gpu.total_vram_bytes),
+                                        gib(gpu.free_vram_bytes)
+                                    ),
+                                )
+                            })
+                            .collect(),
+                        tools: vec![
+                            (
+                                "llama-quantize",
+                                "Makes the smaller model files",
+                                found(BackendId::LlamaQuantize) || Path::new(quantizer.trim()).is_file(),
+                            ),
+                            (
+                                "llama-cli",
+                                "Loads a model to test it",
+                                found(BackendId::LlamaCli) || Path::new(runtime.trim()).is_file(),
+                            ),
+                            ("llama-perplexity", "Measures quality", found(BackendId::LlamaPerplexity)),
+                            ("llama-imatrix", "Calibrates before quantizing", found(BackendId::LlamaImatrix)),
+                            (
+                                "cvector-generator",
+                                "Finds the refusal direction",
+                                found(BackendId::LlamaCvectorGenerator),
+                            ),
+                        ],
+                        output: folder_words(opt_output),
+                    };
+                    let a = screens::setup_assistant(&mut p, &mut self.icons, window_rect, &view);
+                    if let Some(step) = a.step {
+                        next_modal = Some(Some(Modal::Setup(step)));
+                    }
+                    rescan |= a.rescan;
+                    if a.get_tools {
+                        download = Some(BackendId::LlamaQuantize);
+                    }
+                    browse_opt_out |= a.choose_output;
+                    if a.open_setup_page {
+                        go = Some(look::Screen::Setup);
+                        next_modal = Some(None);
+                    }
+                    if a.close {
+                        next_modal = Some(None);
+                    }
+                }
+            }
+        }
         if auto_generated_output && previous_precision != self.precision() {
             self.output = default_output(&self.source, self.precision());
             self.last_output = None;
@@ -3463,6 +3950,9 @@ impl Workstation {
         if let Some(cand) = load_candidate_target {
             self.output = cand.to_string_lossy().into_owned();
             self.workspace_tab = 1;
+            self.screen = look::Screen::Tools;
+            self.setup_view = false;
+            self.scroll = 0.0;
             self.status = format!("Loaded '{}' into Manual Tools test runner. Click 'Test with llama-cli' to run local inference.", cand.display());
             self.needs_redraw = true;
         }
@@ -3492,6 +3982,23 @@ impl Workstation {
             }
             self.needs_redraw = true;
         }
+        if let Some((path, target)) = open_recent {
+            self.set_source(Path::new(&path));
+            go = Some(target);
+        }
+        if let Some(path) = load_source {
+            self.set_source(&path);
+            go = Some(look::Screen::Quantize);
+        }
+        if let Some(target) = go {
+            self.go_to(target);
+        }
+        if let Some(next) = next_modal {
+            self.modal = next;
+            self.needs_redraw = true;
+        }
+        let room = (height - look::BAR_H).max(0.0);
+        self.scroll = self.scroll.clamp(0.0, (content_height - room).max(0.0));
         if cancel_job {
             self.cancel_active_job();
         }
@@ -3575,7 +4082,7 @@ impl DesktopApp {
         if w == 0 || h == 0 {
             return;
         }
-        let palette = ThemePalette::studio_graphite();
+        let palette = look::palette();
         let logical_width = w as f32 / self.scale;
         let logical_height = h as f32 / self.scale;
         let cmds = self.ui.render(logical_width, logical_height);
@@ -3690,6 +4197,15 @@ impl ApplicationHandler for DesktopApp {
                 if state == ElementState::Pressed {
                     self.ui.click_pulse = true;
                 }
+                win.request_redraw();
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    ui_platform::winit::event::MouseScrollDelta::LineDelta(_, y) => y * 60.0,
+                    ui_platform::winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 / self.scale,
+                };
+                // The render pass clamps this to the screen's real length.
+                self.ui.scroll = (self.ui.scroll - lines).max(0.0);
                 win.request_redraw();
             }
             WindowEvent::DroppedFile(path) => {
@@ -3959,37 +4475,68 @@ mod tests {
     #[test]
     fn new_kathamo_navigation_routes_to_real_workstation_views() {
         let mut ws = Workstation::new();
-        let hit = |ws: &mut Workstation, y: f32| {
-            ws.pointer.position = Vec2::new(23.0, y);
+        let hit = |ws: &mut Workstation, screen: look::Screen| {
+            let rect = look::nav_rects(1500.0)
+                .into_iter()
+                .find(|(s, _)| *s == screen)
+                .expect("every place is in the top bar")
+                .1;
+            ws.pointer.position = rect.center();
             ws.click_pulse = true;
             ws.render(1500.0, 960.0);
+            assert_eq!(ws.screen, screen);
         };
-        hit(&mut ws, 70.0);
-        assert_eq!(
-            ws.workspace_tab, 2,
-            "Uncensor should open its model edit view"
-        );
-        hit(&mut ws, 114.0);
-        assert_eq!(ws.workspace_tab, 0);
-        assert_eq!(
-            ws.optimize_settings_tab, 2,
-            "Hardware should open actual hardware controls"
-        );
-        hit(&mut ws, 158.0);
-        assert_eq!(
-            ws.optimize_review_tab, 1,
-            "Results should open real receipts"
-        );
-        hit(&mut ws, 202.0);
-        assert_eq!(ws.workspace_tab, 1, "Manual Tools must remain accessible");
-        hit(&mut ws, 26.0);
-        assert_eq!(ws.workspace_tab, 0);
-        assert_eq!(ws.optimize_settings_tab, 0);
-        assert_eq!(ws.optimize_review_tab, 0);
+        ws.modal = None;
+        for screen in [
+            look::Screen::Uncensor,
+            look::Screen::Queue,
+            look::Screen::Tools,
+            look::Screen::Setup,
+            look::Screen::Home,
+            look::Screen::Quantize,
+        ] {
+            hit(&mut ws, screen);
+            assert_eq!(ws.setup_view, screen == look::Screen::Setup);
+        }
         assert!(
             !ws.busy,
             "navigation must not trigger a conversion or model load"
         );
+    }
+
+    #[test]
+    fn an_open_overlay_blocks_the_screen_under_it() {
+        let mut ws = Workstation::new();
+        ws.go_to(look::Screen::Home);
+        ws.modal = Some(Modal::Setup(0));
+        let queue = look::nav_rects(1500.0)
+            .into_iter()
+            .find(|(s, _)| *s == look::Screen::Queue)
+            .unwrap()
+            .1;
+        ws.pointer.position = queue.center();
+        ws.click_pulse = true;
+        ws.render(1500.0, 960.0);
+        assert_eq!(ws.screen, look::Screen::Home, "the bar is not clickable under an overlay");
+        ws.modal = None;
+        ws.click_pulse = true;
+        ws.render(1500.0, 960.0);
+        assert_eq!(ws.screen, look::Screen::Queue);
+        assert!(!ws.busy, "moving between places never starts a job");
+    }
+
+    #[test]
+    fn every_place_and_overlay_renders() {
+        let mut ws = Workstation::new();
+        for screen in look::Screen::ALL {
+            for modal in [None, Some(Modal::Pipeline), Some(Modal::Setup(0)), Some(Modal::Setup(3))] {
+                ws.go_to(screen);
+                ws.modal = modal;
+                ws.scroll = 400.0;
+                assert!(!ws.render(1500.0, 960.0).is_empty());
+                assert!(!ws.render(760.0, 520.0).is_empty(), "small windows still draw");
+            }
+        }
     }
 
     #[test]
@@ -3999,7 +4546,7 @@ mod tests {
         assert!(!cmds.is_empty());
 
         let mut cpu = CpuBackend::new();
-        let palette = ThemePalette::studio_graphite();
+        let palette = look::palette();
         cpu.begin_frame(1500, 960, palette.canvas);
         cpu.submit(&cmds);
         assert!(cpu.end_frame().is_ok());
@@ -4018,6 +4565,33 @@ mod tests {
                 data.push(p as u8);
             }
             let _ = std::fs::write(ppm_path, data);
+            // One frame per place, for look reviews.
+            let shots: Vec<(String, look::Screen, Option<Modal>)> = look::Screen::ALL
+                .iter()
+                .map(|s| (format!("{s:?}").to_lowercase(), *s, None))
+                .chain([
+                    ("overlay_pipeline".to_string(), look::Screen::Quantize, Some(Modal::Pipeline)),
+                    ("overlay_setup_1".to_string(), look::Screen::Home, Some(Modal::Setup(0))),
+                    ("overlay_setup_2".to_string(), look::Screen::Home, Some(Modal::Setup(1))),
+                    ("overlay_setup_3".to_string(), look::Screen::Home, Some(Modal::Setup(2))),
+                    ("overlay_setup_4".to_string(), look::Screen::Home, Some(Modal::Setup(3))),
+                ])
+                .collect();
+            for (shot, screen, modal) in shots {
+                ws.go_to(screen);
+                ws.modal = modal;
+                let cmds = ws.render(1500.0, 960.0);
+                let mut cpu = CpuBackend::new();
+                cpu.begin_frame(1500, 960, look::CANVAS);
+                cpu.submit(&cmds);
+                let _ = cpu.end_frame();
+                let mut data = format!("P6\n{} {}\n255\n", 1500, 960).into_bytes();
+                for &p in cpu.pixels() {
+                    data.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8]);
+                }
+                let name = format!("ojon_{shot}.ppm");
+                let _ = std::fs::write(artifact_dir.join(name), data);
+            }
         }
     }
 
