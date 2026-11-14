@@ -10,7 +10,8 @@ Ojon provides source-first conversion workflows for supported language, vision-l
 | --- | --- | --- |
 | **Qwen3-0.6B (LLM)** | F16 GGUF to a measured mixed-precision recipe (Q4_K embeddings, Q5_K elsewhere); 1.51 GB to 503 MB | Prior local conversion and held-out distribution measurements documented; broad task-quality retention is not established |
 | **FrogNano 4B (LLM)** | Separately edited BF16 model converted to Q4_K_M GGUF (2.78 GB) | Previous local quantized inference and small task comparison documented; the behavioral edit was **not** shown to reduce refusals |
-| **P-H3 Image** | BF16 safetensors to Q4_K GGUF: **40.47 GB to 11.62 GB (71.28% smaller)** | 532 tensors retained, 314 Q4_K tensors; output reopened and inspected; **image generation and visual-quality parity not yet tested** |
+| **P-H3 Image** | BF16 safetensors to Q4_K GGUF: **40.47 GB to 11.62 GB (71.28% smaller)** | 532 tensors retained, 314 Q4_K tensors; output reopened and inspected; local image-generation and image-edit runs completed; matched BF16 visual parity not measured |
+| **MiniMax H3-Image** | Original BF16 40.23 GB; Ojon Q4 GGUF 11.87 GB, Q5 GGUF 13.91 GB, W4A8 safetensors 12.55 GB, W6A8 safetensors 17.37 GB | Local generated images and edits recorded for the quantized variants, with a matched-prompt comparison grid; original BF16 image baseline was not run in the same environment |
 | **MiniMax H3 (video)** | W4A4/OrbitQuant component and NVFP4 checkpoint adapter commands plus ComfyUI video testing | A W4A8 MiniMax video was demonstrated using external weights; Ojon-origin quantized weights and a fully verified release still require their own conversion and playback checks |
 | **Multimodal VLMs** | GGUF quantization with optional vision-projector conversion plus llama.cpp multimodal parity hooks | Command paths available; each architecture, projector, runtime load and vision quality needs a model-specific test |
 

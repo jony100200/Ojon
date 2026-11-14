@@ -20,7 +20,8 @@ Ojon has processed real model weights in local conversion workflows:
 | Model type | Example | Result |
 | --- | --- | --- |
 | **Language models** | Qwen3-0.6B; FrogNano 4B | Measured GGUF quantization runs (mixed Q4/Q5 and Q4_K_M) |
-| **Image models** | P-H3 Image | BF16 to Q4_K GGUF: 40.47 GB to 11.62 GB; structural conversion validated |
+| **Image models** | P-H3 Image | BF16 to Q4_K GGUF: 40.47 GB to 11.62 GB; local image generation validated, full BF16 visual parity not measured |
+| **Image models** | MiniMax H3-Image | Q4/Q5 GGUF and native W4A8/W6A8 safetensors conversions; locally generated matching-prompt images and edits |
 | **Video models** | MiniMax H3 | W4A4/NVFP4 conversion and video-test commands available; model-specific Ojon conversion verification is still required |
 | **Vision-language models** | Multimodal GGUF and vision projector | Conversion and parity-test commands available; specific end-to-end models must be verified |
 
