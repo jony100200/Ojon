@@ -151,6 +151,30 @@ The GUI uses [Kathamo](https://github.com/jony100200/Kathamo). The Rust CLI rema
 
 The setup assistant lists the tools Ojon drives; it does not install them. A repeat run on a model that already has a finished result writes to a new numbered folder.
 
+## Image and video quantization
+
+Ojon supports diffusion-model GGUF conversion through compatible installed backends and native Rust conversion of supported safetensors linear layers into comfy-kitchen W4A8 or W6A8 format. A converted checkpoint still needs its matching text encoder, VAE, loader and workflow to generate an image or video.
+
+For an H3-family safetensors denoiser with compatible linear layers, preview and run a 4-bit conversion:
+
+```bash
+ojon w4a8-plan original.safetensors output-w4a8.safetensors --bits 4
+ojon w4a8-run original.safetensors output-w4a8.safetensors --bits 4 --confirm
+```
+
+For the corresponding 6-bit weight / 8-bit activation format:
+
+```bash
+ojon w4a8-plan original.safetensors output-w6a8.safetensors --bits 6
+ojon w4a8-run original.safetensors output-w6a8.safetensors --bits 6 --confirm
+```
+
+Use `--layers` for a compatible subset of linear-layer names and `--threads` to limit worker threads. The default layer policy targets MiniMax H3 attention/MLP projection layers. The Rust writer produces comfy-kitchen-compatible packed safetensors; it does not automatically package the encoder or VAE. Actual inference speed and image quality depend on the target GPU and loader. A W4A8 checkpoint and a Q4 GGUF use different quantization formats and must not be treated as interchangeable.
+
+For compatible GGUF diffusion checkpoints, use `diffusion-gguf-plan` / `diffusion-gguf-run` (see `ojon --help`). Ojon also provides `gguf-set-kv`, `gguf-restore-norms`, and `gguf-verify-restore` to prepare and verify applicable model metadata and norm tensors. These tools do not guarantee a runnable model without a compatible inference backend.
+
+MiniMax H3 **video** conversion uses a separate family-specific workflow. See [MiniMax H3 conversion guide](docs/MINIMAX_H3.md). MiniMax H3 **Image** and H3 **Video** have different components and must be tested separately.
+
 ## Specialized workflows
 
 The CLI also exposes experimental model editing, optional image/video quantization adapters, OCR and audio comparisons, and model-format-specific operations. Check `--help` for supported commands and the selected backend's own requirements.

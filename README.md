@@ -8,7 +8,7 @@
 
 Ojon is a Rust-based local model workstation focused on two jobs:
 
-- **Quantize:** Reduce the size of supported language and video models with selectable precision, mixed-precision search and measurable quality checks. Image-model support is an ongoing target.
+- **Quantize:** Reduce supported language, image and video model sizes with compatible GGUF, mixed-precision, and model-specific safetensors workflows, including native Rust W4A8/W6A8 checkpoint conversion. Measure size and task quality with the applicable loader and evaluation tools; support depends on model architecture and runtime.
 - **Uncensor:** Edit supported GGUF model behavior, search refusal-reduction candidates and evaluate results against the original model.
 
 Both are implemented workflows; compatibility and measured results depend on the model and selected backend.
