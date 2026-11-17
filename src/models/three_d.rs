@@ -179,6 +179,10 @@ fn read_header(path: &Path, prefix: &str) -> io::Result<Vec<SrcTensor>> {
     let mut tensors = Vec::new();
     for (full, v) in header.iter().filter(|(k, _)| *k != "__metadata__" && k.starts_with(&lead)) {
         let name = full[lead.len()..].to_owned();
+        // Pixal3D's ss flow stores a derived complex rope table; the engine rebuilds it, so it is not carried over.
+        if name == "rope_phases" && v["dtype"] == "C64" {
+            continue;
+        }
         if let Some(stem) = name.strip_suffix(".weight_scale") {
             scales.insert(stem.to_owned(), span(v));
         } else if let Some(stem) = name.strip_suffix(".comfy_quant") {
