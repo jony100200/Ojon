@@ -12,6 +12,7 @@ pub mod flint;
 pub mod gguf_tools;
 pub mod inspect;
 pub mod quant;
+pub mod three_d;
 pub mod uncensor;
 pub mod w4a8;
 
@@ -61,6 +62,9 @@ pub fn run() -> io::Result<()> {
         return Ok(());
     }
     if w4a8::handle(cmd, &mut args)? {
+        return Ok(());
+    }
+    if three_d::handle(cmd, &mut args)? {
         return Ok(());
     }
     if audio::handle(cmd, &mut args)? {

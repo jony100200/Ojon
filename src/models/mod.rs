@@ -9,6 +9,7 @@ pub mod mmproj;
 pub mod mtp;
 pub mod model_build;
 pub mod whisper;
+pub mod three_d;
 pub mod lora_merge;
 pub mod weight_patch;
 pub mod orbitquant;

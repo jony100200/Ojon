@@ -7,6 +7,7 @@ pub mod corpus;
 pub mod embed_parity;
 pub mod exl3;
 pub mod kld;
+pub mod kquant;
 pub mod packed;
 pub mod ppl;
 pub mod quant_compare;
