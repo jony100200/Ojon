@@ -211,7 +211,7 @@ pub fn run_pipeline(cfg: &PipelineConfig, mut log: impl FnMut(&str)) -> io::Resu
     // 2. convert patched + (if baselines are asked for) unpatched source
     let gg = cfg.work.join("gguf");
     fs::create_dir_all(&gg)?;
-    let mut convert = |tag: &str, dir: &Path, st: &mut State, log: &mut dyn FnMut(&str)| -> io::Result<PathBuf> {
+    let convert = |tag: &str, dir: &Path, st: &mut State, log: &mut dyn FnMut(&str)| -> io::Result<PathBuf> {
         let out = gg.join(format!("{tag}-{}.gguf", cfg.outtype));
         let key = format!("convert_{tag}");
         if !st.is_done(&key) {
@@ -227,7 +227,7 @@ pub fn run_pipeline(cfg: &PipelineConfig, mut log: impl FnMut(&str)) -> io::Resu
     let base_hp = if cfg.baseline_precisions.is_empty() || cfg.patches.is_empty() { None } else { Some(convert("base", &cfg.source, &mut st, &mut log)?) };
 
     // 3. imatrix per high-precision model
-    let mut imat = |tag: &str, hp: &Path, st: &mut State, log: &mut dyn FnMut(&str)| -> io::Result<PathBuf> {
+    let imat = |tag: &str, hp: &Path, st: &mut State, log: &mut dyn FnMut(&str)| -> io::Result<PathBuf> {
         let out = gg.join(format!("{tag}.imatrix.gguf"));
         let key = format!("imatrix_{tag}");
         if !st.is_done(&key) {
