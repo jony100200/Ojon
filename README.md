@@ -55,6 +55,18 @@ cargo run --release --locked --bin ojon -- auto-quant model-f16.gguf output/ --p
 
 Presets: `smallest`, `balanced`, `safest`. Compatible quantization/inference tools are required only for operations that use them.
 
+For an original floating-point `.safetensors` checkpoint, the native Rust W4A8/W6A8 path has a **read-only preflight**:
+
+```bash
+cargo run --release --locked --bin ojon -- w4a8-plan original.safetensors smaller.safetensors --bits 4
+cargo run --release --locked --bin ojon -- w4a8-run original.safetensors smaller.safetensors --bits 4 --confirm
+cargo run --release --locked --bin ojon -- w4a8-plan wan-original.safetensors wan-smaller.safetensors --bits 4 --profile wan
+```
+
+The default profile targets MiniMax H3 linear-layer names. Use `--profile wan` for Wan-family DiT (including Echo Flash transformer) linear-weight names, or `--layers glob,glob` for a custom architecture; explicit patterns override a selected profile. The plan reports actual matched tensor counts, estimated output size, a conservative peak-RAM estimate and blockers, without reading model payloads or creating output. Unmodified tensors are streamed, existing outputs and partial files are protected, and the output tensor catalogue is checked before publication. **The current whole-matrix packer has a 512 MiB per-selected-tensor safety limit**; larger layers require a future row-streaming packer. A valid converted file is **not** proof that a given inference runtime supports that model.
+
+EchoMimicV3 Flash's experimental INT4/INT8 *weight archive* is documented separately in [Echo Rust quantization](docs/ECHO_RUST_QUANT.md); it is not yet a proven inference format.
+
 ### Uncensor
 
 Start with an original F16/BF16/F32 GGUF model and an existing output directory. The automatic workflow uses compatible local `llama-cli` and `llama-cvector-generator` tools.

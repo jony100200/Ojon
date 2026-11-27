@@ -8,6 +8,7 @@ pub mod kld;
 pub mod auto;
 pub mod common;
 pub mod diffusion;
+pub mod echo;
 pub mod flint;
 pub mod gguf_tools;
 pub mod inspect;
@@ -65,6 +66,9 @@ pub fn run() -> io::Result<()> {
         return Ok(());
     }
     if three_d::handle(cmd, &mut args)? {
+        return Ok(());
+    }
+    if echo::handle(cmd, &mut args)? {
         return Ok(());
     }
     if audio::handle(cmd, &mut args)? {

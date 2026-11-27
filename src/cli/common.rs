@@ -91,6 +91,9 @@ Commands:
   ojon recipe-library list   Show stored family recipes (model signature / preset); set OJON_RECIPE_LIBRARY to move the library
   ojon recipe-apply <other-original-F16.gguf> <output-dir> <recipe-receipt.json> [--corpus heldout.txt --verify-budget X] [--imatrix path] [--ctx 512] [--ngl 99|auto] [--chunks 40] [--threads N] --confirm   Reuse a measured recipe on a sibling model, optionally re-measuring KLD against a budget
   ojon diffusion-gguf-plan <denoiser.safetensors> <output.gguf> [--tool sd-cli] [--kind image|video] [--layout diffusion|checkpoint] [--format q4_0|q5_0|q8_0|q4_K|q3_K]
+  ojon echo-inspect <EchoMimicV3-Flash-root> [--bits 8|4]   Rust-only PyTorch/safetensors structural model inspection
+  ojon echo-quant-plan <EchoMimicV3-Flash-root> <new-output-dir> [--bits 8|4]   Read-only size and linear-layer plan
+  ojon echo-quant-run <EchoMimicV3-Flash-root> <new-output-dir> [--bits 8|4] --confirm   Rust-only per-row weight packing; NOT executable Echo inference
   ojon diffusion-gguf-run <denoiser.safetensors> <output.gguf> [same options] --confirm
   ojon diffusion-gguf-smoke-plan <denoiser.gguf> <output.png|webm> [--kind image|video] [--component vae=vae.safetensors] [--component llm=encoder.gguf] [--prompt text] [--seed 42] [--steps 4]
   ojon diffusion-gguf-smoke-run <denoiser.gguf> <output.png|webm> [same options] --confirm

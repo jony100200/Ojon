@@ -194,9 +194,9 @@ fn choice_card(
     tint: Color,
 ) -> bool {
     let hot = p.hovered(rect);
-    let border = if selected { tint } else if hot { mix(line(), muted(), 0.3) } else { line() };
-    let fill = if selected { mix(panel(), tint, 0.07) } else { panel() };
-    p.fill(rect, fill, 12.0, Some(border));
+    let border = if selected { tint } else if hot { mix(line(), muted(), 0.35) } else { line() };
+    let fill = if selected { mix(panel(), tint, 0.09) } else if hot { mix(panel(), raised(), 0.25) } else { panel() };
+    p.elevated_card(rect, 12.0, fill, border, selected.then_some(tint));
     let x = rect.min.x + 20.0;
     let room = rect.width() - 40.0;
     let tw = p.fitted(title, Vec2::new(x, rect.min.y + 18.0), 15.5, true, room - 26.0, look::text());
@@ -223,7 +223,7 @@ fn job_panel(p: &mut Paint, left: f32, y: f32, width: f32, job: &JobView, tint: 
     let lines = job.log.len().min(2) as f32;
     let height = 96.0 + lines * 20.0;
     let rect = Rect::from_min_size(Vec2::new(left, y), Vec2::new(width, height));
-    p.fill(rect, panel(), 12.0, Some(mix(line(), tint, 0.5)));
+    p.elevated_card(rect, 12.0, panel(), mix(line(), tint, 0.55), Some(tint));
     let x = rect.min.x + 22.0;
     let pw = p.pill("Working", Vec2::new(x, rect.min.y + 18.0), tint);
     let stage = if job.stage.trim().is_empty() { "Starting" } else { job.stage.as_str() };
@@ -261,7 +261,7 @@ fn report_card(
 ) -> (f32, Option<usize>) {
     let height = 58.0 + lines.len() as f32 * 22.0 + if buttons.is_empty() { 8.0 } else { 60.0 };
     let rect = Rect::from_min_size(Vec2::new(left, y), Vec2::new(width, height));
-    p.fill(rect, panel(), 12.0, Some(mix(line(), color, 0.45)));
+    p.elevated_card(rect, 12.0, panel(), mix(line(), color, 0.5), Some(color));
     let x = rect.min.x + 22.0;
     let dot = Rect::from_min_size(Vec2::new(x, rect.min.y + 24.0), Vec2::new(8.0, 8.0));
     p.fill(dot, color, 4.0, None);
@@ -470,7 +470,27 @@ pub fn quantize(p: &mut Paint, icons: &mut IconAtlas, area: Rect, scroll: f32, v
             a.goal = Some(*index);
         }
     }
-    y += 186.0 + 16.0;
+    y += 186.0 + 14.0;
+
+    // Nominal bits-per-weight ratio relative to FP16 (16 bpw), updating live with goal selection.
+    let (fmt_label, ratio, ratio_note) = match v.goal {
+        3 => ("Q6_K · ~6.6 bpw", 0.41f32, "~59% smaller than FP16"),
+        1 => ("Q4_K · ~4.5 bpw", 0.28f32, "~72% smaller than FP16"),
+        2 => ("Q4_0 · ~4.5 bpw", 0.28f32, "~72% smaller than FP16 · fastest throughput"),
+        _ => ("Q5_K · ~5.5 bpw", 0.34f32, "~66% smaller than FP16"),
+    };
+    let meter = Rect::from_min_size(Vec2::new(left, y), Vec2::new(width, 54.0));
+    p.card(meter);
+    p.text("Target footprint vs. FP16", Vec2::new(meter.min.x + 22.0, meter.min.y + 10.0), 12.5, true, look::text());
+    let summary = format!("{fmt_label}   ·   {ratio_note}");
+    let sw = measure_text(&summary, 12.5, false);
+    p.text(&summary, Vec2::new(meter.max.x - 22.0 - sw, meter.min.y + 10.0), 12.5, false, accent_hot());
+    let track = Rect::from_min_size(Vec2::new(meter.min.x + 22.0, meter.min.y + 33.0), Vec2::new(width - 44.0, 9.0));
+    p.fill(track, raised(), 4.5, Some(line()));
+    let fill_w = (track.width() * ratio).round().max(18.0);
+    let active_bar = Rect::from_min_size(track.min, Vec2::new(fill_w, track.height()));
+    p.fill(active_bar, accent(), 4.5, None);
+    y += 54.0 + 16.0;
 
     let run = Rect::from_min_size(Vec2::new(left, y), Vec2::new(width, 124.0));
     p.card(run);
@@ -635,7 +655,7 @@ pub fn uncensor(p: &mut Paint, icons: &mut IconAtlas, area: Rect, scroll: f32, v
 
     y = step_heading(p, left, y, width, "Step 2 — Check Method", "");
     let method = Rect::from_min_size(Vec2::new(left, y), Vec2::new(width, 318.0));
-    p.fill(method, panel(), 12.0, Some(mix(line(), violet(), 0.35)));
+    p.elevated_card(method, 12.0, mix(panel(), violet(), 0.03), mix(line(), violet(), 0.38), Some(violet()));
     let x = method.min.x + 24.0;
     let tw = p.pill("Recommended method", Vec2::new(x, method.min.y + 22.0), violet());
     p.text("Automatic refusal-direction search", Vec2::new(x + tw + 12.0, method.min.y + 22.0), 16.5, true, look::text());
@@ -952,12 +972,14 @@ pub fn models(p: &mut Paint, area: Rect, scroll: f32, rows: &[ModelRow]) -> Mode
 // ---------------------------------------------------------------- Overlays
 
 fn overlay(p: &mut Paint, window: Rect, size: Vec2) -> Rect {
-    p.fill(window, Color::rgba(6, 8, 11, 200), 0.0, None);
+    p.fill(window, Color::rgba(4, 7, 15, 210), 0.0, None);
     let rect = Rect::from_min_size(
         Vec2::new((window.center().x - size.x * 0.5).round(), (window.center().y - size.y * 0.5).round().max(look::BAR_H + 8.0)),
         size,
     );
-    p.fill(rect, look::bar(), 14.0, Some(line()));
+    p.shadow(rect, 14.0);
+    p.fill(rect, look::bar(), 14.0, Some(mix(line(), accent(), 0.3)));
+    p.specular_rim(rect, 14.0);
     rect
 }
 

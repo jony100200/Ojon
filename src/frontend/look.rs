@@ -29,39 +29,38 @@ struct Theme {
 }
 
 const DARK: Theme = Theme {
-    canvas: Color::rgb(14, 18, 23),
-    bar: Color::rgb(24, 31, 39),
-    panel: Color::rgb(27, 34, 43),
-    raised: Color::rgb(36, 45, 56),
-    line: Color::rgb(46, 57, 69),
-    text: Color::rgb(232, 236, 241),
-    muted: Color::rgb(148, 160, 174),
-    accent: Color::rgb(88, 191, 169),
-    accent_hot: Color::rgb(108, 207, 186),
-    accent_ink: Color::rgb(10, 28, 25),
-    violet: Color::rgb(176, 163, 232),
-    good: Color::rgb(102, 201, 148),
-    warn: Color::rgb(224, 177, 96),
-    bad: Color::rgb(226, 112, 112),
+    canvas: Color::rgb(10, 14, 24),
+    bar: Color::rgb(15, 20, 34),
+    panel: Color::rgb(21, 28, 46),
+    raised: Color::rgb(30, 40, 64),
+    line: Color::rgb(45, 58, 90),
+    text: Color::rgb(238, 243, 252),
+    muted: Color::rgb(148, 164, 194),
+    accent: Color::rgb(34, 211, 238),
+    accent_hot: Color::rgb(103, 232, 249),
+    accent_ink: Color::rgb(6, 22, 30),
+    violet: Color::rgb(174, 138, 255),
+    good: Color::rgb(74, 222, 128),
+    warn: Color::rgb(251, 191, 36),
+    bad: Color::rgb(248, 113, 113),
 };
 
-// A warm off-white, not pure white, with the accent and states darkened so they
-// still read as text on it.
+// Crisp cool-studio alabaster with high-contrast cyan & violet accents for daylight use.
 const LIGHT: Theme = Theme {
-    canvas: Color::rgb(241, 238, 232),
-    bar: Color::rgb(250, 248, 244),
-    panel: Color::rgb(251, 250, 247),
-    raised: Color::rgb(234, 230, 222),
-    line: Color::rgb(212, 206, 196),
-    text: Color::rgb(32, 38, 45),
-    muted: Color::rgb(88, 98, 110),
-    accent: Color::rgb(27, 127, 109),
-    accent_hot: Color::rgb(20, 104, 89),
+    canvas: Color::rgb(242, 245, 250),
+    bar: Color::rgb(252, 253, 255),
+    panel: Color::rgb(255, 255, 255),
+    raised: Color::rgb(234, 239, 247),
+    line: Color::rgb(207, 216, 230),
+    text: Color::rgb(20, 27, 42),
+    muted: Color::rgb(84, 96, 118),
+    accent: Color::rgb(8, 145, 178),
+    accent_hot: Color::rgb(14, 116, 144),
     accent_ink: Color::rgb(255, 255, 255),
-    violet: Color::rgb(102, 82, 190),
-    good: Color::rgb(28, 122, 74),
-    warn: Color::rgb(150, 96, 0),
-    bad: Color::rgb(180, 56, 56),
+    violet: Color::rgb(124, 58, 237),
+    good: Color::rgb(21, 128, 61),
+    warn: Color::rgb(180, 83, 9),
+    bad: Color::rgb(185, 28, 28),
 };
 
 static LIGHT_ON: AtomicBool = AtomicBool::new(false);
@@ -133,7 +132,7 @@ pub fn palette() -> ThemePalette {
         canvas: canvas(),
         surface: panel(),
         elevated: raised(),
-        elevated_high: Color::rgb(44, 54, 66),
+        elevated_high: if is_light() { Color::rgb(222, 229, 240) } else { Color::rgb(38, 50, 78) },
         border: line(),
         text: text(),
         text_muted: muted(),
@@ -304,25 +303,98 @@ impl Paint<'_> {
         self.text(text, pos, size, strong, color);
     }
 
-    /// A card: panel fill with a hairline; hover lifts the border a little.
+    /// Multi-pass soft elevation shadow beneath floating cards and dialogs.
+    pub fn shadow(&mut self, rect: Rect, radius: f32) {
+        let (a1, a2) = if is_light() { (10, 5) } else { (44, 22) };
+        let near = Rect::from_min_size(
+            Vec2::new(rect.min.x - 1.0, rect.min.y + 3.0),
+            Vec2::new(rect.width() + 2.0, rect.height() + 2.0),
+        );
+        let far = Rect::from_min_size(
+            Vec2::new(rect.min.x - 4.0, rect.min.y + 8.0),
+            Vec2::new(rect.width() + 8.0, rect.height() + 6.0),
+        );
+        self.fill(far, Color::rgba(2, 5, 12, a2), radius + 4.0, None);
+        self.fill(near, Color::rgba(2, 5, 12, a1), radius + 1.0, None);
+    }
+
+    /// Crisp 1px top-edge specular highlight giving surfaces directional depth.
+    pub fn specular_rim(&mut self, rect: Rect, radius: f32) {
+        let inset = radius.min(rect.width() * 0.25);
+        if rect.width() <= inset * 2.0 + 4.0 {
+            return;
+        }
+        let rim = if is_light() {
+            Color::rgba(255, 255, 255, 210)
+        } else {
+            Color::rgba(255, 255, 255, 22)
+        };
+        let y = rect.min.y + 1.0;
+        self.line(Vec2::new(rect.min.x + inset, y), Vec2::new(rect.max.x - inset, y), rim);
+    }
+
+    /// Elevated card surface with shadow, hover border lift, top rim, and optional accent bar.
+    pub fn elevated_card(&mut self, rect: Rect, radius: f32, fill: Color, border: Color, accent_top: Option<Color>) {
+        self.shadow(rect, radius);
+        self.fill(rect, fill, radius, Some(border));
+        self.specular_rim(rect, radius);
+        if let Some(tint) = accent_top {
+            let bar_w = (rect.width() - 40.0).min(120.0).max(32.0);
+            let bar = Rect::from_min_size(
+                Vec2::new(rect.center().x - bar_w * 0.5, rect.min.y),
+                Vec2::new(bar_w, 3.0),
+            );
+            self.fill(bar, tint, 1.5, None);
+        }
+    }
+
+    /// Draw an uploaded RGBA texture (e.g., the Ojon emblem) cleanly.
+    pub fn image(&mut self, rect: Rect, texture_id: u64) {
+        self.cmd.push(DrawCommand::Image {
+            rect,
+            texture_id,
+            uv_rect: Rect::from_min_max(Vec2::ZERO, Vec2::new(1.0, 1.0)),
+            tint: Color::WHITE,
+        });
+    }
+
+    /// A card: panel fill with soft elevation shadow, top rim, and hover border lift.
     pub fn card(&mut self, rect: Rect) {
-        let border = if self.hovered(rect) { mix(line(), muted(), 0.25) } else { line() };
-        self.fill(rect, panel(), RADIUS + 2.0, Some(border));
+        let hot = self.hovered(rect);
+        let fill = if hot { mix(panel(), raised(), 0.24) } else { panel() };
+        let border = if hot { mix(line(), accent(), 0.28) } else { line() };
+        self.elevated_card(rect, RADIUS + 2.0, fill, border, None);
     }
 
     pub fn button(&mut self, rect: Rect, label: &str, kind: Button) -> bool {
         let hot = self.hovered(rect);
         let (fill, border, ink) = match kind {
-            Button::Primary => (if hot { accent_hot() } else { accent() }, None, accent_ink()),
-            Button::Secondary => (if hot { raised() } else { panel() }, Some(line()), text()),
+            Button::Primary => (
+                if hot { accent_hot() } else { accent() },
+                Some(mix(accent_hot(), Color::WHITE, if hot { 0.35 } else { 0.12 })),
+                accent_ink(),
+            ),
+            Button::Secondary => (
+                if hot { raised() } else { mix(panel(), raised(), 0.35) },
+                Some(if hot { mix(line(), muted(), 0.38) } else { line() }),
+                text(),
+            ),
             Button::Violet => (
-                if hot { mix(raised(), violet(), 0.12) } else { raised() },
-                Some(mix(line(), violet(), 0.45)),
+                if hot { mix(raised(), violet(), 0.22) } else { mix(panel(), violet(), 0.11) },
+                Some(if hot { violet() } else { mix(line(), violet(), 0.55) }),
                 violet(),
             ),
         };
+        if kind == Button::Primary && hot {
+            let glow = Rect::from_min_size(
+                Vec2::new(rect.min.x - 2.0, rect.min.y - 2.0),
+                Vec2::new(rect.width() + 4.0, rect.height() + 4.0),
+            );
+            self.fill(glow, Color::rgba(accent().r, accent().g, accent().b, 48), 10.0, None);
+        }
         self.fill(rect, fill, 8.0, border);
-        self.centred(label, rect, 14.0, kind == Button::Primary, ink);
+        self.specular_rim(rect, 8.0);
+        self.centred(label, rect, 14.0, kind != Button::Secondary, ink);
         self.clicked(rect)
     }
 
@@ -344,9 +416,15 @@ impl Paint<'_> {
         w
     }
 
-    /// An icon in a soft rounded square.
+    /// An icon in a glowing tinted rounded badge.
     pub fn icon_tile(&mut self, icons: &mut IconAtlas, rect: Rect, icon: StudioIcon, color: Color) {
-        self.fill(rect, raised(), RADIUS, None);
+        let halo = Rect::from_min_size(
+            Vec2::new(rect.min.x - 3.0, rect.min.y - 3.0),
+            Vec2::new(rect.width() + 6.0, rect.height() + 6.0),
+        );
+        self.fill(halo, Color::rgba(color.r, color.g, color.b, if is_light() { 20 } else { 28 }), RADIUS + 3.0, None);
+        self.fill(rect, mix(raised(), color, 0.15), RADIUS, Some(mix(line(), color, 0.45)));
+        self.specular_rim(rect, RADIUS);
         let s = 22.0;
         let inner = Rect::from_min_size(
             Vec2::new(rect.center().x - s * 0.5, rect.center().y - s * 0.5),
@@ -386,28 +464,40 @@ pub struct BarActions {
     pub toggle_theme: bool,
 }
 
-/// The top bar: brand, the places, and "Process Model" (the app's one standing action).
-pub fn top_bar(p: &mut Paint, width: f32, current: Screen, busy: bool) -> BarActions {
+/// The top bar: brand emblem, the places, and "Process Model" (the app's one standing action).
+pub fn top_bar(p: &mut Paint, width: f32, current: Screen, busy: bool, brand_tex: Option<u64>) -> BarActions {
     let mut actions = BarActions::default();
     let bar = Rect::from_min_size(Vec2::ZERO, Vec2::new(width, BAR_H));
     p.fill(bar, self::bar(), 0.0, None);
     p.line(Vec2::new(0.0, BAR_H), Vec2::new(width, BAR_H), line());
 
-    let mark = Rect::from_min_size(Vec2::new(24.0, 14.0), Vec2::new(28.0, 28.0));
-    p.fill(mark, mix(self::bar(), accent(), 0.35), 7.0, Some(mix(self::bar(), accent(), 0.7)));
-    p.centred("O", mark, 15.0, true, accent_hot());
-    p.centred_y("Ojon", 62.0, bar, 18.0, true, text());
+    let mark = Rect::from_min_size(Vec2::new(24.0, 12.0), Vec2::new(32.0, 32.0));
+    if let Some(tex) = brand_tex {
+        p.image(mark, tex);
+    } else {
+        p.fill(mark, mix(self::bar(), accent(), 0.35), 8.0, Some(mix(self::bar(), accent(), 0.7)));
+        p.centred("O", mark, 15.0, true, accent_hot());
+    }
+    p.centred_y("Ojon", 64.0, bar, 18.0, true, text());
 
     for (screen, rect) in nav_rects(width) {
         let on = screen == current;
         let hot = p.hovered(rect);
+        let tab_accent = if screen == Screen::Uncensor { violet() } else { accent() };
+        let tab_hot = if screen == Screen::Uncensor { violet() } else { accent_hot() };
         if on {
-            p.fill(rect, mix(self::bar(), accent(), 0.16), 8.0, None);
+            p.fill(rect, mix(self::bar(), tab_accent, 0.16), 8.0, Some(mix(line(), tab_accent, 0.35)));
+            let bar_w = (rect.width() - 18.0).max(16.0);
+            let indicator = Rect::from_min_size(
+                Vec2::new(rect.center().x - bar_w * 0.5, rect.max.y - 3.0),
+                Vec2::new(bar_w, 2.5),
+            );
+            p.fill(indicator, tab_hot, 1.25, None);
         } else if hot {
             p.fill(rect, raised(), 8.0, None);
         }
-        let color = if on { accent_hot() } else if hot { text() } else { muted() };
-        p.centred(screen.label(), rect, 14.0, false, color);
+        let color = if on { tab_hot } else if hot { text() } else { muted() };
+        p.centred(screen.label(), rect, 14.0, on, color);
         if screen == Screen::Queue && busy {
             let dot = Rect::from_min_size(Vec2::new(rect.max.x - 9.0, rect.min.y + 5.0), Vec2::new(6.0, 6.0));
             p.fill(dot, accent(), 3.0, None);
@@ -487,31 +577,61 @@ fn state_color(state: &str) -> Color {
     }
 }
 
-/// Home: the two things Ojon does, what is running, and what ran before.
+/// Home: hero identity, the two things Ojon does, what is running, and what ran before.
 pub fn home(
     p: &mut Paint,
     icons: &mut IconAtlas,
     area: Rect,
     active: Option<&ActiveJob>,
     recent: &[RecentJob],
+    brand_tex: Option<u64>,
 ) -> HomeActions {
     let mut actions = HomeActions::default();
     let column = (area.width() - 48.0).min(976.0);
     let left = (area.center().x - column * 0.5).round();
     let right = left + column;
-    let mut y = area.min.y + 44.0;
+    let mut y = area.min.y + 28.0;
 
-    let title = Rect::from_min_size(Vec2::new(left, y), Vec2::new(column, 44.0));
-    p.centred("Ojon", title, 36.0, true, text());
-    y += 52.0;
-    let tag = Rect::from_min_size(Vec2::new(left, y), Vec2::new(column, 24.0));
-    p.centred("Powerful AI. Less memory. More freedom.", tag, 17.0, false, muted());
-    y += 56.0;
+    // Hero banner card matching the dual-tone violet + cyan identity of the Ojon icon.
+    let hero = Rect::from_min_size(Vec2::new(left, y), Vec2::new(column, 114.0));
+    p.elevated_card(hero, 14.0, mix(panel(), bar(), 0.25), mix(line(), accent(), 0.22), None);
+    let mid_x = hero.center().x;
+    p.fill(Rect::from_min_size(Vec2::new(hero.min.x + 28.0, hero.min.y), Vec2::new(mid_x - hero.min.x - 30.0, 2.5)), violet(), 1.25, None);
+    p.fill(Rect::from_min_size(Vec2::new(mid_x + 2.0, hero.min.y), Vec2::new(hero.max.x - 28.0 - (mid_x + 2.0), 2.5)), accent(), 1.25, None);
+
+    let mark_x = left + 28.0;
+    let mark_rect = Rect::from_min_size(Vec2::new(mark_x, hero.center().y - 30.0), Vec2::new(60.0, 60.0));
+    if let Some(tex) = brand_tex {
+        p.shadow(mark_rect, 14.0);
+        p.image(mark_rect, tex);
+    } else {
+        p.fill(mark_rect, mix(raised(), accent(), 0.28), 14.0, Some(accent()));
+        p.centred("O", mark_rect, 26.0, true, accent_hot());
+    }
+    let tx = mark_rect.max.x + 22.0;
+    p.text("Ojon", Vec2::new(tx, hero.min.y + 23.0), 32.0, true, text());
+    let badge_x = tx + measure_text("Ojon", 32.0, true) + 14.0;
+    p.pill("Local AI Studio", Vec2::new(badge_x, hero.min.y + 30.0), accent());
+    p.fitted(
+        "Powerful AI. Less memory. More freedom.",
+        Vec2::new(tx, hero.min.y + 66.0),
+        16.0,
+        false,
+        hero.width() - (tx - hero.min.x) - 240.0,
+        muted(),
+    );
+    let q_tag = "GGUF · W4A8 / W6A8";
+    let u_tag = "Measured Abliteration";
+    let qw = pill_width(q_tag);
+    let uw = pill_width(u_tag);
+    p.pill(q_tag, Vec2::new(hero.max.x - 28.0 - qw, hero.min.y + 30.0), accent());
+    p.pill(u_tag, Vec2::new(hero.max.x - 28.0 - uw, hero.min.y + 62.0), violet());
+    y = hero.max.y + 28.0;
 
     // The two jobs Ojon does. Only Quantize is filled: it is the common first step.
     let gap = 24.0;
     let card_w = ((column - gap) * 0.5).floor();
-    let card_h = 286.0;
+    let card_h = 278.0;
     let cards = [
         (
             StudioIcon::Cpu,
@@ -537,23 +657,26 @@ pub fn home(
             Vec2::new(left + i as f32 * (card_w + gap), y),
             Vec2::new(card_w, card_h),
         );
-        p.card(rect);
+        let hot = p.hovered(rect);
+        let fill = if hot { mix(panel(), tint, 0.08) } else { mix(panel(), tint, 0.03) };
+        let border = if hot { mix(line(), tint, 0.65) } else { mix(line(), tint, 0.28) };
+        p.elevated_card(rect, RADIUS + 2.0, fill, border, Some(tint));
         let x = rect.min.x + 32.0;
-        let tile = Rect::from_min_size(Vec2::new(x, rect.min.y + 32.0), Vec2::new(48.0, 48.0));
+        let tile = Rect::from_min_size(Vec2::new(x, rect.min.y + 30.0), Vec2::new(48.0, 48.0));
         p.icon_tile(icons, tile, icon, tint);
-        p.text(heading, Vec2::new(x, rect.min.y + 100.0), 21.0, true, text());
+        p.text(heading, Vec2::new(x, rect.min.y + 96.0), 21.0, true, text());
         for (n, line) in body.iter().enumerate() {
-            p.fitted(line, Vec2::new(x, rect.min.y + 136.0 + n as f32 * 23.0), 14.5, false, card_w - 64.0, muted());
+            p.fitted(line, Vec2::new(x, rect.min.y + 132.0 + n as f32 * 23.0), 14.5, false, card_w - 64.0, muted());
         }
         let button = Rect::from_min_size(
-            Vec2::new(x, rect.max.y - 32.0 - 44.0),
+            Vec2::new(x, rect.max.y - 30.0 - 44.0),
             Vec2::new(card_w - 64.0, 44.0),
         );
         if p.button(button, action, kind) {
             actions.go = Some(target);
         }
     }
-    y += card_h + 48.0;
+    y += card_h + 44.0;
 
     // What is running now.
     let dot = Rect::from_min_size(Vec2::new(left, y + 3.0), Vec2::new(8.0, 8.0));

@@ -22,6 +22,7 @@ $shell = New-Object -ComObject WScript.Shell
 $link = $shell.CreateShortcut((Join-Path $menu "Ojon.lnk"))
 $link.TargetPath = Join-Path $target "ojon-gui.exe"
 $link.WorkingDirectory = $target
+$link.IconLocation = "$(Join-Path $target 'ojon-gui.exe'),0"
 $link.Description = "Ojon: make models smaller"
 $link.Save()
 

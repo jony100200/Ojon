@@ -1,4 +1,5 @@
 pub mod diffusion;
+pub mod echo;
 pub mod diffusion_gguf;
 pub mod diffusion_sweep;
 pub mod gguf;

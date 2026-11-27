@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-PUBLIC_DOCS = {"README.md", "USER_GUIDE.md", "docs/MINIMAX_H3.md"}
+PUBLIC_DOCS = {"README.md", "USER_GUIDE.md", "docs/MINIMAX_H3.md", "docs/ECHO_RUST_QUANT.md"}
 PRIVATE_ROOTS = {
     "_local", "_private", "development", "research", "experiments",
     "session-logs", "logs", "_logs", "scratch", "_scratch",

@@ -37,7 +37,7 @@ use ui_platform::winit::{
     event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, NamedKey},
-    window::{Window, WindowAttributes, WindowId},
+    window::{Icon, Window, WindowAttributes, WindowId},
 };
 use ui_platform::PointerState;
 use ui_render::{CommandBuffer, CpuBackend, GpuBackend, RenderBackend, SoftwarePresenter};
@@ -137,6 +137,34 @@ fn pick_folder(description: &str) -> Option<PathBuf> {
 
 #[cfg(not(windows))]
 fn pick_folder(_description: &str) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(windows)]
+fn pick_save_gguf(initial_path: &str) -> Option<PathBuf> {
+    let init = Path::new(initial_path.trim());
+    let dir = init
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty() && p.exists())
+        .map(|p| p.to_string_lossy().replace('\'', "''"))
+        .unwrap_or_default();
+    let name = init
+        .file_name()
+        .map(|n| n.to_string_lossy().replace('\'', "''"))
+        .unwrap_or_else(|| "quantized-model.gguf".into());
+    let script = format!(
+        "Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.SaveFileDialog; $f.Title = 'Save Quantized GGUF As'; $f.Filter = 'GGUF Models (*.gguf)|*.gguf|All Files (*.*)|*.*'; $f.FileName = '{name}'; if ('{dir}' -ne '') {{ $f.InitialDirectory = '{dir}' }}; if ($f.ShowDialog() -eq 'OK') {{ [Console]::Out.WriteLine($f.FileName) }}"
+    );
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Sta", "-Command", &script])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!text.is_empty()).then(|| PathBuf::from(text))
+}
+
+#[cfg(not(windows))]
+fn pick_save_gguf(_initial_path: &str) -> Option<PathBuf> {
     None
 }
 
@@ -429,6 +457,7 @@ struct Workstation {
     tx: mpsc::Sender<WorkerEvent>,
     rx: mpsc::Receiver<WorkerEvent>,
     icons: IconAtlas,
+    brand_tex_id: Option<u64>,
     backends: Vec<FoundBackend>,
     pointer: PointerState,
     click_pulse: bool,
@@ -530,14 +559,14 @@ impl Workstation {
                 _ => {}
             }
         }
-        let output = default_output(&source, Precision::default());
         let initial_opt_output = settings.output_directory.clone().unwrap_or_else(|| {
-            Path::new(&output)
+            Path::new(&source)
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default()
         });
+        let output = default_output_in(&source, Precision::default(), &initial_opt_output);
         let detected_gpus = discover_runtime_gpu_devices();
         let job_history = load_job_history().unwrap_or_default();
         let setup_view = !backends.iter().any(|b| b.installed());
@@ -626,6 +655,7 @@ impl Workstation {
             busy: false,
             tx, rx,
             icons: IconAtlas::new(),
+            brand_tex_id: None,
             backends,
             pointer: PointerState::default(),
             click_pulse: false,
@@ -971,7 +1001,6 @@ impl Workstation {
             return;
         }
         self.source = path.to_string_lossy().into_owned();
-        self.output = default_output(&self.source, self.precision());
         self.model = None;
         self.model_topology = None;
         self.hf_folder = None;
@@ -985,10 +1014,13 @@ impl Workstation {
             .parent()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
-        self.opt_output = parent_dir.clone();
+        if self.opt_output.trim().is_empty() {
+            self.opt_output = parent_dir.clone();
+        }
         if self.unc_output.trim().is_empty() {
             self.unc_output = parent_dir;
         }
+        self.output = default_output_in(&self.source, self.precision(), &self.opt_output);
         self.status = "Model selected. Inspecting architecture and hardware fit...".into();
         self.needs_redraw = true;
         self.persist_local_settings(false);
@@ -1011,7 +1043,7 @@ impl Workstation {
         }
         let tx = self.tx.clone();
         if self.output.trim().is_empty() {
-            self.output = default_output(&self.source, self.precision());
+            self.output = default_output_in(&self.source, self.precision(), &self.opt_output);
         }
         self.status =
             "Reading model metadata and tensor topology without loading weights...".into();
@@ -2422,7 +2454,8 @@ impl Workstation {
             .is_some_and(|(prior, _)| self.optimize_request().is_ok_and(|now| now == *prior));
         let source_is_current = self.inspected_source.as_deref() == Some(self.source.as_str());
         let previous_precision = self.precision();
-        let auto_generated_output = self.output == default_output(&self.source, previous_precision);
+        let auto_generated_output =
+            self.output == default_output_in(&self.source, previous_precision, &self.opt_output);
         let mut cmds = CommandBuffer::new();
         let palette = look::palette();
         let mut click_pointer = self.pointer.clone();
@@ -2535,6 +2568,7 @@ impl Workstation {
         let mut browse_folder = false;
         let mut browse_opt_out = false;
         let mut browse_unc_out = false;
+        let mut browse_manual_out = false;
         let mut one_click_opt = false;
         let mut one_click_unc = false;
         let mut cancel_job = false;
@@ -2685,7 +2719,7 @@ impl Workstation {
         {
             let mut p = look::Paint::new(&mut cmds, &screen_pointer);
             p.fill(window_rect, look::canvas(), 0.0, None);
-            let bar = look::top_bar(&mut p, width, screen, busy);
+            let bar = look::top_bar(&mut p, width, screen, busy, self.brand_tex_id);
             go = bar.go;
             if bar.process_model {
                 browse_model = true;
@@ -2727,7 +2761,7 @@ impl Workstation {
                 })
                 .collect();
             let mut p = look::Paint::new(&mut cmds, &screen_pointer);
-            let home = look::home(&mut p, &mut self.icons, area, active.as_ref(), &recent);
+            let home = look::home(&mut p, &mut self.icons, area, active.as_ref(), &recent, self.brand_tex_id);
             if home.go.is_some() {
                 go = home.go;
             }
@@ -3747,9 +3781,14 @@ impl Workstation {
                             ]);
 
                             card.label("Destination GGUF path");
-                            if card.text_input(output, if new_focus == Some(Focus::Output) { "Destination output path..." } else { "Output path..." }).clicked() {
-                                new_focus = Some(Focus::Output);
-                            }
+                            card.horizontal(28.0, |out_row| {
+                                if out_row.text_input(output, if new_focus == Some(Focus::Output) { "Destination output path..." } else { "Output path..." }).clicked() {
+                                    new_focus = Some(Focus::Output);
+                                }
+                                if out_row.button_secondary("Browse...").clicked() {
+                                    browse_manual_out = true;
+                                }
+                            });
 
                             card.label("Quantizer executable");
                             if card.text_input(quantizer, "llama-quantize path...").clicked() {
@@ -4125,7 +4164,7 @@ impl Workstation {
             }
         }
         if auto_generated_output && previous_precision != self.precision() {
-            self.output = default_output(&self.source, self.precision());
+            self.output = default_output_in(&self.source, self.precision(), &self.opt_output);
             self.last_output = None;
         }
         if self.focus != new_focus {
@@ -4172,12 +4211,28 @@ impl Workstation {
         if browse_opt_out {
             if let Some(picked) = pick_folder("Select Optimization Output Directory") {
                 self.opt_output = picked.to_string_lossy().into_owned();
+                if auto_generated_output {
+                    self.output = default_output_in(&self.source, self.precision(), &self.opt_output);
+                }
+                self.persist_local_settings(false);
                 self.needs_redraw = true;
             }
         }
         if browse_unc_out {
             if let Some(picked) = pick_folder("Select Uncensor Output Directory") {
                 self.unc_output = picked.to_string_lossy().into_owned();
+                self.persist_local_settings(false);
+                self.needs_redraw = true;
+            }
+        }
+        if browse_manual_out {
+            if let Some(picked) = pick_save_gguf(&self.output) {
+                self.output = picked.to_string_lossy().into_owned();
+                if let Some(parent) = picked.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    self.opt_output = parent.to_string_lossy().into_owned();
+                    self.persist_local_settings(false);
+                }
+                self.last_output = None;
                 self.needs_redraw = true;
             }
         }
@@ -4290,7 +4345,7 @@ impl Workstation {
     }
 }
 
-fn default_output(source: &str, precision: Precision) -> String {
+fn default_output_in(source: &str, precision: Precision, output_dir: &str) -> String {
     if source.trim().is_empty() {
         return String::new();
     }
@@ -4302,9 +4357,18 @@ fn default_output(source: &str, precision: Precision) -> String {
     }
     .unwrap_or_default()
     .to_string_lossy();
-    path.with_file_name(format!("{stem}-{}.gguf", precision.as_str()))
-        .to_string_lossy()
-        .into_owned()
+    let file_name = format!("{stem}-Ojon-{}.gguf", precision.as_str());
+    let custom_dir = output_dir.trim();
+    if !custom_dir.is_empty() {
+        Path::new(custom_dir)
+            .join(file_name)
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        path.with_file_name(file_name)
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 struct DesktopApp {
@@ -4383,11 +4447,14 @@ impl ApplicationHandler for DesktopApp {
             width = width.min(screen.width * 0.94);
             height = height.min(screen.height * 0.86);
         }
-        let attrs = WindowAttributes::default()
+        let mut attrs = WindowAttributes::default()
             .with_title("Ojon (ওজন)  |  Kalponic Studio")
             .with_inner_size(LogicalSize::new(width, height))
             .with_min_inner_size(LogicalSize::new(1080.0, 720.0))
             .with_visible(false);
+        if let Ok(icon) = Icon::from_rgba(include_bytes!("../../assets/ojon_icon_64.rgba").to_vec(), 64, 64) {
+            attrs = attrs.with_window_icon(Some(icon));
+        }
         match loop_.create_window(attrs) {
             Ok(win) => {
                 let win = Arc::new(win);
@@ -4398,10 +4465,16 @@ impl ApplicationHandler for DesktopApp {
                     Ok(p) => self.presenter = Some(p),
                     Err(e) => eprintln!("CPU window presentation unavailable: {e}"),
                 }
+                let brand_rgba = include_bytes!("../../assets/ojon_icon_64.rgba");
+                let _ = self.cpu.upload_rgba8_image(1, 64, 64, brand_rgba);
                 match GpuBackend::new_for_window(win.clone(), s.width, s.height) {
-                    Ok(g) => self.gpu = Some(g),
+                    Ok(mut g) => {
+                        let _ = g.upload_rgba8_image(1, 64, 64, brand_rgba);
+                        self.gpu = Some(g);
+                    }
                     Err(e) => eprintln!("GPU renderer unavailable ({e}); trying CPU safe mode"),
                 }
+                self.ui.brand_tex_id = Some(1);
                 self.window = Some(win.clone());
                 if !self.ui.source.is_empty() {
                     self.ui.start_inspect();
@@ -4537,10 +4610,17 @@ fn run_auto_quant_cli(
     let base = request.output_dir.clone().unwrap_or_else(|| request.model.parent().unwrap_or(Path::new(".")).to_path_buf());
     // A folder that already holds a finished result is kept as it is: a repeat run gets
     // the next numbered folder. An unfinished one is resumed in place.
+    let named_gguf = format!("{stem}-Ojon-{preset}.gguf");
     let finished = |dir: &Path| {
-        ["recipe-receipt.json", "recipe-applied-receipt.json", "recipe.gguf", "recipe-applied.gguf"]
-            .iter()
-            .any(|name| dir.join(name).exists())
+        [
+            "recipe-receipt.json",
+            "recipe-applied-receipt.json",
+            "recipe.gguf",
+            "recipe-applied.gguf",
+            named_gguf.as_str(),
+        ]
+        .iter()
+        .any(|name| dir.join(name).exists())
     };
     let mut out = base.join(format!("{stem}-ojon-{preset}"));
     let mut run = 2;
@@ -4603,8 +4683,53 @@ fn run_auto_quant_cli(
     }
     let path = receipt.lock().unwrap().clone().ok_or("auto-quant finished without a receipt")?;
     let text = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let r: serde_json::Value = serde_json::from_slice(&text).map_err(|e| e.to_string())?;
+    let mut r: serde_json::Value = serde_json::from_slice(&text).map_err(|e| e.to_string())?;
+    promote_recipe_output(&mut r, &path, &out, &stem, preset);
     Ok(auto_quant_result(&r, &path))
+}
+
+fn promote_recipe_output(
+    r: &mut serde_json::Value,
+    receipt_path: &Path,
+    out_dir: &Path,
+    stem: &str,
+    preset: &str,
+) {
+    let applied = r["final"].is_null();
+    let Some(raw) = (if applied {
+        r["output"].as_str()
+    } else {
+        r["final"]["path"].as_str()
+    })
+    .map(str::to_owned) else {
+        return;
+    };
+    let src = Path::new(&raw);
+    let generic = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| matches!(n, "recipe.gguf" | "recipe-applied.gguf"));
+    if !generic || !src.is_file() {
+        return;
+    }
+    let dst = out_dir.join(format!("{stem}-Ojon-{preset}.gguf"));
+    if dst.exists() || std::fs::rename(src, &dst).is_err() {
+        return;
+    }
+    let src_txt = PathBuf::from(format!("{}.ojon-receipt.txt", src.display()));
+    let dst_txt = PathBuf::from(format!("{}.ojon-receipt.txt", dst.display()));
+    if src_txt.is_file() && !dst_txt.exists() {
+        let _ = std::fs::rename(&src_txt, &dst_txt);
+    }
+    let dst_str = dst.to_string_lossy().into_owned();
+    if applied {
+        r["output"] = serde_json::json!(dst_str);
+    } else if let Some(obj) = r["final"].as_object_mut() {
+        obj.insert("path".to_owned(), serde_json::json!(dst_str));
+    }
+    if let Ok(pretty) = serde_json::to_string_pretty(r) {
+        let _ = std::fs::write(receipt_path, pretty);
+    }
 }
 
 /// Receipt (`recipe-receipt.json` or a library apply receipt) -> results-panel value.
@@ -4683,6 +4808,27 @@ mod tests {
         assert_eq!(v["status"], "PROVISIONAL_CANDIDATE_FOUND");
         assert_eq!(v["provisional_candidate"]["path"], "t/recipe-applied.gguf");
         assert!(v["evidence"]["results"][0]["name"].as_str().unwrap().contains("0.0240"));
+    }
+
+    #[test]
+    fn custom_output_folder_and_recipe_name_promotion() {
+        let out = default_output_in("C:/models/Qwen3-8B-BF16.gguf", Precision::Q5KM, "D:/MyQuants");
+        assert_eq!(PathBuf::from(&out), PathBuf::from("D:/MyQuants/Qwen3-8B-BF16-Ojon-Q5_K_M.gguf"));
+
+        let tmp = std::env::temp_dir().join(format!("ojon_promote_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let src = tmp.join("recipe.gguf");
+        let rcpt = tmp.join("recipe-receipt.json");
+        std::fs::write(&src, b"gguf").unwrap();
+        let mut r = serde_json::json!({"final": {"path": src.to_string_lossy(), "bytes": 4u64}});
+        std::fs::write(&rcpt, serde_json::to_string(&r).unwrap()).unwrap();
+        promote_recipe_output(&mut r, &rcpt, &tmp, "Qwen3-8B-BF16", "balanced");
+        let expected = tmp.join("Qwen3-8B-BF16-Ojon-balanced.gguf");
+        assert!(expected.is_file());
+        assert!(!src.exists());
+        assert_eq!(PathBuf::from(r["final"]["path"].as_str().unwrap()), expected);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
